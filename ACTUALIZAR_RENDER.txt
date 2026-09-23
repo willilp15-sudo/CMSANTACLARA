@@ -1,0 +1,17 @@
+SANTA CLARA ERP V13.9.12 - ACTUALIZACION DE PRODUCCION
+
+1. NO borrar el servicio ni el disco persistente de Render.
+2. Copiar el CONTENIDO de esta carpeta sobre el repositorio local CMSANTACLARA.
+3. Reemplazar los archivos cuando Windows lo solicite.
+4. GitHub Desktop: Commit to main.
+5. GitHub Desktop: Push origin.
+6. Render desplegara automaticamente la nueva version.
+
+DATOS EXISTENTES
+La aplicacion usa SANTA_CLARA_DATA_DIR=/var/data en Render.
+La base queda en /var/data/santa_clara_v8.db, por lo que el despliegue del codigo
+NO reemplaza la base persistente existente.
+
+IMPORTANTE
+No subir ni reemplazar manualmente santa_clara_v8.db en Render.
+No borrar el disco santa-clara-data.

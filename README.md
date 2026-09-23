@@ -251,3 +251,11 @@ V13.6.5.1 FIX Configuración Empresa
 - Descarga PDF desde listado y detalle.
 - Impresión directa desde el detalle.
 - PDF incluye logo, período, detalle por prestación, porcentajes y totales LACED/Santa Clara.
+
+
+## V13.9.12 - Clientes = Pacientes
+- Todos los terceros registrados como CLIENTE se sincronizan automáticamente como pacientes.
+- El selector de Agendamiento muestra también todos los clientes existentes.
+- Se conserva tercero_id para que facturación, cuenta corriente y ficha del paciente correspondan a la misma persona.
+- Se evita duplicar pacientes ya vinculados y se intenta vincular registros existentes por documento.
+- Crear un paciente continúa creando su correspondiente cliente, manteniendo el modelo unificado.

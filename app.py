@@ -612,6 +612,7 @@ def api_tc():
 @app.route('/pacientes',methods=['GET','POST'])
 def pacientes():
  c=db()
+ sincronizar_clientes_pacientes(c)
  if request.method=='POST':
   cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,'PYG')",(request.form['documento'],request.form['nombre'],request.form.get('telefono')));tid=cur.lastrowid;c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();return redirect('/pacientes')
  rows=c.execute('select * from pacientes order by id desc').fetchall();c.close();return render_template('hospital_patients.html',rows=rows)
@@ -1217,6 +1218,7 @@ def agendamiento_v12():
    c.rollback();flash('No se pudo registrar el turno: '+str(ex))
   finally:c.close()
   return redirect('/agendamiento')
+ sincronizar_clientes_pacientes(c)
  pats=c.execute('select * from pacientes order by nombre').fetchall();meds=c.execute('select * from medicos order by nombre').fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall();formas=c.execute('select * from formas_cobro where activo=1 order by id').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();rows=c.execute('''select g.*,p.nombre paciente,p.documento,p.telefono,p.fecha_nacimiento,p.direccion,m.nombre medico,e.nombre especialidad,a.nombre aseguradora from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id left join especialidades e on e.id=g.especialidad_id left join aseguradoras a on a.id=g.aseguradora_id order by g.fecha desc,g.hora desc limit 300''').fetchall();c.close();return render_template('agenda_v12.html',pats=pats,meds=meds,asegs=asegs,formas=formas,cuentas=cuentas,poses=poses,rows=rows,pref_fecha=request.args.get('fecha',''),pref_hora=request.args.get('hora',''),pref_medico=request.args.get('medico_id',type=int))
 
 
@@ -1558,6 +1560,21 @@ def preparar_actualizacion_segura():
 backup_inicio()
 preparar_actualizacion_segura()
 init()
+
+def sincronizar_clientes_pacientes(c):
+ # En Santa Clara, CLIENTE y PACIENTE representan a la misma persona.
+ # Conserva las dos tablas por compatibilidad contable, pero asegura vínculo 1 a 1.
+ clientes=c.execute("select id,ruc,nombre,telefono from terceros where upper(coalesce(tipo,''))='CLIENTE' order by id").fetchall()
+ for t in clientes:
+  vinc=c.execute('select id from pacientes where tercero_id=?',(t['id'],)).fetchone()
+  if vinc:continue
+  por_doc=c.execute("select id,tercero_id from pacientes where documento=? and coalesce(documento,'')<>'' limit 1",(t['ruc'] or '',)).fetchone() if t['ruc'] else None
+  if por_doc:
+   if not por_doc['tercero_id']:c.execute('update pacientes set tercero_id=? where id=?',(t['id'],por_doc['id']))
+   continue
+  c.execute('insert into pacientes(documento,nombre,telefono,tercero_id) values(?,?,?,?)',(t['ruc'] or '',t['nombre'],t['telefono'],t['id']))
+ c.commit()
+
 init_v1357_codigo_barras()
 init_consultorio()
 init_modular()
@@ -2387,11 +2404,6 @@ def agenda_web_confirmacion():
  gid=request.args.get('id',type=int);c=db();r=c.execute("select g.fecha,g.hora,p.nombre paciente,m.nombre medico,m.especialidad from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id where g.id=? and g.creado_por='WEB'",(gid,)).fetchone();c.close();return render_template('public_booking_success.html',r=r)
 
 ROUTE_MODULE.update({'conciliacion_bancaria':'FINANZAS','conciliacion_bancaria_detalle':'FINANZAS'})
-
-@app.get('/health')
-def health():
- return {'status':'ok','version':'13.9.11'},200
-
 init_v1391()
 
 if __name__=='__main__':
