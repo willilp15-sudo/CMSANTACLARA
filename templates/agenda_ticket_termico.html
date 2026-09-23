@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Turno {{x.id}} - Santa Clara</title>
+<style>
+@page { size: 80mm auto; margin: 3mm; }
+*{box-sizing:border-box}
+body{font-family:Arial,Helvetica,sans-serif;width:74mm;margin:0 auto;color:#000;font-size:12px;line-height:1.25}
+.logo{text-align:center;margin:0 0 4px}.logo img{max-width:46mm;max-height:22mm;object-fit:contain}
+h1{font-size:15px;text-align:center;margin:3px 0} .center{text-align:center}
+.sep{border-top:1px dashed #000;margin:6px 0}
+.row{margin:3px 0}.label{font-weight:700}.hora{font-size:20px;font-weight:700;text-align:center;margin:6px 0}
+.small{font-size:10px}.no-print{text-align:center;margin:10px 0}
+button{font-size:14px;padding:7px 12px}
+@media print {.no-print{display:none} body{width:74mm}}
+</style>
+</head>
+<body>
+<div class="logo"><img src="{{url_for('static',filename='logo_santa_clara_cropped.png')}}" alt="Santa Clara"></div>
+<h1>COMPROBANTE DE AGENDAMIENTO</h1>
+<div class="center small">Turno N.º {{x.id}}</div>
+<div class="sep"></div>
+<div class="row"><span class="label">Paciente:</span> {{x.paciente}}</div>
+<div class="row"><span class="label">Documento:</span> {{x.documento or '-'}}</div>
+{% if x.telefono %}<div class="row"><span class="label">Teléfono:</span> {{x.telefono}}</div>{% endif %}
+<div class="sep"></div>
+<div class="row"><span class="label">Fecha:</span> {{x.fecha}}</div>
+<div class="hora">{{x.hora}}</div>
+<div class="row"><span class="label">Médico:</span> {{x.medico}}</div>
+<div class="row"><span class="label">Especialidad:</span> {{x.especialidad or '-'}}</div>
+<div class="row"><span class="label">Tipo / motivo:</span> {{x.motivo or 'Consulta médica'}}</div>
+{% if x.aseguradora %}<div class="row"><span class="label">Seguro:</span> {{x.aseguradora}}</div>{% else %}<div class="row"><span class="label">Atención:</span> Particular</div>{% endif %}
+<div class="sep"></div>
+<div class="row"><span class="label">Responsable del agendamiento:</span><br>{{responsable}}</div>
+<div class="row small"><span class="label">Registrado:</span> {{x.creado_en or '-'}}</div>
+<div class="sep"></div>
+<div class="center small">Centro Médico Santa Clara<br>Presentar este comprobante en Recepción.</div>
+<div class="no-print"><button onclick="window.print()">🖨 Imprimir en térmica</button></div>
+{% if autoprint %}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script>{% endif %}
+</body></html>

@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% block content %}
+<h2>Modificar admisión #{{a.id}}</h2>
+<p><a class="btn" href="/admisiones">← Volver a Admisiones</a></p>
+<form method="post" class="grid">
+<label>Fecha<input type="date" name="fecha" value="{{a.fecha}}" required></label>
+<label>Paciente<select name="paciente_id" required>{% for x in pats %}<option value="{{x.id}}" {% if x.id==a.paciente_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Tipo<select name="tipo">{% for t in ['CONSULTA','URGENCIA','INTERNACION','QUIROFANO'] %}<option {% if t==a.tipo %}selected{% endif %}>{{t}}</option>{% endfor %}</select></label>
+<label>Médico<select name="medico_id"><option value="">Sin médico</option>{% for x in med %}<option value="{{x.id}}" {% if x.id==a.medico_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Seguro<select name="aseguradora_id"><option value="">Particular</option>{% for x in aseg %}<option value="{{x.id}}" {% if x.id==a.aseguradora_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Cama<select name="cama_id"><option value="">Sin cama</option>{% for x in camas %}<option value="{{x.id}}" {% if x.id==a.cama_id %}selected{% endif %}>{{x.codigo}}</option>{% endfor %}</select></label>
+<label>Moneda<select name="moneda">{% for x in mons %}<option {% if x.codigo==a.moneda %}selected{% endif %}>{{x.codigo}}</option>{% endfor %}</select></label>
+<label>Tipo de cambio<input name="tipo_cambio" type="number" step=".0001" value="{{a.tipo_cambio or 1}}"></label>
+<label>Motivo de modificación<input name="motivo" placeholder="Ej.: corrección de cama o médico"></label>
+<button>💾 Guardar cambios</button>
+</form>{% endblock %}

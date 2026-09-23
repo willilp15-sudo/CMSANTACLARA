@@ -1,0 +1,5 @@
+{% extends 'base.html' %}{% block title %}Cuotas de Venta{% endblock %}{% block content %}
+<div class="toolbar"><a class="btn" href="/ventas/carga">← Volver</a><a class="btn" href="/finanzas">💳 Cuentas por cobrar</a></div>
+<div class="card"><h2>💳 Plan de cuotas de venta</h2><p><b>Factura:</b> {{v.numero}} &nbsp; <b>Cliente:</b> {{v.tercero}} &nbsp; <b>Total:</b> {{'{:,.2f}'.format(v.total or 0)}} {{v.moneda}} &nbsp; <b>Entrega inicial:</b> {{'{:,.2f}'.format(v.entrega_inicial or 0)}}</p></div>
+<div class="card table"><table><tr><th>Cuota</th><th>Vencimiento</th><th>Importe</th><th>Pagado</th><th>Saldo</th><th>Estado</th></tr>{% for q in cuotas %}<tr><td>{{q.numero}}</td><td>{{q.fecha_vencimiento}}</td><td>{{'{:,.2f}'.format(q.importe or 0)}}</td><td>{{'{:,.2f}'.format(q.pagado or 0)}}</td><td>{{'{:,.2f}'.format((q.importe or 0)-(q.pagado or 0))}}</td><td>{{q.estado_visual}}</td></tr>{% else %}<tr><td colspan="6">Sin cuotas registradas.</td></tr>{% endfor %}</table></div>
+{% endblock %}

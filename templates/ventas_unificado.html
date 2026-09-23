@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}Ventas{% endblock %}{% block content %}
+<div class="card"><h2>Ventas</h2><p>Recepción, caja, agendamiento, facturación y cobranzas en un único módulo.</p><div class="grid">
+<a class="btn" href="/ventas/recepcion-caja">🏥 Recepción y Caja</a>
+{% if has_perm('AGENDA') %}<a class="btn" href="/agendamiento">📅 Agendamiento</a>{% endif %}
+{% if has_perm('FACTURACION') %}<a class="btn" href="/ventas/carga">🧾 Ventas / Facturación</a>{% endif %}
+<a class="btn" href="/finanzas">💳 Créditos y Cobranzas</a><a class="btn" href="/recibos">🧾 Recibos de Pago</a><a class="btn" href="/bancos/cuentas">🏦 Cuentas Receptoras</a>
+</div></div>
+<div class="grid"><div class="card"><b>Agenda de hoy</b><h2>{{ agenda_hoy }}</h2></div><div class="card"><b>Pendientes de cobro</b><h2>{{ pendientes }}</h2></div><div class="card"><b>Ventas de hoy (Gs.)</b><h2>{{ '{:,.0f}'.format(ventas_hoy or 0) }}</h2></div><div class="card"><b>Recepción y Caja</b><h2>{{ 'ABIERTA' if ap else 'CERRADA' }}</h2></div></div>
+{% endblock %}
