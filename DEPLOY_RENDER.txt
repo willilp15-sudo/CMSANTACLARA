@@ -1,0 +1,12 @@
+SANTA CLARA ERP - DESPLIEGUE EN RENDER
+
+1. Suba el contenido de esta carpeta a un repositorio PRIVADO de GitHub.
+2. En Render: New > Blueprint y conecte el repositorio.
+3. Render detectará render.yaml.
+4. Cuando solicite ADMIN_PASSWORD, escriba una contraseña nueva y segura para el usuario admin.
+5. Confirme la creación del Web Service y del disco persistente.
+6. Espere el despliegue. Render mostrará la URL HTTPS pública.
+7. Abra /health para comprobar el servicio y luego /login.
+8. Primer acceso: usuario admin + la contraseña ADMIN_PASSWORD elegida.
+
+IMPORTANTE: el disco persistente es necesario porque esta versión usa SQLite. No use un servicio sin almacenamiento persistente para datos reales. Mantenga un solo worker de Gunicorn mientras se use SQLite.
