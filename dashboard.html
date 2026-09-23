@@ -1,0 +1,3 @@
+{% extends 'base.html' %}{% block title %}Dashboard{% endblock %}{% block content %}
+<section class="cards">{% for k,v in stats.items() %}<article class="card"><small>{{k}}</small><h2>{{'{:,.0f}'.format(v)}}</h2></article>{% endfor %}</section>
+{% endblock %}

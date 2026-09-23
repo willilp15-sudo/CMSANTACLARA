@@ -1,0 +1,6 @@
+{% extends 'base.html' %}{% block title %}Contabilidad{% endblock %}{% block content %}
+<h2>Contabilidad Integrada</h2>
+<div class="actions"><a class="btn" href="/contabilidad/plan">📚 Plan de Cuentas</a> <a class="btn" href="/contabilidad/informes">📊 Informes Contables</a> <a class="btn secondary" href="/libros">📖 Libros IVA</a></div>
+<p class="muted">Los informes se generan desde los asientos y documentos registrados. El plan es referencial y configurable para adecuarlo al sanatorio y a su profesional contable.</p>
+<h3>Balance de sumas y saldos</h3><div class="card table"><table><tr><th>Cuenta</th><th>Nombre</th><th>Debe Gs.</th><th>Haber Gs.</th><th>Saldo Gs.</th></tr>{% for r in bal %}<tr><td>{{r.codigo}}</td><td>{{r.nombre}}</td><td>{{'{:,.0f}'.format(r.debe)}}</td><td>{{'{:,.0f}'.format(r.haber)}}</td><td>{{'{:,.0f}'.format(r.saldo)}}</td></tr>{% endfor %}</table></div>
+<h3>Libro Diario</h3><div class="card table"><table><tr><th>Fecha</th><th>Asiento</th><th>Concepto</th><th>Cuenta</th><th>Debe</th><th>Haber</th><th>Moneda/TC</th></tr>{% for r in det %}<tr><td>{{r.fecha}}</td><td>{{r.numero}}</td><td>{{r.concepto}}</td><td>{{r.cuenta}} {{r.cuenta_nombre or ''}}</td><td>{{'{:,.0f}'.format(r.debe_pyg)}}</td><td>{{'{:,.0f}'.format(r.haber_pyg)}}</td><td>{{r.moneda}} @ {{r.tipo_cambio}}</td></tr>{% endfor %}</table></div>{% endblock %}

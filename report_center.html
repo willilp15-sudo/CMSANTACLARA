@@ -1,0 +1,4 @@
+{% extends 'base.html' %}{% block title %}Informes Específicos{% endblock %}{% block content %}
+<h2>Informes del Sistema</h2><p>Seleccione el área que desea consultar. Cada informe permite filtrar por período y visualizar el detalle operativo.</p>
+<div class="cards">{% for code,name,desc in groups %}<div class="card"><h3>{{name}}</h3><p>{{desc}}</p><a class="button" href="/informes/{{code}}">Abrir informes</a></div>{% endfor %}</div>
+{% endblock %}

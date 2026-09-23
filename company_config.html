@@ -1,0 +1,18 @@
+{% extends 'base.html' %}{% block title %}Configuración de la Empresa{% endblock %}{% block content %}
+<div class="card"><h2>⚙️ Configuración de la Empresa</h2><p>Estos datos se utilizan como identidad institucional en facturas, recibos, informes y documentos generados por el sistema.</p>
+<form method="post" enctype="multipart/form-data">
+<h3>Identificación</h3><div class="grid">
+<label>Razón Social<input name="razon_social" value="{{inst['razon_social'] or ''}}" required></label><label>Nombre de Fantasía<input name="nombre_fantasia" value="{{inst['nombre_fantasia'] or ''}}"></label>
+<label>RUC<input name="ruc" value="{{inst['ruc'] or ''}}"></label><label>DV<input name="dv" value="{{inst['dv'] or ''}}"></label>
+<label>Dirección<input name="direccion" value="{{inst['direccion'] or ''}}"></label><label>Ciudad<input name="ciudad" value="{{inst['ciudad'] or ''}}"></label><label>Departamento<input name="departamento" value="{{inst['departamento'] or ''}}"></label>
+<label>Teléfono<input name="telefono" value="{{inst['telefono'] or ''}}"></label><label>WhatsApp<input name="whatsapp" value="{{inst['whatsapp'] or ''}}"></label><label>Correo<input type="email" name="email" value="{{inst['email'] or ''}}"></label><label>Sitio web<input name="web" value="{{inst['web'] or ''}}"></label></div>
+<h3>Facturación y documentos</h3><div class="grid">
+<label>Timbrado<input name="timbrado" value="{{inst['timbrado'] or ''}}"></label><label>Establecimiento<input name="establecimiento" value="{{inst['establecimiento'] or ''}}"></label><label>Punto de expedición<input name="punto_expedicion" value="{{inst['punto_expedicion'] or ''}}"></label>
+<label>Vigencia desde<input type="date" name="timbrado_desde" value="{{inst['timbrado_desde'] or ''}}"></label><label>Vigencia hasta<input type="date" name="timbrado_hasta" value="{{inst['timbrado_hasta'] or ''}}"></label>
+<label>Prefijo factura<input name="prefijo_factura" value="{{inst['prefijo_factura'] or '001-001'}}"></label><label>Próximo N.º factura<input type="number" min="1" name="proximo_numero_factura" value="{{inst['proximo_numero_factura'] or 1}}"></label>
+<label>Prefijo recibo<input name="prefijo_recibo" value="{{inst['prefijo_recibo'] or 'REC'}}"></label><label>Próximo N.º recibo<input type="number" min="1" name="proximo_numero_recibo" value="{{inst['proximo_numero_recibo'] or 1}}"></label>
+<label>Ambiente SIFEN<select name="ambiente_sifen"><option value="SIN_INTEGRACION" {% if inst['ambiente_sifen']=='SIN_INTEGRACION' %}selected{% endif %}>Sin integración</option><option value="PRUEBAS" {% if inst['ambiente_sifen']=='PRUEBAS' %}selected{% endif %}>Pruebas</option><option value="PRODUCCION" {% if inst['ambiente_sifen']=='PRODUCCION' %}selected{% endif %}>Producción</option></select></label></div>
+<h3>Identidad visual</h3><div class="grid"><label>Logo institucional<input type="file" name="logo" accept="image/png,image/jpeg,image/webp"></label><div><b>Logo actual</b><br><img src="{{url_for('static',filename=inst['logo_archivo'] or 'logo_santa_clara_cropped.png')}}" style="max-width:220px;max-height:90px"></div></div>
+<label>Pie de documentos<textarea name="pie_documento" rows="3">{{inst['pie_documento'] or ''}}</textarea></label>
+<div style="margin-top:16px"><button class="btn" type="submit">💾 Guardar configuración</button></div></form></div>
+{% endblock %}

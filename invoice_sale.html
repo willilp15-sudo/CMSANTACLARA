@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% block title %}Factura {{v.numero}}{% endblock %}{% block content %}
+<style>@media print{.no-print,.sidebar,.topbar{display:none!important}.main{margin:0!important}.invoice{box-shadow:none!important;border:0!important}}</style>
+<div class="toolbar no-print"><a class="btn" href="/ventas/carga">← Volver</a><button onclick="window.print()">🖨 Imprimir</button><a class="btn" target="_blank" href="/ventas/{{v.id}}/factura/pdf">📄 PDF</a></div>
+<div class="card invoice">
+ <div style="display:flex;justify-content:space-between;gap:20px;align-items:flex-start;border-bottom:2px solid #222;padding-bottom:12px">
+  <div style="display:flex;gap:14px;align-items:center"><img src="/static/logo_santa_clara_cropped.png" style="max-width:150px;max-height:75px"><div><b>{{inst.razon_social if inst else 'Centro Médico Santa Clara'}}</b><br>RUC: {{inst.ruc if inst else '-'}}<br>{{inst.direccion if inst else ''}}</div></div>
+  <div style="border:1px solid #333;padding:10px;text-align:center;min-width:220px"><h2 style="margin:0">FACTURA</h2><b>N.º {{v.numero}}</b><br>Fecha: {{v.fecha}}<br>{{v.condicion_venta or ''}}</div>
+ </div>
+ <p><b>Cliente/Paciente:</b> {{v.cliente or '-'}} &nbsp; <b>RUC/CI:</b> {{v.ruc or '-'}}</p>
+ <p><b>Moneda:</b> {{v.moneda}} &nbsp; <b>Tipo de cambio:</b> {{v.tipo_cambio or 1}}</p>
+ <table><tr><th>Código</th><th>Descripción</th><th>Cantidad</th><th>Precio IVA incluido</th><th>IVA</th><th>Total</th></tr>{% for x in items %}<tr><td>{{x.codigo}}</td><td>{{x.nombre}}</td><td>{{'%.2f'|format(x.cantidad)}}</td><td>{{'{:,.0f}'.format(x.precio)}}</td><td>{{('Exento' if not x.iva_pct else ('%g%%'|format(x.iva_pct)))}}</td><td>{{'{:,.0f}'.format(x.total)}}</td></tr>{% endfor %}</table>
+ <div style="max-width:420px;margin-left:auto;margin-top:12px"><table><tr><td>Gravado 10%</td><td>{{'{:,.0f}'.format(v.gravado_10 or 0)}}</td></tr><tr><td>IVA 10%</td><td>{{'{:,.0f}'.format(v.iva_10 or 0)}}</td></tr><tr><td>Gravado 5%</td><td>{{'{:,.0f}'.format(v.gravado_5 or 0)}}</td></tr><tr><td>IVA 5%</td><td>{{'{:,.0f}'.format(v.iva_5 or 0)}}</td></tr><tr><td>Exento</td><td>{{'{:,.0f}'.format(v.exento_iva or 0)}}</td></tr><tr><th>TOTAL</th><th>{{'{:,.0f}'.format(v.total or 0)}} {{v.moneda}}</th></tr></table></div>
+ <p><b>Forma de pago:</b> {{v.forma_cobro or '-'}} {% if v.referencia_cobro %} · Ref. {{v.referencia_cobro}}{% endif %}</p>
+ {% if v.cdc %}<p><b>CDC:</b> {{v.cdc}} · <b>Estado SIFEN:</b> {{v.estado_sifen}}</p>{% else %}<small>Representación generada por el sistema. No se identifica como DTE aprobado por SIFEN mientras no exista CDC/aprobación.</small>{% endif %}
+</div>{% endblock %}
