@@ -32,3 +32,19 @@ main{transition:margin-left .22s ease;min-width:0}
 
 /* V13.9.0 - barra de módulos estilo ERP/NextSys */
 .erp-menu{position:sticky;top:0;z-index:1000;display:flex;align-items:center;gap:2px;flex-wrap:nowrap;overflow:visible;background:#153c32;padding:0 10px;min-height:46px;box-shadow:0 2px 8px #0002}.erp-brand{display:flex;align-items:center;gap:7px;color:white;font-weight:700;margin-right:8px;white-space:nowrap}.erp-brand img{height:34px;width:auto;background:white;border-radius:4px;padding:2px}.erp-menu>a,.erp-menu summary{display:block;color:#fff;text-decoration:none;padding:13px 10px;cursor:pointer;white-space:nowrap;font-size:14px}.erp-menu details{position:relative}.erp-menu details summary{list-style:none}.erp-menu details summary::-webkit-details-marker{display:none}.erp-menu details[open]>summary,.erp-menu details summary:hover,.erp-menu>a:hover{background:#205548}.erp-submenu{position:absolute;left:0;top:100%;min-width:250px;max-height:70vh;overflow:auto;background:#fff;border:1px solid #cfd8d4;box-shadow:0 8px 22px #0003;padding:5px;z-index:1200}.erp-submenu a{display:block;padding:9px 12px;color:#173d34;text-decoration:none;border-radius:4px}.erp-submenu a:hover{background:#e9f3ef}.erp-exit{margin-left:auto}.erp-workspace{min-width:0}.page-nav{display:flex;justify-content:flex-start;margin:8px 0}@media(max-width:900px){.erp-menu{overflow-x:auto;overflow-y:hidden}.erp-brand span{display:none}.erp-submenu{position:fixed;top:46px;left:8px;right:8px;min-width:auto}.erp-menu summary,.erp-menu>a{font-size:13px;padding:13px 8px}}
+
+/* V13.9.19 - Fondo institucional Santa Clara */
+body{
+  background-color:#f4f7fb;
+  background-image:linear-gradient(rgba(255,255,255,.76),rgba(255,255,255,.76)),url('/static/fondo_santa_clara.png');
+  background-size:cover;
+  background-position:center center;
+  background-repeat:no-repeat;
+  background-attachment:fixed;
+}
+.erp-workspace{background:transparent}
+.card{background:rgba(255,255,255,.94);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+.table{background:rgba(255,255,255,.92);border-radius:10px}
+header{background:rgba(255,255,255,.78);padding:10px 12px;border-radius:10px;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px)}
+@media(max-width:900px){body{background-attachment:scroll;background-position:center top}}
+@media print{body{background:#fff!important;background-image:none!important}.card,.table,header{background:#fff!important;backdrop-filter:none!important}}
