@@ -1,0 +1,31 @@
+{% extends 'base.html' %}{% block title %}Preparar ventas de Agenda{% endblock %}{% block content %}
+<h2>Preparar venta de turnos seleccionados</h2>
+<p class="muted">Agregue lo que corresponde facturar a cada paciente: consulta, procedimiento o producto. Puede agregar más de un concepto.</p>
+<form method="post" action="/agendamiento/generar-ventas" id="ventaAgendaForm">
+<input type="hidden" name="payload" id="payload">
+{% for r in rows %}
+<div class="panel agenda-sale" data-agenda="{{r.id}}">
+<h3>{{r.hora}} — {{r.paciente}}</h3>
+<p><b>{{r.aseguradora or 'PARTICULAR'}}</b> · {{r.medico}} · {{r.especialidad or ''}}</p>
+<table class="items"><thead><tr><th>Tipo</th><th>Concepto</th><th>Cant.</th><th>Precio Gs.</th><th></th></tr></thead><tbody></tbody></table>
+<div class="toolbar">
+<button type="button" onclick="addItem(this,'CONSULTA')">＋ Consulta</button>
+<button type="button" onclick="addItem(this,'PROCEDIMIENTO')">＋ Procedimiento</button>
+<button type="button" onclick="addItem(this,'PRODUCTO')">＋ Producto</button>
+</div></div>
+{% endfor %}
+<div class="toolbar"><button type="submit">💾 Generar venta(s)</button><a class="btn secondary" href="/agendamiento/turnos">Cancelar</a></div>
+</form>
+<template id="tplConsulta"><tr data-tipo="CONSULTA"><td>Consulta</td><td><input class="desc" value="Consulta médica"></td><td><input class="qty" type="number" min="1" value="1"></td><td><input class="price" type="number" min="0" value="0" required></td><td><button type="button" onclick="this.closest('tr').remove()">✕</button></td></tr></template>
+<template id="tplProcedimiento"><tr data-tipo="PROCEDIMIENTO"><td>Procedimiento</td><td><select class="ref" onchange="setPrice(this,'servicio')"><option value="">Seleccionar...</option>{% for s in servicios %}<option value="{{s.id}}" data-price="{{s.precio_pyg or 0}}">{{s.nombre}}</option>{% endfor %}</select></td><td><input class="qty" type="number" min="1" value="1"></td><td><input class="price" type="number" min="0" value="0" required></td><td><button type="button" onclick="this.closest('tr').remove()">✕</button></td></tr></template>
+<template id="tplProducto"><tr data-tipo="PRODUCTO"><td>Producto</td><td><select class="ref" onchange="setPrice(this,'producto')"><option value="">Seleccionar...</option>{% for p in productos %}<option value="{{p.id}}" data-price="{{p.precio_pyg or 0}}">{{p.nombre}} · Stock {{p.stock or 0}}</option>{% endfor %}</select></td><td><input class="qty" type="number" min="1" value="1"></td><td><input class="price" type="number" min="0" value="0" required></td><td><button type="button" onclick="this.closest('tr').remove()">✕</button></td></tr></template>
+<script>
+function addItem(btn,tipo){let card=btn.closest('.agenda-sale'),id=tipo==='CONSULTA'?'tplConsulta':tipo==='PROCEDIMIENTO'?'tplProcedimiento':'tplProducto';card.querySelector('tbody').append(document.getElementById(id).content.cloneNode(true))}
+function setPrice(sel){let o=sel.options[sel.selectedIndex];sel.closest('tr').querySelector('.price').value=o.dataset.price||0}
+document.querySelectorAll('.agenda-sale').forEach(c=>addItem(c.querySelector('button'),'CONSULTA'));
+document.getElementById('ventaAgendaForm').addEventListener('submit',e=>{
+ let grupos=[];document.querySelectorAll('.agenda-sale').forEach(c=>{let items=[];c.querySelectorAll('tbody tr').forEach(r=>{let tipo=r.dataset.tipo,ref=r.querySelector('.ref'),desc=r.querySelector('.desc');items.push({tipo:tipo,referencia_id:ref?ref.value:0,descripcion:desc?desc.value:'',cantidad:r.querySelector('.qty').value,precio:r.querySelector('.price').value})});grupos.push({agenda_id:c.dataset.agenda,items:items})});
+ if(grupos.some(g=>!g.items.length)){e.preventDefault();alert('Cada turno debe tener al menos un concepto.');return}
+ document.getElementById('payload').value=JSON.stringify(grupos)
+});
+</script>{% endblock %}

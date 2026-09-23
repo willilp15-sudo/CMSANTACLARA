@@ -177,11 +177,9 @@ def asiento(c,fecha,concepto,origen_tipo,origen_id,moneda,tc,lineas):
 def tc_fecha(c,fecha,moneda,tc_form):
  if moneda=='PYG':return 1.0
  tc=float(tc_form or 0)
- if tc<=0:
-  r=c.execute('select tipo from tipos_cambio where fecha=? and moneda=?',(fecha,moneda)).fetchone();tc=float(r['tipo']) if r else 0
- if tc<=0:raise ValueError('Debe indicar el tipo de cambio para '+moneda)
- c.execute('insert into tipos_cambio(fecha,moneda,tipo,fuente) values(?,?,?,?) on conflict(fecha,moneda) do update set tipo=excluded.tipo,fuente=excluded.fuente',(fecha,moneda,tc,'Manual'))
+ if tc<=0:tc=tc_dnit(c,fecha,moneda,'VENTA')
  return tc
+
 @app.before_request
 def auth():
  if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion') and 'user' not in session:return redirect('/login')
@@ -952,6 +950,7 @@ def modular_guard():
  # Permiso exacto por operación. Nunca basta VER para crear/editar/anular.
  reglas={
   'tipos_cambio':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
+  'cotizaciones_dnit':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),'movimientos_financieros_manuales':('FINANZAS','CREAR' if request.method=='POST' else 'VER'),'diferencia_cambio':('CONTABILIDAD','CREAR' if request.method=='POST' else 'VER'),
   'terceros':('FINANZAS','CREAR' if request.method=='POST' else 'VER'),
   'tercero_editar':('FINANZAS','EDITAR'),'tercero_eliminar':('FINANZAS','ANULAR'),
   'productos':('STOCK','CREAR' if request.method=='POST' else 'VER'),
@@ -991,7 +990,7 @@ def modular_guard():
   'mis_pacientes':('CONSULTORIO','VER'),'llamar_paciente':('CONSULTORIO','LLAMAR'),
   'historia_clinica_v12':('HISTORIA','HISTORIA' if request.method=='POST' else 'VER'),
   'liquidaciones_medicas':('FINANZAS','VER'),'liquidar_medico':('FINANZAS','EDITAR'),
-  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),'agenda_pendientes_facturacion':('FACTURACION','VER'),'agenda_facturar':('FACTURACION','FACTURAR'),'agenda_facturar_seleccion':('FACTURACION','FACTURAR'),'consultorio_prestaciones':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),'cierre_consultorio':('CONSULTORIO','VER'),
+  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),'agenda_pendientes_facturacion':('FACTURACION','VER'),'agenda_facturar':('FACTURACION','FACTURAR'),'agenda_facturar_seleccion':('FACTURACION','FACTURAR'),'agenda_preparar_venta':('FACTURACION','FACTURAR'),'agenda_generar_ventas':('FACTURACION','FACTURAR'),'consultorio_prestaciones':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),'cierre_consultorio':('CONSULTORIO','VER'),
   'laboratorio':('LABORATORIO','CREAR' if request.method=='POST' else 'VER'),
   'laboratorio_facturar_particular':('LABORATORIO','FACTURAR'),
   'laboratorio_pendientes_seguro':('LABORATORIO','VER'),
@@ -2000,6 +1999,100 @@ def agenda_turnos():
 
 
 @app.post('/agendamiento/facturar-seleccion')
+def init_v13915_agenda_venta():
+ c=db()
+ c.execute("""create table if not exists agenda_facturacion_items(
+ id integer primary key,agenda_id int not null,tipo text not null,referencia_id int,
+ descripcion text not null,cantidad real default 1,precio_pyg real default 0,iva_pct real default 10,
+ creado_por text,creado_en text)""")
+ c.commit();c.close()
+init_v13915_agenda_venta()
+
+@app.route('/agendamiento/preparar-venta',methods=['POST'])
+def agenda_preparar_venta():
+ ids=[]
+ for x in request.form.getlist('agenda_ids'):
+  try:ids.append(int(x))
+  except:pass
+ if not ids:
+  flash('Seleccione al menos un turno en la columna Fact.');return redirect(request.referrer or '/agendamiento/turnos')
+ c=db()
+ qmarks=','.join('?' for _ in ids)
+ rows=c.execute(f"""select g.*,p.nombre paciente,p.documento,m.nombre medico,e.nombre especialidad,a.nombre aseguradora
+ from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id
+ left join especialidades e on e.id=g.especialidad_id left join aseguradoras a on a.id=g.aseguradora_id
+ where g.id in ({qmarks}) order by g.fecha,g.hora""",ids).fetchall()
+ servicios=c.execute('select * from servicios order by nombre').fetchall()
+ productos=c.execute('select * from productos order by nombre').fetchall()
+ c.close()
+ return render_template('agenda_sale_prepare.html',rows=rows,servicios=servicios,productos=productos)
+
+@app.post('/agendamiento/generar-ventas')
+def agenda_generar_ventas():
+ import json
+ payload=request.form.get('payload') or '[]'
+ try: grupos=json.loads(payload)
+ except:grupos=[]
+ if not grupos:
+  flash('No hay prestaciones para facturar.');return redirect('/agendamiento/turnos')
+ c=db();ventas_creadas=0;seguros=0
+ try:
+  for gdata in grupos:
+   gid=int(gdata['agenda_id']);g=c.execute("""select g.*,p.tercero_id,e.nombre especialidad from agenda g join pacientes p on p.id=g.paciente_id left join especialidades e on e.id=g.especialidad_id where g.id=?""",(gid,)).fetchone()
+   if not g:continue
+   items=gdata.get('items') or []
+   if not items:raise ValueError('Cada turno seleccionado debe tener al menos una consulta, procedimiento o producto.')
+   total=0;detalle=[]
+   for it in items:
+    tipo=(it.get('tipo') or '').upper();rid=int(it.get('referencia_id') or 0);qty=float(it.get('cantidad') or 1);precio=float(it.get('precio') or 0)
+    if tipo not in ('CONSULTA','PROCEDIMIENTO','PRODUCTO') or qty<=0 or precio<0:raise ValueError('Revise el detalle de prestaciones.')
+    if tipo=='PRODUCTO':
+     r=c.execute('select * from productos where id=?',(rid,)).fetchone()
+     if not r:raise ValueError('Producto no encontrado.')
+     if float(r['stock'] or 0)<qty:raise ValueError('Stock insuficiente para '+r['nombre'])
+     desc=r['nombre'];iva=float(r['iva_pct'] or 0);costo=float(r['costo_pyg'] or 0)
+    elif tipo=='PROCEDIMIENTO':
+     r=c.execute('select * from servicios where id=?',(rid,)).fetchone()
+     if not r:raise ValueError('Procedimiento/servicio no encontrado.')
+     desc=r['nombre'];iva=10.0;costo=0
+    else:
+     desc=it.get('descripcion') or ('Consulta '+(g['especialidad'] or 'médica'));iva=10.0;costo=0
+    line=qty*precio;total+=line;detalle.append((tipo,rid,desc,qty,precio,line,iva,costo))
+   # Always preserve the sale header. For insurance, client is insurer; for particular, patient/client.
+   if g['aseguradora_id']:
+    aseg=c.execute('select tercero_id from aseguradoras where id=?',(g['aseguradora_id'],)).fetchone();cliente=(aseg['tercero_id'] if aseg else None)
+    if not cliente:raise ValueError('La aseguradora debe estar vinculada a un cliente para generar la venta.')
+    numero='SEG-'+g['fecha'].replace('-','')+'-'+str(gid).zfill(6);cond='CREDITO'
+   else:
+    cliente=g['tercero_id']
+    if not cliente:raise ValueError('El paciente debe estar vinculado a un cliente.')
+    numero='PAR-'+g['fecha'].replace('-','')+'-'+str(gid).zfill(6);cond='CONTADO'
+   grav=iva_total=exento=g10=i10=g5=i5=0
+   for _,_,_,_,_,line,ivap,_ in detalle:
+    base,iv=desglosar_iva_incluido(line,ivap);iva_total+=iv
+    if ivap==10:g10+=base;i10+=iv;grav+=base
+    elif ivap==5:g5+=base;i5+=iv;grav+=base
+    else:exento+=line
+   vid=c.execute("""insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta)
+    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(g['fecha'],cliente,numero,'PYG',1,grav,iva_total,exento,total,total,g10,i10,g5,i5,exento,cond)).lastrowid
+   for tipo,rid,desc,qty,precio,line,ivap,costo in detalle:
+    c.execute('insert into agenda_facturacion_items(agenda_id,tipo,referencia_id,descripcion,cantidad,precio_pyg,iva_pct,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?)',(gid,tipo,rid,desc,qty,precio,ivap,session.get('user'),now()))
+    if tipo=='PRODUCTO':
+     c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,rid,qty,precio,line,line,costo*qty,ivap))
+     c.execute('update productos set stock=stock-? where id=?',(qty,rid));c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'VENTA',?)",(g['fecha'],rid,'SALIDA',-qty,costo,vid))
+    if g['aseguradora_id']:
+     c.execute("""insert into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado)
+      values(?,?,?,?,?,?,?,?,?,'PENDIENTE')""",(g['fecha'],g['aseguradora_id'],g['paciente_id'],'AGENDA_VENTA',vid,'MEDICAMENTOS' if tipo=='PRODUCTO' else 'SERVICIOS SANATORIALES',desc,line,ivap))
+   saldo=total if g['aseguradora_id'] else 0
+   c.execute("insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)",(vid,cliente,'PYG',1,total,saldo,total,'PENDIENTE' if saldo else 'PAGADO'))
+   c.execute("update agenda set venta_id=?,factura_numero=?,facturada=1,condicion_venta=?,estado=case when estado='AGENDADO' then 'ATENDIDO' else estado end where id=?",(vid,numero,'SEGURO' if g['aseguradora_id'] else 'PARTICULAR',gid))
+   ventas_creadas+=1
+   if g['aseguradora_id']:seguros+=1
+  c.commit();audit('AGENDA_VENTAS_GENERADAS',f'ventas={ventas_creadas}; seguros={seguros}');flash(f'Se generaron {ventas_creadas} ventas. {seguros} fueron enviadas también a Pendientes de Facturación del Seguro.')
+ except Exception as ex:c.rollback();flash('No se pudieron generar las ventas: '+str(ex))
+ finally:c.close()
+ return redirect('/agendamiento/turnos')
+
 def agenda_facturar_seleccion():
  ids=[]
  for raw in request.form.getlist('agenda_ids'):
@@ -2472,12 +2565,13 @@ def agenda_web_reservar():
 def agenda_web_confirmacion():
  gid=request.args.get('id',type=int);c=db();r=c.execute("select g.fecha,g.hora,p.nombre paciente,m.nombre medico,m.especialidad from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id where g.id=? and g.creado_por='WEB'",(gid,)).fetchone();c.close();return render_template('public_booking_success.html',r=r)
 
-@app.get('/health')
-def health():
- return {'status':'ok','version':'13.9.14'},200
-
 ROUTE_MODULE.update({'conciliacion_bancaria':'FINANZAS','conciliacion_bancaria_detalle':'FINANZAS'})
 init_v1391()
+
+
+@app.get('/health')
+def health():
+    return {'status':'ok','version':'13.9.16'}, 200
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)

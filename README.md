@@ -278,3 +278,22 @@ V13.6.5.1 FIX Configuración Empresa
 - Turnos por seguro seleccionados pasan directamente a Pendientes de Facturación del Seguro.
 - Turnos particulares seleccionados quedan preparados para el circuito de facturación particular.
 - Se mantienen estados operativos y llamado de pacientes.
+
+
+## V13.9.15 - Venta automática desde Agenda
+- Al tildar Fact. y continuar, se abre Preparar Venta.
+- Por cada turno se pueden registrar Consulta, Procedimiento y/o Producto, incluso varios conceptos.
+- Se genera automáticamente una venta vinculada al turno.
+- Productos descuentan stock y generan movimiento.
+- Los turnos por seguro generan la venta y envían cada concepto a Pendientes de Facturación del Seguro.
+- Los particulares generan venta a nombre del paciente/cliente.
+
+
+## V13.9.16 - Finanzas multimoneda y diferencia de cambio
+- Cotización DNIT separada en Compra y Venta por fecha/moneda.
+- Las operaciones en moneda extranjera conservan la cotización histórica utilizada.
+- Movimientos financieros manuales con Cuenta Debe y Cuenta Haber.
+- Cada movimiento genera asiento contable balanceado.
+- Ajuste automático por diferencia de cambio por cuenta y moneda.
+- El ajuste genera asiento de ganancia o pérdida con cuentas seleccionables del Plan de Cuentas.
+- Flujo inspirado funcionalmente en sistemas administrativos tipo Dolphin, implementado de forma independiente.

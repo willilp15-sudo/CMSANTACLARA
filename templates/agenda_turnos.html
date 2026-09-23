@@ -3,7 +3,7 @@
 <div class="card"><form method="get" class="grid"><label>Fecha<input type="date" name="fecha" value="{{fecha}}" required></label><label>Profesional<select name="medico_id"><option value="">Todos</option>{% for m in meds %}<option value="{{m.id}}" {% if medico_id==m.id %}selected{% endif %}>{{m.nombre}}</option>{% endfor %}</select></label><label>Especialidad<select name="especialidad"><option value="">Todas</option>{% for e in especialidades %}<option {% if especialidad==e.especialidad %}selected{% endif %}>{{e.especialidad}}</option>{% endfor %}</select></label><button>🔍 Mostrar agenda</button></form>
 <div class="toolbar" style="margin-top:10px"><a class="btn" href="/agendamiento/horarios">⚙️ Horarios</a><a class="btn secondary" href="/agendamiento/nueva">➕ Turno fuera de grilla</a><a class="btn secondary" href="/seguros/facturar">🧾 Pendientes Seguro</a></div></div>
 
-<form method="post" action="/agendamiento/facturar-seleccion" id="formFact">
+<form method="post" action="/agendamiento/preparar-venta" id="formFact">
 <div class="card table"><table>
 <tr><th>Hora</th><th>Paciente</th><th>Seguro</th><th>Consulta</th><th style="text-align:center">Fact.</th><th>Profesional</th><th>Observación</th><th>Teléfono</th><th>Acciones</th></tr>
 {% for s in slots %}
@@ -23,7 +23,7 @@
 {% endif %}</td></tr>
 {% else %}<tr><td colspan="9">No hay horarios configurados para los filtros seleccionados.</td></tr>{% endfor %}
 </table></div>
-<div class="toolbar"><button type="submit">✓ Procesar seleccionados para facturación</button><span class="muted">Los turnos con seguro pasan directamente a Pendientes de Facturación del Seguro. Los particulares quedan preparados para facturación particular.</span></div>
+<div class="toolbar"><button type="submit">✓ Preparar venta de seleccionados</button><span class="muted">Al continuar podrá indicar Consulta, Procedimiento o Producto para cada turno. Los asegurados pasarán además a Pendientes del Seguro.</span></div>
 </form>
 <script>
 async function llamar(id){let r=await fetch('/llamar-paciente/'+id,{method:'POST'}),j=await r.json();if(!j.ok){alert(j.error||'No se pudo llamar');return}if('speechSynthesis' in window){speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(j.texto));}alert(j.texto)}
