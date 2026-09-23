@@ -196,7 +196,7 @@ def login():
 def logout():session.clear();return redirect('/login')
 @app.route('/')
 def home():
- c=db();stats={'Ventas (Gs.)':c.execute('select coalesce(sum(total_pyg),0) from ventas').fetchone()[0],'Compras (Gs.)':c.execute('select coalesce(sum(total_pyg),0) from compras').fetchone()[0],'CxC (Gs.)':c.execute('select coalesce(sum(importe_pyg*(saldo/importe)),0) from cxc where importe<>0').fetchone()[0],'CxP (Gs.)':c.execute('select coalesce(sum(importe_pyg*(saldo/importe)),0) from cxp where importe<>0').fetchone()[0]};c.close();return render_template('dashboard.html',stats=stats)
+ return render_template('dashboard.html')
 @app.route('/tipos-cambio',methods=['GET','POST'])
 def tipos_cambio():
  c=db()
@@ -822,17 +822,14 @@ def liquidaciones_medicas():
 def liquidar_medico():
  c=db()
  try:
-  fecha=request.form['fecha']; mid=int(request.form['medico_id']); qs=c.execute("select * from consultas where fecha=? and medico_id=? and estado='REALIZADA' and liquidacion_id is null",(fecha,mid)).fetchall()
-  if not qs: raise ValueError('No existen consultas pendientes de liquidación para ese médico y fecha.')
-  totalf=sum(x['precio_pyg'] for x in qs); totalh=sum(x['honorario_pyg'] for x in qs)
-  med=c.execute('select * from medicos where id=?',(mid,)).fetchone()
-  # La liquidación de honorarios es un documento ADMINISTRATIVO INTERNO.
-  # No genera CxP, asiento contable, IVA ni movimientos de caja/banco.
-  cur=c.execute("insert into liquidaciones_medicas(fecha,medico_id,total_consultas,total_facturado_pyg,total_honorario_pyg,estado,cxp_id,creado_en) values(?,?,?,?,?,'GENERADA',NULL,?)",(fecha,mid,len(qs),totalf,totalh,now())); lid=cur.lastrowid
-  c.execute('update consultas set liquidacion_id=? where fecha=? and medico_id=? and liquidacion_id is null',(lid,fecha,mid))
-  c.commit(); audit('LIQUIDACION_MEDICA_INTERNA',str(lid)); flash('Liquidación interna de honorarios generada correctamente. No afecta Contabilidad ni Cuentas por Pagar.')
- except Exception as e: c.rollback(); flash(str(e))
- finally: c.close()
+  fecha=request.form['fecha'];mid=int(request.form['medico_id']);qs=c.execute("select * from consultas where fecha=? and medico_id=? and estado='REALIZADA' and liquidacion_id is null order by hora,id",(fecha,mid)).fetchall()
+  if not qs:raise ValueError('No existen consultas o procedimientos pendientes de cierre.')
+  totalf=sum(float(x['precio_pyg'] or 0) for x in qs);totalh=sum(float(x['honorario_pyg'] or 0) for x in qs);nc=sum(1 for x in qs if (x['tipo_prestacion'] or 'CONSULTA')=='CONSULTA');np=sum(1 for x in qs if x['tipo_prestacion']=='PROCEDIMIENTO');npart=sum(1 for x in qs if not x['aseguradora_id']);nseg=len(qs)-npart
+  lid=c.execute("insert into liquidaciones_medicas(fecha,medico_id,total_consultas,total_facturado_pyg,total_honorario_pyg,estado,cxp_id,creado_en,total_procedimientos,particulares,seguros) values(?,?,?,?,?,'GENERADA',NULL,?,?,?,?)",(fecha,mid,nc,totalf,totalh,now(),np,npart,nseg)).lastrowid
+  for q in qs:c.execute('insert into liquidacion_medica_items(liquidacion_id,consulta_id,tipo_prestacion,paciente_id,aseguradora_id,importe_pyg,honorario_pyg,origen_facturacion,facturada) values(?,?,?,?,?,?,?,?,?)',(lid,q['id'],q['tipo_prestacion'] or 'CONSULTA',q['paciente_id'],q['aseguradora_id'],q['precio_pyg'],q['honorario_pyg'],q['origen_facturacion'] or ('SEGURO' if q['aseguradora_id'] else 'PARTICULAR'),q['facturada'] or 0))
+  c.execute("update consultas set liquidacion_id=? where fecha=? and medico_id=? and estado='REALIZADA' and liquidacion_id is null",(lid,fecha,mid));c.commit();audit('CIERRE_CONSULTORIO_MEDICO',str(lid));flash('Cierre generado con consultas y procedimientos, particulares y seguros.')
+ except Exception as e:c.rollback();flash(str(e))
+ finally:c.close()
  return redirect('/liquidaciones-medicas')
 
 def _filtros_consultas(c):
@@ -887,7 +884,7 @@ MODULES = {
  'PACIENTES':'Pacientes','CONSULTORIO':'Consultorio','URGENCIAS':'Urgencias','ADMISION':'Admisión / Internación',
  'QUIROFANO':'Quirófano','ENFERMERIA':'Enfermería','FARMACIA':'Farmacia interna','FACTURACION':'Facturación',
  'STOCK':'Productos y Stock','COMPRAS':'Compras','VENTAS':'Ventas','FINANZAS':'CxC/CxP/Caja/Bancos',
- 'CONTABILIDAD':'Contabilidad','INFORMES':'Informes','CONFIG_SANATORIO':'Configuración Sanatorial','USUARIOS':'Usuarios y Roles'
+ 'CONTABILIDAD':'Contabilidad','INFORMES':'Informes','LABORATORIO':'Laboratorio','CONFIG_SANATORIO':'Configuración Sanatorial','USUARIOS':'Usuarios y Roles'
 }
 ACTIONS=['VER','CREAR','EDITAR','ANULAR','FACTURAR','ALTA','TRASLADAR','SOLICITAR','AUTORIZAR','ENTREGAR','ADMINISTRAR']
 
@@ -943,6 +940,7 @@ def modular_guard():
  publicos={None,'login','logout','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion'}
  if request.endpoint in publicos:return
  if not session.get('user'):return redirect('/login')
+ if request.endpoint=='cambiar_mi_clave':return
 
  # Administración de usuarios/roles: permiso explícito y exclusivo.
  if request.endpoint and request.endpoint.startswith('admin_'):
@@ -991,7 +989,13 @@ def modular_guard():
   'mis_pacientes':('CONSULTORIO','VER'),'llamar_paciente':('CONSULTORIO','LLAMAR'),
   'historia_clinica_v12':('HISTORIA','HISTORIA' if request.method=='POST' else 'VER'),
   'liquidaciones_medicas':('FINANZAS','VER'),'liquidar_medico':('FINANZAS','EDITAR'),
-  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),
+  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),'agenda_pendientes_facturacion':('FACTURACION','VER'),'agenda_facturar':('FACTURACION','FACTURAR'),'consultorio_prestaciones':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),'cierre_consultorio':('CONSULTORIO','VER'),
+  'laboratorio':('LABORATORIO','CREAR' if request.method=='POST' else 'VER'),
+  'laboratorio_facturar_particular':('LABORATORIO','FACTURAR'),
+  'laboratorio_pendientes_seguro':('LABORATORIO','VER'),
+  'laboratorio_ventas_contado':('LABORATORIO','VER'),
+  'laboratorio_liquidaciones':('LABORATORIO','EDITAR' if request.method=='POST' else 'VER'),
+  'laboratorio_liquidacion_detalle':('LABORATORIO','VER'),'laboratorio_liquidacion_pdf':('LABORATORIO','VER'),
   'agendamiento_v12':('AGENDA','CREAR' if request.method=='POST' else 'VER'),
   'agenda_estado':('AGENDA','EDITAR'),'horarios_medicos':('AGENDA','EDITAR' if request.method=='POST' else 'VER'),
   'imprimir_agendamiento':('AGENDA','VER'),'cobrar_agenda':('CAJA','COBRAR'),
@@ -1012,6 +1016,26 @@ def modular_guard():
  # Para cualquier ruta interna mapeada, exigir al menos VER.
  m=ROUTE_MODULE.get(request.endpoint)
  if m and not user_has(m,'VER'):return ('Acceso no autorizado para este módulo',403)
+
+@app.route('/mi-cuenta/cambiar-clave',methods=['GET','POST'])
+def cambiar_mi_clave():
+ if request.method=='POST':
+  actual=request.form.get('clave_actual','');nueva=request.form.get('clave_nueva','');confirmar=request.form.get('confirmar_clave','')
+  if len(nueva)<6:
+   flash('La nueva contraseña debe tener al menos 6 caracteres.');return redirect('/mi-cuenta/cambiar-clave')
+  if nueva!=confirmar:
+   flash('La confirmación de la nueva contraseña no coincide.');return redirect('/mi-cuenta/cambiar-clave')
+  c=db();u=c.execute('select * from usuarios where usuario=? and activo=1',(session['user'],)).fetchone()
+  if not u or u['clave']!=h(actual):
+   c.close();flash('La contraseña actual es incorrecta.');return redirect('/mi-cuenta/cambiar-clave')
+  if h(nueva)==u['clave']:
+   c.close();flash('La nueva contraseña debe ser diferente de la contraseña actual.');return redirect('/mi-cuenta/cambiar-clave')
+  c.execute('update usuarios set clave=? where id=?',(h(nueva),u['id']))
+  audit_change(c,'CAMBIAR_CLAVE','USUARIO',u['id'],antes={'usuario':u['usuario']},despues={'usuario':u['usuario'],'clave':'ACTUALIZADA'})
+  c.commit();c.close()
+  flash('Contraseña actualizada correctamente.')
+  return redirect('/mi-cuenta/cambiar-clave')
+ return render_template('change_password.html')
 
 @app.route('/admin/usuarios-roles',methods=['GET','POST'])
 def admin_usuarios_roles():
@@ -1180,48 +1204,268 @@ def agendamiento_v12():
  if request.method=='POST':
   try:
    pid=int(request.form['paciente_id']);mid=int(request.form['medico_id']);fecha=request.form['fecha'];hora=request.form['hora']
-   m=c.execute('select * from medicos where id=?',(mid,)).fetchone();e=c.execute('select * from especialidades where nombre=?',(m['especialidad'],)).fetchone() if m else None;eid=e['id'] if e else None
-   precio=float((m['precio_consulta'] if m and m['precio_consulta'] else (e['precio_consulta'] if e else 0)) or 0)
-   honorario=float((m['honorario_consulta'] if m and m['honorario_consulta'] else (e['honorario_medico'] if e else 0)) or 0)
-   condicion=(request.form.get('condicion_venta') or 'CONTADO').upper();medio=(request.form.get('forma_cobro') or '').strip();ref=(request.form.get('referencia_cobro') or '').strip()
-   cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None
-   pos_id=int(request.form.get('terminal_pos_id') or 0) or None
-   if condicion not in ('CONTADO','CREDITO'):raise ValueError('Seleccione CONTADO o CRÉDITO')
-   if condicion=='CONTADO' and medio not in ('Efectivo','Banco','Transferencia','POS'):raise ValueError('Seleccione la forma de cobro: Efectivo, Banco, Transferencia o POS')
-   if condicion in ('CONTADO','CUOTAS') and (condicion=='CONTADO' or entrega>0) and medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir Recepción y Caja antes de cobrar una consulta en efectivo')
-   if condicion in ('CONTADO','CUOTAS') and (condicion=='CONTADO' or entrega>0) and medio in ('Banco','Transferencia','POS') and not cuenta_id:raise ValueError('Seleccione la cuenta bancaria receptora')
-   if condicion in ('CONTADO','CUOTAS') and (condicion=='CONTADO' or entrega>0) and medio=='POS' and not pos_id:raise ValueError('Seleccione la terminal POS')
-   pte=c.execute('select * from pacientes where id=?',(pid,)).fetchone()
-   if not pte or not pte['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente para poder facturar')
-   tercero_id=int(pte['tercero_id']);aseg=request.form.get('aseguradora_id') or None
-   # Seguro: registrar atención y dejarla pendiente, sin factura inmediata.
-   if aseg:
-    aseg=int(aseg);cura=c.execute("insert into agenda(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,motivo,precio_pyg,cobrado,creado_por,creado_en,facturada,condicion_venta) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,hora,pid,mid,eid,aseg,request.form.get('motivo'),precio,0,session['user'],now(),0,'SEGURO'));gid=cura.lastrowid
-    qid=c.execute('insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,admision_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,hora,pid,mid,eid,aseg,None,'PYG',1,precio,honorario,precio,honorario,request.form.get('motivo'),'REALIZADA')).lastrowid
-    c.execute('update agenda set consulta_id=? where id=?',(qid,gid));c.execute("insert into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado) values(?,?,?,?,?,?,?,?,?,'PENDIENTE')",(fecha,aseg,pid,'CONSULTA',qid,'SERVICIOS SANATORIALES','Consulta - '+(e['nombre'] if e else 'Consulta médica'),precio,10));c.commit();audit('CONSULTA_SEGURO_PENDIENTE',f'Agenda {gid} / Consulta {qid}');flash('Consulta registrada y PENDIENTE DE FACTURACIÓN AL SEGURO.');return redirect('/agendamiento?imprimir='+str(gid))
-   siguiente=c.execute('select coalesce(max(id),0)+1 from ventas').fetchone()[0];numero='CONS-'+fecha.replace('-','')+'-'+str(siguiente).zfill(6)
-   iva_pct=10.0;base,iva=desglosar_iva_incluido(precio,iva_pct)
-   curv=c.execute('''insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,referencia_cobro)
-                    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,tercero_id,numero,'PYG',1,base,iva,0,precio,precio,base,iva,0,0,0,condicion,medio or None,ref or None));vid=curv.lastrowid
-   c.execute('update ventas set cuenta_bancaria_id=?,terminal_pos_id=? where id=?',(cuenta_id,pos_id,vid))
-   c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,None,1,precio,base,base,0,iva_pct))
-   saldo=0 if condicion=='CONTADO' else precio;estado_cxc='PAGADO' if condicion=='CONTADO' else 'PENDIENTE'
-   c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,tercero_id,'PYG',1,precio,saldo,precio,estado_cxc))
-   if condicion=='CONTADO':
-    c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id,terminal_pos_id) values(?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,precio,precio,'Cobro consulta en Recepción','VENTA_CONSULTA',vid,cuenta_id,pos_id))
-    if medio=='Efectivo':
-     ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro consulta '+numero,precio,'VENTA_CONSULTA',vid,session.get('user')))
-   cuenta_debe='1.1.01' if condicion=='CONTADO' else '1.1.02'
-   asiento(c,fecha,'Consulta facturada '+numero,'VENTA_CONSULTA',vid,'PYG',1,[(cuenta_debe,precio,0,precio,'Consulta '+condicion.lower()),('4.1.03',0,base,base,'Ingreso por consulta'),('2.1.02',0,iva,iva,'IVA débito')])
-   cura=c.execute('''insert into agenda(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,motivo,precio_pyg,cobrado,creado_por,creado_en,venta_id,factura_numero,condicion_venta,forma_cobro,facturada)
-                     values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)''',(fecha,hora,pid,mid,eid,aseg,request.form.get('motivo'),precio,1 if condicion=='CONTADO' else 0,session['user'],now(),vid,numero,condicion,medio or None));gid=cura.lastrowid
-   curq=c.execute('insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,admision_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,hora,pid,mid,eid,aseg,None,'PYG',1,precio,honorario,precio,honorario,request.form.get('motivo'),'REALIZADA'));qid=curq.lastrowid
-   c.execute('update agenda set consulta_id=? where id=?',(qid,gid));c.commit();audit('CONSULTA_FACTURADA_RECEPCION',f'Agenda {gid} / Venta {vid} / {numero}');flash('Consulta registrada y facturada correctamente: '+numero);c.close();return redirect('/agendamiento?imprimir='+str(gid))
+   m=c.execute('select * from medicos where id=?',(mid,)).fetchone()
+   if not m:raise ValueError('Médico no encontrado.')
+   e=c.execute('select * from especialidades where nombre=?',(m['especialidad'],)).fetchone();eid=e['id'] if e else None
+   precio=float((m['precio_consulta'] if m['precio_consulta'] else (e['precio_consulta'] if e else 0)) or 0)
+   aseg=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None
+   origen='SEGURO' if aseg else 'PARTICULAR'
+   gid=c.execute("insert into agenda(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,motivo,precio_pyg,cobrado,creado_por,creado_en,facturada,condicion_venta) values(?,?,?,?,?,?,?,?,0,?,?,0,?)",(fecha,hora,pid,mid,eid,aseg,request.form.get('motivo'),precio,session['user'],now(),origen)).lastrowid
+   c.commit();audit('AGENDAMIENTO_REGISTRADO',f'Agenda {gid} / {origen}');flash('Turno registrado. Queda pendiente de facturación.')
+   return redirect('/agendamiento?imprimir='+str(gid))
   except Exception as ex:
-   c.rollback();flash('No se pudo registrar/facturar la consulta: '+str(ex))
+   c.rollback();flash('No se pudo registrar el turno: '+str(ex))
   finally:c.close()
   return redirect('/agendamiento')
  pats=c.execute('select * from pacientes order by nombre').fetchall();meds=c.execute('select * from medicos order by nombre').fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall();formas=c.execute('select * from formas_cobro where activo=1 order by id').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();rows=c.execute('''select g.*,p.nombre paciente,p.documento,p.telefono,p.fecha_nacimiento,p.direccion,m.nombre medico,e.nombre especialidad,a.nombre aseguradora from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id left join especialidades e on e.id=g.especialidad_id left join aseguradoras a on a.id=g.aseguradora_id order by g.fecha desc,g.hora desc limit 300''').fetchall();c.close();return render_template('agenda_v12.html',pats=pats,meds=meds,asegs=asegs,formas=formas,cuentas=cuentas,poses=poses,rows=rows,pref_fecha=request.args.get('fecha',''),pref_hora=request.args.get('hora',''),pref_medico=request.args.get('medico_id',type=int))
+
+
+
+def init_v1398_flujo_consultorio():
+ c=db()
+ q={r['name'] for r in c.execute('pragma table_info(consultas)').fetchall()}
+ for col,typ in [('agenda_id','INT'),('tipo_prestacion',"TEXT DEFAULT 'CONSULTA'"),('servicio_id','INT'),('origen_facturacion','TEXT'),('facturada','INT DEFAULT 0'),('venta_id','INT')]:
+  if col not in q:c.execute('alter table consultas add column '+col+' '+typ)
+ l={r['name'] for r in c.execute('pragma table_info(liquidaciones_medicas)').fetchall()}
+ for col,typ in [('total_procedimientos','INT DEFAULT 0'),('particulares','INT DEFAULT 0'),('seguros','INT DEFAULT 0')]:
+  if col not in l:c.execute('alter table liquidaciones_medicas add column '+col+' '+typ)
+ c.execute('create table if not exists liquidacion_medica_items(id integer primary key,liquidacion_id int,consulta_id int unique,tipo_prestacion text,paciente_id int,aseguradora_id int,importe_pyg real,honorario_pyg real,origen_facturacion text,facturada int default 0)')
+ c.commit();c.close()
+init_v1398_flujo_consultorio()
+
+@app.route('/agenda/pendientes-facturacion')
+def agenda_pendientes_facturacion():
+ c=db();rows=c.execute("""select g.*,p.nombre paciente,p.documento,m.nombre medico,e.nombre especialidad,a.nombre aseguradora
+ from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id
+ left join especialidades e on e.id=g.especialidad_id left join aseguradoras a on a.id=g.aseguradora_id
+ where coalesce(g.facturada,0)=0 and coalesce(g.estado,'AGENDADO')<>'CANCELADO' order by g.fecha,g.hora""").fetchall()
+ c.close();return render_template('agenda_pending_billing.html',rows=rows)
+
+@app.post('/agenda/<int:gid>/facturar')
+def agenda_facturar(gid):
+ c=db()
+ try:
+  g=c.execute("""select g.*,p.tercero_id,m.nombre medico,e.nombre especialidad from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id left join especialidades e on e.id=g.especialidad_id where g.id=?""",(gid,)).fetchone()
+  if not g:raise ValueError('Turno no encontrado.')
+  if g['facturada']:raise ValueError('El turno ya fue procesado para facturación.')
+  med=c.execute('select * from medicos where id=?',(g['medico_id'],)).fetchone();hon=float((med['honorario_consulta'] if med else 0) or 0);precio=float(g['precio_pyg'] or 0)
+  qid=c.execute("""insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado,agenda_id,tipo_prestacion,origen_facturacion,facturada)
+  values(?,?,?,?,?,?,'PYG',1,?,?,?,?,?,'REALIZADA',?,'CONSULTA',?,0)""",(g['fecha'],g['hora'],g['paciente_id'],g['medico_id'],g['especialidad_id'],g['aseguradora_id'],precio,hon,precio,hon,g['motivo'],gid,'SEGURO' if g['aseguradora_id'] else 'PARTICULAR')).lastrowid
+  c.execute('update agenda set consulta_id=? where id=?',(qid,gid))
+  if g['aseguradora_id']:
+   c.execute("""insert or ignore into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado)
+   values(?,?,?,?,?,?,?,?,?,'PENDIENTE')""",(g['fecha'],g['aseguradora_id'],g['paciente_id'],'CONSULTA',qid,'SERVICIOS SANATORIALES','Consulta - '+(g['especialidad'] or 'Consulta médica'),precio,10))
+   c.execute("update agenda set facturada=1,condicion_venta='SEGURO' where id=?",(gid,));flash('Consulta enviada a pendientes de facturación del seguro.')
+  else:
+   # Particular queda en lista para emitir la factura desde Ventas/Facturación, sin cobrar al agendar.
+   c.execute("update agenda set condicion_venta='PARTICULAR' where id=?",(gid,));flash('Consulta particular registrada como realizada y pendiente de emisión de factura.')
+  c.commit();audit('CONSULTA_REALIZADA_PENDIENTE_FACTURACION',str(gid))
+ except Exception as ex:c.rollback();flash(str(ex))
+ finally:c.close()
+ return redirect('/agenda/pendientes-facturacion')
+
+@app.route('/consultorio/prestaciones',methods=['GET','POST'])
+def consultorio_prestaciones():
+ c=db()
+ if request.method=='POST':
+  try:
+   sid=int(request.form['servicio_id']);s=c.execute('select * from servicios where id=?',(sid,)).fetchone()
+   if not s:raise ValueError('Servicio no encontrado.')
+   mid=int(request.form['medico_id']);med=c.execute('select * from medicos where id=?',(mid,)).fetchone();esp=c.execute('select id from especialidades where nombre=?',(med['especialidad'],)).fetchone() if med else None
+   aseg=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None;precio=float(request.form.get('precio') or s['precio_pyg'] or 0);hon=float(request.form.get('honorario_medico') or 0)
+   c.execute("""insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado,tipo_prestacion,servicio_id,origen_facturacion,facturada)
+   values(?,?,?,?,?,?,'PYG',1,?,?,?,?,?,'REALIZADA','PROCEDIMIENTO',?,?,0)""",(request.form['fecha'],request.form.get('hora'),int(request.form['paciente_id']),mid,esp['id'] if esp else None,aseg,precio,hon,precio,hon,request.form.get('observacion'),sid,'SEGURO' if aseg else 'PARTICULAR'))
+   c.commit();audit('PROCEDIMIENTO_CONSULTORIO',str(mid));flash('Procedimiento registrado para el cierre del consultorio.')
+  except Exception as ex:c.rollback();flash(str(ex))
+  finally:c.close()
+  return redirect('/consultorio/prestaciones')
+ pats=c.execute('select * from pacientes order by nombre').fetchall();meds=c.execute('select * from medicos order by nombre').fetchall();servs=c.execute('select * from servicios order by nombre').fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall()
+ rows=c.execute("""select q.*,p.nombre paciente,m.nombre medico,s.nombre servicio,a.nombre aseguradora from consultas q join pacientes p on p.id=q.paciente_id join medicos m on m.id=q.medico_id left join servicios s on s.id=q.servicio_id left join aseguradoras a on a.id=q.aseguradora_id where q.tipo_prestacion='PROCEDIMIENTO' order by q.fecha desc,q.id desc limit 200""").fetchall();c.close()
+ return render_template('office_procedures.html',pats=pats,meds=meds,servs=servs,asegs=asegs,rows=rows)
+
+@app.route('/consultorio/cierre')
+def cierre_consultorio():
+ c=db();fecha=request.args.get('fecha') or datetime.date.today().isoformat();mid=request.args.get('medico_id',type=int);meds=c.execute('select * from medicos order by nombre').fetchall();rows=[];res=None
+ if mid:
+  rows=c.execute("""select q.*,p.nombre paciente,s.nombre servicio,a.nombre aseguradora from consultas q join pacientes p on p.id=q.paciente_id left join servicios s on s.id=q.servicio_id left join aseguradoras a on a.id=q.aseguradora_id where q.fecha=? and q.medico_id=? and q.estado='REALIZADA' and q.liquidacion_id is null order by q.hora,q.id""",(fecha,mid)).fetchall()
+  res={'cantidad':len(rows),'consultas':sum(1 for x in rows if (x['tipo_prestacion'] or 'CONSULTA')=='CONSULTA'),'procedimientos':sum(1 for x in rows if x['tipo_prestacion']=='PROCEDIMIENTO'),'particulares':sum(1 for x in rows if not x['aseguradora_id']),'seguros':sum(1 for x in rows if x['aseguradora_id']),'facturado':sum(float(x['precio_pyg'] or 0) for x in rows),'honorarios':sum(float(x['honorario_pyg'] or 0) for x in rows)}
+ c.close();return render_template('office_closure.html',fecha=fecha,meds=meds,mid=mid,rows=rows,res=res)
+
+
+
+# ===== V13.9.9: Laboratorio LACED =====
+def init_v1399_laboratorio():
+ c=db()
+ # Migración puntual: el módulo es nuevo. Solo ADMINISTRADOR recibe acceso inicial completo.
+ # No se reponen ni modifican permisos de los demás roles.
+ admin=c.execute("select id from roles where nombre='ADMINISTRADOR'").fetchone()
+ if admin:
+  for act in ACTIONS:
+   c.execute("insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)",(admin['id'],'LABORATORIO',act))
+ c.executescript("""
+ CREATE TABLE IF NOT EXISTS laboratorio_prestaciones(
+  id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,paciente_id INTEGER,aseguradora_id INTEGER,
+  tipo TEXT NOT NULL DEFAULT 'ANALISIS',descripcion TEXT NOT NULL,importe_pyg REAL NOT NULL DEFAULT 0,
+  origen TEXT NOT NULL DEFAULT 'PARTICULAR',estado_facturacion TEXT NOT NULL DEFAULT 'PENDIENTE',
+  venta_id INTEGER,seguro_pendiente_id INTEGER,creado_por TEXT,creado_en TEXT,
+  liquidacion_id INTEGER,estudio_admisional INTEGER DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS laboratorio_liquidaciones(
+  id INTEGER PRIMARY KEY,fecha_desde TEXT,fecha_hasta TEXT,total_bruto_pyg REAL DEFAULT 0,
+  total_laced_pyg REAL DEFAULT 0,total_santa_clara_pyg REAL DEFAULT 0,
+  total_normal_pyg REAL DEFAULT 0,total_admisional_pyg REAL DEFAULT 0,
+  estado TEXT DEFAULT 'GENERADA',creado_por TEXT,creado_en TEXT);
+ CREATE TABLE IF NOT EXISTS laboratorio_liquidacion_items(
+  id INTEGER PRIMARY KEY,liquidacion_id INTEGER NOT NULL,prestacion_id INTEGER NOT NULL UNIQUE,
+  importe_pyg REAL DEFAULT 0,porcentaje_laced REAL DEFAULT 0,importe_laced_pyg REAL DEFAULT 0,
+  porcentaje_santa_clara REAL DEFAULT 0,importe_santa_clara_pyg REAL DEFAULT 0);
+ """)
+ c.commit();c.close()
+init_v1399_laboratorio()
+ROUTE_MODULE.update({'laboratorio':'LABORATORIO','laboratorio_facturar_particular':'LABORATORIO','laboratorio_pendientes_seguro':'LABORATORIO','laboratorio_ventas_contado':'LABORATORIO','laboratorio_liquidaciones':'LABORATORIO','laboratorio_liquidacion_detalle':'LABORATORIO','laboratorio_liquidacion_pdf':'LABORATORIO'})
+
+@app.route('/laboratorio',methods=['GET','POST'])
+def laboratorio():
+ c=db()
+ if request.method=='POST':
+  try:
+   fecha=request.form['fecha'];pid=int(request.form['paciente_id']);desc=(request.form.get('descripcion') or '').strip()
+   if not desc:raise ValueError('Ingrese el análisis o estudio realizado.')
+   importe=float(request.form.get('importe_pyg') or 0)
+   if importe<0:raise ValueError('Importe inválido.')
+   aseg=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None
+   adm=1 if request.form.get('estudio_admisional')=='1' else 0
+   origen='SEGURO' if aseg else 'PARTICULAR'
+   estado='PENDIENTE_SEGURO' if aseg else 'PENDIENTE_PARTICULAR'
+   lid=c.execute("""insert into laboratorio_prestaciones(fecha,paciente_id,aseguradora_id,tipo,descripcion,importe_pyg,origen,estado_facturacion,creado_por,creado_en,estudio_admisional)
+                    values(?,?,?,'ANALISIS',?,?,?,?,?,?,?)""",(fecha,pid,aseg,desc,importe,origen,estado,session.get('user'),now(),adm)).lastrowid
+   if aseg:
+    spid=c.execute("""insert into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado)
+                      values(?,?,?,?,?,'SERVICIOS SANATORIALES',?,?,10,'PENDIENTE')""",(fecha,aseg,pid,'LABORATORIO',lid,'Laboratorio - '+desc,importe)).lastrowid
+    c.execute('update laboratorio_prestaciones set seguro_pendiente_id=? where id=?',(spid,lid))
+   c.commit();audit('LABORATORIO_REGISTRO',f'{lid}/{origen}');flash('Análisis de laboratorio registrado.')
+  except Exception as ex:c.rollback();flash('No se pudo registrar: '+str(ex))
+  c.close();return redirect('/laboratorio')
+ pats=c.execute('select * from pacientes order by nombre').fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall()
+ rows=c.execute("""select l.*,p.nombre paciente,a.nombre aseguradora from laboratorio_prestaciones l
+ left join pacientes p on p.id=l.paciente_id left join aseguradoras a on a.id=l.aseguradora_id
+ order by l.fecha desc,l.id desc limit 300""").fetchall()
+ c.close();return render_template('laboratory.html',pats=pats,asegs=asegs,rows=rows)
+
+@app.post('/laboratorio/<int:lid>/facturar-particular')
+def laboratorio_facturar_particular(lid):
+ c=db()
+ try:
+  l=c.execute('select l.*,p.tercero_id from laboratorio_prestaciones l join pacientes p on p.id=l.paciente_id where l.id=?',(lid,)).fetchone()
+  if not l or l['origen']!='PARTICULAR':raise ValueError('Prestación particular no encontrada.')
+  if l['estado_facturacion']=='FACTURADO':raise ValueError('Esta prestación ya fue facturada.')
+  if not l['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente.')
+  if not caja_abierta(c):raise ValueError('Debe abrir la caja para registrar una venta al contado.')
+  numero=(request.form.get('numero') or '').strip()
+  if not numero:raise ValueError('Ingrese el número de factura.')
+  total=float(l['importe_pyg'] or 0);base,iva=desglosar_iva_incluido(total,10)
+  vid=c.execute("""insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro)
+                   values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(l['fecha'],l['tercero_id'],numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO','Efectivo')).lastrowid
+  c.execute("insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,'PAGADO')",(vid,l['tercero_id'],'PYG',1,total,0,total))
+  ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone()
+  c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Laboratorio '+numero,total,'LABORATORIO',lid,session.get('user')))
+  c.execute("update laboratorio_prestaciones set estado_facturacion='FACTURADO',venta_id=? where id=?",(vid,lid))
+  c.commit();audit('LABORATORIO_FACTURA_CONTADO',f'{lid}/{numero}');flash('Factura de laboratorio al contado registrada.')
+ except Exception as ex:c.rollback();flash(str(ex))
+ finally:c.close()
+ return redirect('/laboratorio')
+
+@app.route('/laboratorio/pendientes-seguro')
+def laboratorio_pendientes_seguro():
+ c=db();rows=c.execute("""select l.*,p.nombre paciente,a.nombre aseguradora,sp.estado estado_seguro
+ from laboratorio_prestaciones l left join pacientes p on p.id=l.paciente_id left join aseguradoras a on a.id=l.aseguradora_id
+ left join seguro_pendientes sp on sp.id=l.seguro_pendiente_id where l.origen='SEGURO'
+ order by l.fecha desc,l.id desc""").fetchall();c.close()
+ return render_template('laboratory_insurance_pending.html',rows=rows)
+
+@app.route('/laboratorio/ventas-contado')
+def laboratorio_ventas_contado():
+ c=db();rows=c.execute("""select l.*,p.nombre paciente,v.numero factura from laboratorio_prestaciones l
+ left join pacientes p on p.id=l.paciente_id left join ventas v on v.id=l.venta_id
+ where l.origen='PARTICULAR' order by l.fecha desc,l.id desc""").fetchall();c.close()
+ return render_template('laboratory_cash_sales.html',rows=rows)
+
+@app.route('/laboratorio/liquidaciones',methods=['GET','POST'])
+def laboratorio_liquidaciones():
+ c=db()
+ if request.method=='POST':
+  try:
+   desde=request.form['desde'];hasta=request.form['hasta']
+   items=c.execute("""select * from laboratorio_prestaciones where fecha between ? and ? and liquidacion_id is null
+                      order by fecha,id""",(desde,hasta)).fetchall()
+   if not items:raise ValueError('No existen prestaciones pendientes de liquidación en el período.')
+   bruto=sum(float(x['importe_pyg'] or 0) for x in items)
+   normal=sum(float(x['importe_pyg'] or 0) for x in items if not x['estudio_admisional'])
+   adm=sum(float(x['importe_pyg'] or 0) for x in items if x['estudio_admisional'])
+   laced=normal*.80+adm*.85;santa=normal*.20+adm*.15
+   q=c.execute("""insert into laboratorio_liquidaciones(fecha_desde,fecha_hasta,total_bruto_pyg,total_laced_pyg,total_santa_clara_pyg,total_normal_pyg,total_admisional_pyg,creado_por,creado_en)
+                  values(?,?,?,?,?,?,?,?,?)""",(desde,hasta,bruto,laced,santa,normal,adm,session.get('user'),now()))
+   liq=q.lastrowid
+   for x in items:
+    pl=85.0 if x['estudio_admisional'] else 80.0;ps=15.0 if x['estudio_admisional'] else 20.0;imp=float(x['importe_pyg'] or 0)
+    c.execute("""insert into laboratorio_liquidacion_items(liquidacion_id,prestacion_id,importe_pyg,porcentaje_laced,importe_laced_pyg,porcentaje_santa_clara,importe_santa_clara_pyg)
+                 values(?,?,?,?,?,?,?)""",(liq,x['id'],imp,pl,imp*pl/100,ps,imp*ps/100))
+    c.execute('update laboratorio_prestaciones set liquidacion_id=? where id=?',(liq,x['id']))
+   c.commit();audit('LIQUIDACION_LABORATORIO',str(liq));flash('Liquidación de Laboratorio LACED generada.')
+  except Exception as ex:c.rollback();flash(str(ex))
+  c.close();return redirect('/laboratorio/liquidaciones')
+ rows=c.execute('select * from laboratorio_liquidaciones order by id desc limit 100').fetchall();c.close()
+ return render_template('laboratory_settlements.html',rows=rows)
+
+@app.route('/laboratorio/liquidaciones/<int:lid>')
+def laboratorio_liquidacion_detalle(lid):
+ c=db();liq=c.execute('select * from laboratorio_liquidaciones where id=?',(lid,)).fetchone()
+ items=c.execute("""select i.*,l.fecha,l.descripcion,l.origen,l.estudio_admisional,p.nombre paciente,a.nombre aseguradora
+ from laboratorio_liquidacion_items i join laboratorio_prestaciones l on l.id=i.prestacion_id
+ left join pacientes p on p.id=l.paciente_id left join aseguradoras a on a.id=l.aseguradora_id
+ where i.liquidacion_id=? order by l.fecha,l.id""",(lid,)).fetchall();c.close()
+ if not liq:return ('Liquidación no encontrada',404)
+ return render_template('laboratory_settlement_detail.html',liq=liq,items=items)
+
+
+@app.route('/laboratorio/liquidaciones/<int:lid>/pdf')
+def laboratorio_liquidacion_pdf(lid):
+ from reportlab.lib.pagesizes import A4
+ from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+ from reportlab.lib import colors
+ from reportlab.lib.styles import getSampleStyleSheet
+ from flask import send_file
+ from io import BytesIO
+ c=db()
+ liq=c.execute('select * from laboratorio_liquidaciones where id=?',(lid,)).fetchone()
+ items=c.execute("""select i.*,l.fecha,l.descripcion,l.origen,l.estudio_admisional,p.nombre paciente,a.nombre aseguradora
+ from laboratorio_liquidacion_items i join laboratorio_prestaciones l on l.id=i.prestacion_id
+ left join pacientes p on p.id=l.paciente_id left join aseguradoras a on a.id=l.aseguradora_id
+ where i.liquidacion_id=? order by l.fecha,l.id""",(lid,)).fetchall()
+ c.close()
+ if not liq:return ('Liquidación no encontrada',404)
+ out=BytesIO();doc=SimpleDocTemplate(out,pagesize=A4,rightMargin=24,leftMargin=24,topMargin=24,bottomMargin=24)
+ st=getSampleStyleSheet();story=[]
+ logo=pdf_logo()
+ if logo:story.append(logo)
+ story += [Paragraph('CENTRO MÉDICO SANTA CLARA',st['Title']),
+           Paragraph('Liquidación a Pagar - Laboratorio LACED',st['Heading2']),
+           Paragraph(f"N.º {liq['id']} | Período: {liq['fecha_desde']} al {liq['fecha_hasta']}",st['Normal']),Spacer(1,10)]
+ data=[['Fecha','Paciente','Prestación','Origen','Bruto','% LACED','LACED','Santa Clara']]
+ for x in items:
+  origen=x['aseguradora'] or ('Particular' if x['origen']=='PARTICULAR' else x['origen'])
+  if x['estudio_admisional']:origen+=' / Admisional'
+  data.append([x['fecha'],x['paciente'] or '-',x['descripcion'],origen,f"{float(x['importe_pyg'] or 0):,.0f}",f"{float(x['porcentaje_laced'] or 0):.0f}%",f"{float(x['importe_laced_pyg'] or 0):,.0f}",f"{float(x['importe_santa_clara_pyg'] or 0):,.0f}"])
+ t=Table(data,repeatRows=1,colWidths=[48,78,115,82,58,48,62,65])
+ t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.3,colors.grey),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(4,1),(-1,-1),'RIGHT')]))
+ story += [t,Spacer(1,12),
+           Paragraph(f"Total bruto: Gs. {float(liq['total_bruto_pyg'] or 0):,.0f}",st['Normal']),
+           Paragraph(f"A pagar a Laboratorio LACED: Gs. {float(liq['total_laced_pyg'] or 0):,.0f}",st['Heading3']),
+           Paragraph(f"Participación Centro Médico Santa Clara: Gs. {float(liq['total_santa_clara_pyg'] or 0):,.0f}",st['Normal']),
+           Spacer(1,8),Paragraph('Servicios normales: 80% LACED / 20% Santa Clara. Estudios admisionales: 85% LACED / 15% Santa Clara.',st['Normal'])]
+ doc.build(story);out.seek(0)
+ audit('PDF_LIQUIDACION_LABORATORIO',str(lid))
+ return send_file(out,as_attachment=True,download_name=f'liquidacion_laboratorio_LACED_{lid}.pdf',mimetype='application/pdf')
+
 
 
 @app.route('/agenda/<int:gid>/imprimir')
@@ -2143,6 +2387,11 @@ def agenda_web_confirmacion():
  gid=request.args.get('id',type=int);c=db();r=c.execute("select g.fecha,g.hora,p.nombre paciente,m.nombre medico,m.especialidad from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id where g.id=? and g.creado_por='WEB'",(gid,)).fetchone();c.close();return render_template('public_booking_success.html',r=r)
 
 ROUTE_MODULE.update({'conciliacion_bancaria':'FINANZAS','conciliacion_bancaria_detalle':'FINANZAS'})
+
+@app.get('/health')
+def health():
+ return {'status':'ok','version':'13.9.11'},200
+
 init_v1391()
 
 if __name__=='__main__':

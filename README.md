@@ -198,3 +198,56 @@ V13.6.5.1 FIX Configuración Empresa
 - Al registrar una consulta se abre el comprobante listo para imprimir.
 - Registra cada impresión en impresiones_agenda para auditoría.
 - No modifica otros menús ni reinicializa datos existentes.
+
+
+## V13.9.6 - Corrección de Roles y Permisos
+- Corregido el problema que volvía a conceder permisos predeterminados al reiniciar el sistema.
+- Una vez guardados los permisos de un rol, el arranque ya no vuelve a activar permisos desmarcados.
+- Protección reforzada del lado del servidor: Ver, Crear, Editar, Anular, Facturar, Cobrar, Autorizar, Entregar, etc. se validan por separado.
+- Las rutas de Compras, Ventas, Stock, Caja/Bancos, Contabilidad, Agenda, Admisión, Enfermería, Farmacia, Informes y Configuración quedan sujetas a permisos.
+- No reinicializa la base ni elimina usuarios, roles o datos existentes.
+
+
+## V13.9.7 - Inicio institucional
+- Se retiró la información del Dashboard de la pantalla Inicio.
+- Inicio muestra únicamente el logo de Centro Médico Santa Clara, centrado y adaptable.
+- No se modificaron los demás menús ni la base de datos.
+
+
+## V13.9.8 - Flujo de Consultorio y Facturación Posterior
+- Agendar ya no factura ni cobra automáticamente.
+- Turnos quedan pendientes de facturación.
+- Separación de pendientes Particular / Seguro.
+- Registro de consultas realizadas para liquidación interna.
+- Registro de procedimientos realizados por médico.
+- Cierre de consultorio por médico con consultas, procedimientos, particular, seguro y honorarios.
+- Liquidación interna conserva detalle de las prestaciones incluidas.
+- Migración no destructiva de la base existente.
+
+
+## V13.9.9 - Módulo Laboratorio LACED
+- Menú Laboratorio simplificado.
+- Registro único de análisis/estudios.
+- Particular: pendiente y facturación de venta al contado.
+- Seguro: envío automático al circuito existente de Pendientes de Facturación del Seguro.
+- Liquidación LACED: 80% LACED / 20% Santa Clara para servicios normales, particulares y seguros.
+- Estudios admisionales: 85% LACED / 15% Santa Clara.
+- Detalle de cada liquidación y bloqueo de doble liquidación.
+- Permisos independientes mediante módulo LABORATORIO.
+
+
+## V13.9.10 - Corrección Laboratorio y Cambio de Contraseña
+- LABORATORIO incorporado al catálogo de módulos de Roles y Permisos.
+- Migración puntual: ADMINISTRADOR recibe acceso completo al nuevo módulo Laboratorio.
+- Los permisos existentes de los demás roles no se alteran ni se restauran automáticamente.
+- El administrador puede asignar VER/CREAR/EDITAR/FACTURAR/etc. de Laboratorio desde Roles y Permisos.
+- Cada usuario autenticado dispone de Cambiar mi contraseña.
+- Para cambiarla se exige contraseña actual, nueva contraseña y confirmación.
+- La nueva contraseña debe tener al menos 6 caracteres y ser distinta de la actual.
+- El cambio queda registrado en auditoría sin guardar la contraseña en el registro de auditoría.
+
+
+## V13.9.11 - PDF e impresión de Liquidación LACED
+- Descarga PDF desde listado y detalle.
+- Impresión directa desde el detalle.
+- PDF incluye logo, período, detalle por prestación, porcentajes y totales LACED/Santa Clara.

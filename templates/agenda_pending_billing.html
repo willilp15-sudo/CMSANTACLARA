@@ -1,0 +1,6 @@
+{% extends 'base.html' %}{% block title %}Pendientes de Facturación{% endblock %}{% block content %}
+<h2>Pendientes de Facturación de Consultorio</h2><p>Los turnos se registran primero y se facturan después. Seguro y particular permanecen separados.</p>
+<table><tr><th>Fecha/Hora</th><th>Paciente</th><th>Médico</th><th>Atención</th><th>Motivo</th><th>Importe</th><th>Acción</th></tr>
+{% for x in rows %}<tr><td>{{x.fecha}} {{x.hora}}</td><td>{{x.paciente}}</td><td>{{x.medico}}</td><td>{% if x.aseguradora_id %}Seguro: {{x.aseguradora}}{% else %}Particular{% endif %}</td><td>{{x.motivo or 'Consulta'}}</td><td>Gs. {{'{:,.0f}'.format(x.precio_pyg or 0)}}</td><td>
+<form method="post" action="/agenda/{{x.id}}/facturar">{% if not x.aseguradora_id %}<select name="condicion_venta"><option>CONTADO</option><option>CREDITO</option></select><select name="forma_cobro"><option>Efectivo</option><option>Banco</option><option>Transferencia</option><option>POS</option></select>{% endif %}<button>{% if x.aseguradora_id %}Enviar a Seguro{% else %}Registrar prestación{% endif %}</button></form></td></tr>
+{% else %}<tr><td colspan="7">No hay turnos pendientes.</td></tr>{% endfor %}</table>{% endblock %}

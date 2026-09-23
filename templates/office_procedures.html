@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% block title %}Procedimientos de Consultorio{% endblock %}{% block content %}
+<h2>Procedimientos realizados</h2><form method="post" class="grid">
+<label>Fecha<input type="date" name="fecha" required></label><label>Hora<input type="time" name="hora"></label>
+<label>Paciente<select name="paciente_id" required>{% for x in pats %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Médico<select name="medico_id" required>{% for x in meds %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Procedimiento<select name="servicio_id" required>{% for x in servs %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Seguro<select name="aseguradora_id"><option value="">Particular</option>{% for x in asegs %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Precio Gs.<input type="number" name="precio" min="0"></label><label>Honorario médico Gs.<input type="number" name="honorario_medico" min="0" required></label><label>Observación<input name="observacion"></label><button>Registrar procedimiento</button></form>
+<div class="panel"><h3>Procedimientos recientes</h3><table><tr><th>Fecha</th><th>Paciente</th><th>Médico</th><th>Procedimiento</th><th>Origen</th><th>Honorario</th></tr>{% for r in rows %}<tr><td>{{r.fecha}}</td><td>{{r.paciente}}</td><td>{{r.medico}}</td><td>{{r.servicio}}</td><td>{{r.aseguradora or 'Particular'}}</td><td>{{'{:,.0f}'.format(r.honorario_pyg or 0)}}</td></tr>{% endfor %}</table></div>{% endblock %}

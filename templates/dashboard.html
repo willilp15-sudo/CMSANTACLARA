@@ -1,3 +1,21 @@
-{% extends 'base.html' %}{% block title %}Dashboard{% endblock %}{% block content %}
-<section class="cards">{% for k,v in stats.items() %}<article class="card"><small>{{k}}</small><h2>{{'{:,.0f}'.format(v)}}</h2></article>{% endfor %}</section>
+{% extends 'base.html' %}
+{% block title %}Inicio{% endblock %}
+{% block content %}
+<div class="inicio-santa-clara">
+  <img src="{{ url_for('static', filename='logo_santa_clara_cropped.png') }}" alt="Centro Médico Santa Clara">
+</div>
+<style>
+.inicio-santa-clara{
+  min-height:calc(100vh - 180px);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:30px;
+}
+.inicio-santa-clara img{
+  width:min(620px,82vw);
+  max-height:58vh;
+  object-fit:contain;
+}
+</style>
 {% endblock %}

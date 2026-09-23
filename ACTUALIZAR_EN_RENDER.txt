@@ -1,0 +1,24 @@
+SANTA CLARA ERP V13.9.11 - ACTUALIZACION DE PRODUCCION
+
+Esta carpeta esta preparada para reemplazar el CODIGO de la version anterior sin reemplazar la base de datos de produccion.
+
+IMPORTANTE:
+- Render debe conservar SANTA_CLARA_DATA_DIR=/var/data.
+- El disco persistente santa-clara-data debe seguir montado en /var/data.
+- NO borrar el servicio ni el disco de Render.
+- NO copiar una base .db dentro de /var/data manualmente.
+
+ACTUALIZACION CON GITHUB DESKTOP:
+1. Abrir el repositorio local CMSANTACLARA.
+2. Hacer Fetch origin/Pull origin antes de comenzar.
+3. Hacer una copia de seguridad de la carpeta local si se desea.
+4. Copiar TODO el contenido de esta carpeta sobre CMSANTACLARA y reemplazar archivos.
+5. Verificar que GitHub Desktop detecte app.py, templates, static, import_data, requirements.txt y render.yaml.
+6. Summary: Santa Clara ERP V13.9.11 - Laboratorio y liquidaciones PDF
+7. Commit to main.
+8. Push origin.
+9. Render desplegara automaticamente la nueva version.
+10. Esperar estado Live y probar /login y los modulos nuevos.
+
+DATOS:
+La aplicacion usa la base persistente /var/data/santa_clara_v8.db en Render. Las migraciones del codigo crean/agregan tablas y columnas sin borrar la base existente.

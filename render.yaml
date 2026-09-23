@@ -8,8 +8,6 @@ services:
     envVars:
       - key: SECRET_KEY
         generateValue: true
-      - key: ADMIN_PASSWORD
-        sync: false
       - key: SANTA_CLARA_DATA_DIR
         value: /var/data
     disk:
