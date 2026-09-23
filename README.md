@@ -297,3 +297,15 @@ V13.6.5.1 FIX Configuración Empresa
 - Ajuste automático por diferencia de cambio por cuenta y moneda.
 - El ajuste genera asiento de ganancia o pérdida con cuentas seleccionables del Plan de Cuentas.
 - Flujo inspirado funcionalmente en sistemas administrativos tipo Dolphin, implementado de forma independiente.
+
+## V13.9.17 Seguridad + Backup automático
+- Backup SQLite consistente cada 5 minutos en `DATA_DIR/backups/5min`.
+- Conserva las 72 copias de 5 minutos más recientes (6 horas) y mantiene el backup diario existente de 30 días.
+- Cookies de sesión HttpOnly, SameSite=Lax y Secure en Render; sesión de 8 horas.
+- Cabeceras HSTS, CSP, X-Frame-Options, nosniff, Referrer-Policy y Permissions-Policy.
+- Protección básica contra solicitudes POST cross-site por Origin/Referer.
+- Límite de intentos de inicio de sesión por IP: 8 intentos / 5 minutos.
+- Contraseñas nuevas/cambiadas usan scrypt. Las contraseñas SHA-256 antiguas se migran automáticamente al iniciar sesión correctamente.
+- Límite de carga por solicitud: 16 MB.
+
+IMPORTANTE: las copias cada 5 minutos están en el mismo disco persistente. Protegen contra errores/corrupción lógica y permiten recuperar estados recientes, pero NO sustituyen un backup externo/off-site ante pérdida total del disco o de la cuenta. Para protección completa debe añadirse un destino externo (S3/R2 u otro almacenamiento) con credenciales separadas.
