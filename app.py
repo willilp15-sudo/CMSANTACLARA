@@ -2,7 +2,6 @@ from flask import Flask,render_template,request,redirect,session,flash,jsonify,s
 import sqlite3,os,hashlib,datetime,shutil,io
 from pathlib import Path
 app=Flask(__name__); app.secret_key=os.environ.get('SECRET_KEY','cambiar-en-produccion')
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=os.environ.get('RENDER')=='true')
 
 # V13.5.9 - Base de datos persistente fuera de la carpeta de cada versión.
 # En Windows se guarda en %LOCALAPPDATA%\SantaClaraERP\data. De esta forma,
@@ -134,7 +133,7 @@ CREATE TABLE IF NOT EXISTS enfermeria(id INTEGER PRIMARY KEY,fecha TEXT,admision
  # Plan de cuentas referencial paraguayo para sanatorio. INSERT OR IGNORE preserva cuentas y datos existentes.
  cuentas_py=[('1','ACTIVO','ACTIVO'),('1.1','ACTIVO CORRIENTE','ACTIVO'),('1.1.01','Caja y Bancos','ACTIVO'),('1.1.02','Créditos por Ventas / Clientes','ACTIVO'),('1.1.03','Inventarios','ACTIVO'),('1.1.04','IVA Crédito Fiscal','ACTIVO'),('1.2','ACTIVO NO CORRIENTE','ACTIVO'),('1.2.01','Propiedad, Planta y Equipo','ACTIVO'),('1.2.02','Depreciación Acumulada','ACTIVO'),('2','PASIVO','PASIVO'),('2.1','PASIVO CORRIENTE','PASIVO'),('2.1.01','Proveedores','PASIVO'),('2.1.02','IVA Débito Fiscal','PASIVO'),('2.1.03','Honorarios Médicos a Pagar','PASIVO'),('2.1.04','Obligaciones Laborales','PASIVO'),('2.1.05','Impuestos y Retenciones a Pagar','PASIVO'),('3','PATRIMONIO NETO','PATRIMONIO'),('3.1.01','Capital','PATRIMONIO'),('3.1.02','Reservas','PATRIMONIO'),('3.1.03','Resultados Acumulados','PATRIMONIO'),('4','INGRESOS','INGRESO'),('4.1.01','Ventas de Medicamentos y Productos','INGRESO'),('4.1.02','Servicios Sanatoriales','INGRESO'),('4.1.03','Consultas y Procedimientos','INGRESO'),('4.1.04','Cirugías','INGRESO'),('4.2.01','Ganancia por Diferencia de Cambio','INGRESO'),('5','COSTOS Y GASTOS','EGRESO'),('5.1.01','Costo de Ventas','EGRESO'),('5.2.01','Pérdida por Diferencia de Cambio','EGRESO'),('5.3.01','Honorarios Médicos','EGRESO'),('5.4.01','Sueldos y Jornales','EGRESO'),('5.4.02','Cargas Sociales','EGRESO'),('5.5.01','Servicios Básicos','EGRESO'),('5.5.02','Mantenimiento y Reparaciones','EGRESO'),('5.5.03','Depreciaciones','EGRESO')]
  for x in cuentas_py:c.execute('INSERT OR IGNORE INTO plan_cuentas(codigo,nombre,tipo) VALUES(?,?,?)',x)
- if not c.execute('select 1 from usuarios').fetchone():c.execute('insert into usuarios(nombre,usuario,clave,rol) values(?,?,?,?)',('Administrador','admin',h(os.environ.get('ADMIN_PASSWORD','SantaClara2026!')),'ADMIN'))
+ if not c.execute('select 1 from usuarios').fetchone():c.execute('insert into usuarios(nombre,usuario,clave,rol) values(?,?,?,?)',('Administrador','admin',h('SantaClara2026!'),'ADMIN'))
  # Migración IVA por producto/servicio y desglose fiscal
  for tabla,col,defn in [
   ('productos','iva_pct','REAL DEFAULT 10'),('servicios','iva_pct','REAL DEFAULT 10'),('compra_items','iva_pct','REAL DEFAULT 10'),('venta_items','iva_pct','REAL DEFAULT 10'),('cargos_paciente','iva_pct','REAL DEFAULT 10'),
@@ -185,10 +184,7 @@ def tc_fecha(c,fecha,moneda,tc_form):
  return tc
 @app.before_request
 def auth():
- if request.endpoint not in ('login','static','health','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion') and 'user' not in session:return redirect('/login')
-@app.get('/health')
-def health(): return {'status':'ok','app':'Santa Clara ERP'},200
-
+ if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion') and 'user' not in session:return redirect('/login')
 @app.route('/login',methods=['GET','POST'])
 def login():
  if request.method=='POST':
@@ -910,8 +906,11 @@ def init_modular():
  'ENFERMERIA':['URGENCIAS','ADMISION','QUIROFANO','ENFERMERIA'],
  'FARMACIA':['FARMACIA','STOCK']}
  for role,mods in defaults.items():
-  c.execute('insert or ignore into roles(nombre,descripcion) values(?,?)',(role,'Rol estándar Santa Clara'))
-  rid=c.execute('select id from roles where nombre=?',(role,)).fetchone()[0]
+  existente=c.execute('select id from roles where nombre=?',(role,)).fetchone()
+  if existente:
+   rid=existente[0]
+   continue
+  rid=c.execute('insert into roles(nombre,descripcion) values(?,?)',(role,'Rol estándar Santa Clara')).lastrowid
   for m in mods:
    acts=['VER']
    if role=='ADMINISTRADOR': acts=ACTIONS
@@ -919,7 +918,7 @@ def init_modular():
    elif role=='ADMISION': acts=['VER','CREAR','EDITAR','FACTURAR','ALTA','TRASLADAR']
    elif role=='ENFERMERIA': acts=['VER','CREAR','SOLICITAR']
    elif role=='FARMACIA': acts=['VER','AUTORIZAR','ENTREGAR']
-   for a in acts:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,m,a))
+   for a in acts:c.execute('insert into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,m,a))
  admin=c.execute("select id from usuarios where usuario='admin'").fetchone()
  rid=c.execute("select id from roles where nombre='ADMINISTRADOR'").fetchone()
  if admin and rid:c.execute('insert or ignore into usuario_roles(usuario_id,rol_id) values(?,?)',(admin[0],rid[0]))
@@ -940,19 +939,79 @@ ROUTE_MODULE={
 }
 @app.before_request
 def modular_guard():
- if request.endpoint in (None,'login','logout','static','home','api_tc') or not session.get('user'): return
- if request.endpoint.startswith('admin_'):
-  if not user_has('USUARIOS','ADMINISTRAR'): return ('Acceso no autorizado',403)
+ # Rutas públicas / autenticación.
+ publicos={None,'login','logout','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion'}
+ if request.endpoint in publicos:return
+ if not session.get('user'):return redirect('/login')
+
+ # Administración de usuarios/roles: permiso explícito y exclusivo.
+ if request.endpoint and request.endpoint.startswith('admin_'):
+  if not user_has('USUARIOS','ADMINISTRAR'):return ('Acceso no autorizado',403)
   return
- if request.endpoint in ('farmacia_solicitudes','farmacia_autorizar','farmacia_entregar'):
-  action='VER' if request.method=='GET' else ('AUTORIZAR' if request.endpoint=='farmacia_autorizar' else 'ENTREGAR')
-  if not user_has('FARMACIA',action): return ('Acceso no autorizado',403)
-  return
- if request.endpoint=='enfermeria_solicitar_farmacia':
-  if not user_has('ENFERMERIA','SOLICITAR'): return ('Acceso no autorizado',403)
-  return
+
+ # Permiso exacto por operación. Nunca basta VER para crear/editar/anular.
+ reglas={
+  'tipos_cambio':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
+  'terceros':('FINANZAS','CREAR' if request.method=='POST' else 'VER'),
+  'tercero_editar':('FINANZAS','EDITAR'),'tercero_eliminar':('FINANZAS','ANULAR'),
+  'productos':('STOCK','CREAR' if request.method=='POST' else 'VER'),
+  'producto_editar':('STOCK','EDITAR'),'producto_eliminar':('STOCK','ANULAR'),
+  'api_productos_buscar':('STOCK','VER'),
+  'compras':('COMPRAS','CREAR' if request.method=='POST' else 'VER'),
+  'compra_ver':('COMPRAS','VER'),'compra_editar':('COMPRAS','EDITAR'),
+  'compra_eliminar':('COMPRAS','ANULAR'),'compra_cuotas':('COMPRAS','EDITAR'),
+  'anular_compra':('COMPRAS','ANULAR'),
+  'ventas_unificado':('VENTAS','VER'),'ventas':('VENTAS','CREAR' if request.method=='POST' else 'VER'),
+  'recepcion_caja_unificada':('VENTAS','VER'),'cobrar_venta_credito':('FINANZAS','EDITAR'),
+  'venta_cuotas':('VENTAS','EDITAR'),'anular_venta':('VENTAS','ANULAR'),
+  'factura_venta':('VENTAS','VER'),'factura_venta_pdf':('VENTAS','VER'),
+  'administrar_cajas':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
+  'historial_cierres_caja':('FINANZAS','VER'),
+  'cobrar':('FINANZAS','EDITAR'),'pagar':('FINANZAS','EDITAR'),'finanzas':('FINANZAS','VER'),
+  'recibo_pago':('FINANZAS','VER'),'recibo_pdf':('FINANZAS','VER'),'recibos_lista':('FINANZAS','VER'),
+  'cuentas_bancarias':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
+  'terminales_pos':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
+  'conciliacion_bancaria':('FINANZAS','CREAR' if request.method=='POST' else 'VER'),
+  'conciliacion_bancaria_detalle':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
+  'contabilidad':('CONTABILIDAD','VER'),'libros':('CONTABILIDAD','VER'),
+  'plan_contable':('CONTABILIDAD','EDITAR' if request.method=='POST' else 'VER'),
+  'plan_contable_desactivar':('CONTABILIDAD','ANULAR'),
+  'contabilidad_informes':('CONTABILIDAD','VER'),'contabilidad_informe':('CONTABILIDAD','VER'),
+  'contabilidad_excel':('CONTABILIDAD','VER'),'contabilidad_pdf':('CONTABILIDAD','VER'),
+  'pacientes':('PACIENTES','CREAR' if request.method=='POST' else 'VER'),
+  'editar_paciente':('PACIENTES','EDITAR'),'eliminar_paciente':('PACIENTES','ANULAR'),
+  'paciente_eliminar':('PACIENTES','ANULAR'),'api_paciente_nuevo':('PACIENTES','CREAR'),
+  'hospital_admisiones':('ADMISION','CREAR' if request.method=='POST' else 'VER'),
+  'cuenta_paciente':('ADMISION','VER'),'facturar_admision':('FACTURACION','FACTURAR'),
+  'alta':('ADMISION','ALTA'),'trasladar_internacion':('ADMISION','TRASLADAR'),
+  'hospital_enfermeria':('ENFERMERIA','VER'),'enfermeria_solicitar_farmacia':('ENFERMERIA','SOLICITAR'),
+  'farmacia_solicitudes':('FARMACIA','VER'),'farmacia_autorizar':('FARMACIA','AUTORIZAR'),
+  'farmacia_entregar':('FARMACIA','ENTREGAR'),
+  'consultas_medicas':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),
+  'mis_pacientes':('CONSULTORIO','VER'),'llamar_paciente':('CONSULTORIO','LLAMAR'),
+  'historia_clinica_v12':('HISTORIA','HISTORIA' if request.method=='POST' else 'VER'),
+  'liquidaciones_medicas':('FINANZAS','VER'),'liquidar_medico':('FINANZAS','EDITAR'),
+  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),
+  'agendamiento_v12':('AGENDA','CREAR' if request.method=='POST' else 'VER'),
+  'agenda_estado':('AGENDA','EDITAR'),'horarios_medicos':('AGENDA','EDITAR' if request.method=='POST' else 'VER'),
+  'imprimir_agendamiento':('AGENDA','VER'),'cobrar_agenda':('CAJA','COBRAR'),
+  'recepcion_v12':('RECEPCION','VER'),'caja_recepcion':('CAJA','EDITAR' if request.method=='POST' else 'VER'),
+  'config_medicos_usuarios':('CONFIG_SANATORIO','EDITAR' if request.method=='POST' else 'VER'),
+  'config_sanatorio':('CONFIG_SANATORIO','EDITAR' if request.method=='POST' else 'VER'),
+  'configuracion_empresa':('CONFIG_SANATORIO','EDITAR' if request.method=='POST' else 'VER'),
+  'seguros_facturar':('FACTURACION','FACTURAR' if request.method=='POST' else 'VER'),
+  'informes_consultas':('INFORMES','VER'),'exportar_consultas_xlsx':('INFORMES','VER'),
+  'exportar_consultas_pdf':('INFORMES','VER'),'liquidacion_medica_pdf':('INFORMES','VER'),
+  'informes_centro':('INFORMES','VER'),'informe_especifico':('INFORMES','VER'),'informe_pdf':('INFORMES','VER'),
+  'auditoria_detallada':('USUARIOS','ADMINISTRAR'),
+  'transaccion_anular':('CONTABILIDAD','ANULAR')
+ }
+ regla=reglas.get(request.endpoint)
+ if regla and not user_has(regla[0],regla[1]):return ('Acceso no autorizado para esta operación',403)
+
+ # Para cualquier ruta interna mapeada, exigir al menos VER.
  m=ROUTE_MODULE.get(request.endpoint)
- if m and not user_has(m,'VER'): return ('Acceso no autorizado para este módulo',403)
+ if m and not user_has(m,'VER'):return ('Acceso no autorizado para este módulo',403)
 
 @app.route('/admin/usuarios-roles',methods=['GET','POST'])
 def admin_usuarios_roles():
@@ -1060,9 +1119,11 @@ def init_v12():
   'MEDICO':[('AGENDA','VER'),('CONSULTORIO','VER'),('CONSULTORIO','CREAR'),('CONSULTORIO','LLAMAR'),('HISTORIA','VER'),('HISTORIA','HISTORIA')]
  }
  for role,perms in defs.items():
-  c.execute('insert or ignore into roles(nombre,descripcion) values(?,?)',(role,'Rol estándar Santa Clara V12'))
-  rid=c.execute('select id from roles where nombre=?',(role,)).fetchone()[0]
-  for m,a in perms:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,m,a))
+  existente=c.execute('select id from roles where nombre=?',(role,)).fetchone()
+  if existente:
+   continue
+  rid=c.execute('insert into roles(nombre,descripcion) values(?,?)',(role,'Rol estándar Santa Clara V12')).lastrowid
+  for m,a in perms:c.execute('insert into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,m,a))
  c.commit();c.close()
 
 def caja_abierta(c,usuario=None):
@@ -1620,9 +1681,7 @@ def init_v1353_turnos():
  CREATE TABLE IF NOT EXISTS horarios_medicos(id INTEGER PRIMARY KEY, medico_id INTEGER NOT NULL, dia_semana INTEGER NOT NULL, hora_inicio TEXT NOT NULL, hora_fin TEXT NOT NULL, minutos_consulta INTEGER NOT NULL DEFAULT 15, consultorio TEXT, activo INTEGER NOT NULL DEFAULT 1, UNIQUE(medico_id,dia_semana,hora_inicio,hora_fin));
  CREATE TABLE IF NOT EXISTS agenda_excepciones(id INTEGER PRIMARY KEY, medico_id INTEGER NOT NULL, fecha TEXT NOT NULL, hora_inicio TEXT, hora_fin TEXT, motivo TEXT, activo INTEGER DEFAULT 1);
  ''')
- for rol in ('ADMINISTRADOR','RECEPCION'):
-  rr=c.execute('select id from roles where nombre=?',(rol,)).fetchone()
-  if rr:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rr['id'],'CONSULTORIO','LLAMAR'))
+ # Los permisos existentes son administrados exclusivamente desde Roles y Permisos.
  c.commit();c.close()
 
 def _slot_times(inicio,fin,minutos):
@@ -1677,11 +1736,7 @@ init_v1353_turnos()
 
 def init_v1354():
  c=db()
- for rol in ('ADMINISTRADOR','RECEPCION'):
-  rr=c.execute('select id from roles where nombre=?',(rol,)).fetchone()
-  if rr:
-   c.execute("insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)",(rr['id'],'AGENDA','LLAMAR'))
-   c.execute("update permisos_rol set permitido=1 where rol_id=? and modulo='AGENDA' and accion='LLAMAR'",(rr['id'],))
+ # No se reponen permisos al arrancar: se respeta exactamente la configuración del rol.
  c.commit();c.close()
 
 @app.route('/ventas/cajas',methods=['GET','POST'])
@@ -1902,7 +1957,7 @@ init_v1365_empresa_config()
 
 @app.route('/configuracion-empresa',methods=['GET','POST'])
 def configuracion_empresa():
-    if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO')):
+    if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):
         flash('No tiene permiso para modificar la configuración de la empresa.'); return redirect('/')
     c=db()
     if request.method=='POST':
@@ -1929,6 +1984,10 @@ def configuracion_empresa():
     return render_template('company_config.html',inst=inst)
 
 ROUTE_MODULE.update({'configuracion_empresa':'CONFIG_SANATORIO'})
+
+# V13.9.6: Seguridad modular estricta.
+# Los permisos configurados por el administrador son persistentes y NO se reponen al reiniciar.
+# GET/POST y acciones sensibles se validan en servidor por módulo + acción.
 
 # Arranque al final: garantiza que Informes y futuras rutas queden registradas.
 
