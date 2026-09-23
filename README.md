@@ -259,3 +259,22 @@ V13.6.5.1 FIX Configuración Empresa
 - Se conserva tercero_id para que facturación, cuenta corriente y ficha del paciente correspondan a la misma persona.
 - Se evita duplicar pacientes ya vinculados y se intenta vincular registros existentes por documento.
 - Crear un paciente continúa creando su correspondiente cliente, manteniendo el modelo unificado.
+
+
+## V13.9.13 - Búsqueda directa de Pacientes y Proveedores
+- Se eliminaron las listas desplegables extensas para seleccionar pacientes.
+- Pacientes se buscan escribiendo nombre o número de cédula, con resultados en tiempo real.
+- Aplicado a Agendamiento, Laboratorio, Procedimientos y Admisión.
+- Proveedores se buscan escribiendo nombre o RUC.
+- Aplicado a Carga de Compras y Modificación de Compras.
+- El formulario exige seleccionar un resultado válido antes de guardar.
+- Se mantiene la unificación Cliente = Paciente de V13.9.12.
+
+
+## V13.9.14 - Agenda operativa tipo grilla
+- Agenda diaria estructurada por horario, paciente, seguro, estado, facturación, profesional, observación y teléfono.
+- Casilla Fact. para seleccionar los turnos que se desean procesar.
+- Procesamiento múltiple desde la misma agenda.
+- Turnos por seguro seleccionados pasan directamente a Pendientes de Facturación del Seguro.
+- Turnos particulares seleccionados quedan preparados para el circuito de facturación particular.
+- Se mantienen estados operativos y llamado de pacientes.

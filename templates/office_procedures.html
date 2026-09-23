@@ -1,7 +1,7 @@
 {% extends 'base.html' %}{% block title %}Procedimientos de Consultorio{% endblock %}{% block content %}
 <h2>Procedimientos realizados</h2><form method="post" class="grid">
 <label>Fecha<input type="date" name="fecha" required></label><label>Hora<input type="time" name="hora"></label>
-<label>Paciente<select name="paciente_id" required>{% for x in pats %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Paciente<div class="sc-searchbox" data-url="/api/buscar-pacientes" data-kind="paciente"><input type="search" data-search placeholder="Escriba nombre o número de cédula" autocomplete="off" value="" required><input type="hidden" name="paciente_id"  required><div class="sc-results" style="display:none"></div><div class="sc-selected"></div></div></label>
 <label>Médico<select name="medico_id" required>{% for x in meds %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
 <label>Procedimiento<select name="servicio_id" required>{% for x in servs %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>
 <label>Seguro<select name="aseguradora_id"><option value="">Particular</option>{% for x in asegs %}<option value="{{x.id}}">{{x.nombre}}</option>{% endfor %}</select></label>

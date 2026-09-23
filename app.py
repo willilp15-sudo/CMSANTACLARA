@@ -942,6 +942,7 @@ def modular_guard():
  if request.endpoint in publicos:return
  if not session.get('user'):return redirect('/login')
  if request.endpoint=='cambiar_mi_clave':return
+ if request.endpoint in ('api_buscar_pacientes','api_buscar_proveedores'):return
 
  # Administración de usuarios/roles: permiso explícito y exclusivo.
  if request.endpoint and request.endpoint.startswith('admin_'):
@@ -979,7 +980,7 @@ def modular_guard():
   'contabilidad_excel':('CONTABILIDAD','VER'),'contabilidad_pdf':('CONTABILIDAD','VER'),
   'pacientes':('PACIENTES','CREAR' if request.method=='POST' else 'VER'),
   'editar_paciente':('PACIENTES','EDITAR'),'eliminar_paciente':('PACIENTES','ANULAR'),
-  'paciente_eliminar':('PACIENTES','ANULAR'),'api_paciente_nuevo':('PACIENTES','CREAR'),
+  'paciente_eliminar':('PACIENTES','ANULAR'),'api_paciente_nuevo':('PACIENTES','CREAR'),'api_buscar_pacientes':('PACIENTES','VER'),'api_buscar_proveedores':('COMPRAS','VER'),
   'hospital_admisiones':('ADMISION','CREAR' if request.method=='POST' else 'VER'),
   'cuenta_paciente':('ADMISION','VER'),'facturar_admision':('FACTURACION','FACTURAR'),
   'alta':('ADMISION','ALTA'),'trasladar_internacion':('ADMISION','TRASLADAR'),
@@ -990,7 +991,7 @@ def modular_guard():
   'mis_pacientes':('CONSULTORIO','VER'),'llamar_paciente':('CONSULTORIO','LLAMAR'),
   'historia_clinica_v12':('HISTORIA','HISTORIA' if request.method=='POST' else 'VER'),
   'liquidaciones_medicas':('FINANZAS','VER'),'liquidar_medico':('FINANZAS','EDITAR'),
-  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),'agenda_pendientes_facturacion':('FACTURACION','VER'),'agenda_facturar':('FACTURACION','FACTURAR'),'consultorio_prestaciones':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),'cierre_consultorio':('CONSULTORIO','VER'),
+  'agendamiento_inicio':('AGENDA','VER'),'agenda_turnos':('AGENDA','VER'),'agenda_pendientes_facturacion':('FACTURACION','VER'),'agenda_facturar':('FACTURACION','FACTURAR'),'agenda_facturar_seleccion':('FACTURACION','FACTURAR'),'consultorio_prestaciones':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),'cierre_consultorio':('CONSULTORIO','VER'),
   'laboratorio':('LABORATORIO','CREAR' if request.method=='POST' else 'VER'),
   'laboratorio_facturar_particular':('LABORATORIO','FACTURAR'),
   'laboratorio_pendientes_seguro':('LABORATORIO','VER'),
@@ -1194,6 +1195,33 @@ def api_paciente_nuevo():
  except Exception as e:c.rollback();return jsonify(ok=False,error=str(e)),400
  finally:c.close()
 
+
+
+@app.get('/api/buscar-pacientes')
+def api_buscar_pacientes():
+ if not (user_has('AGENDA','VER') or user_has('PACIENTES','VER') or user_has('ADMISION','VER') or user_has('LABORATORIO','VER') or user_has('CONSULTORIO','VER')):return jsonify(ok=False,error='Sin permiso'),403
+ q=(request.args.get('q') or '').strip();c=db();sincronizar_clientes_pacientes(c)
+ if len(q)<1:rows=[]
+ else:
+  like='%'+q+'%'
+  rows=c.execute("""select id,nombre,documento,telefono from pacientes
+                    where nombre like ? collate nocase or documento like ?
+                    order by case when documento=? then 0 when nombre like ? collate nocase then 1 else 2 end,nombre limit 20""",(like,like,q,q+'%')).fetchall()
+ out=[{'id':x['id'],'nombre':x['nombre'],'documento':x['documento'] or '','telefono':x['telefono'] or ''} for x in rows];c.close()
+ return jsonify(ok=True,items=out)
+
+@app.get('/api/buscar-proveedores')
+def api_buscar_proveedores():
+ if not (user_has('COMPRAS','VER') or user_has('FINANZAS','VER')):return jsonify(ok=False,error='Sin permiso'),403
+ q=(request.args.get('q') or '').strip();c=db()
+ if len(q)<1:rows=[]
+ else:
+  like='%'+q+'%'
+  rows=c.execute("""select id,nombre,ruc,telefono from terceros where upper(coalesce(tipo,''))='PROVEEDOR'
+                    and (nombre like ? collate nocase or ruc like ?)
+                    order by case when ruc=? then 0 when nombre like ? collate nocase then 1 else 2 end,nombre limit 20""",(like,like,q,q+'%')).fetchall()
+ out=[{'id':x['id'],'nombre':x['nombre'],'ruc':x['ruc'] or '','telefono':x['telefono'] or ''} for x in rows];c.close()
+ return jsonify(ok=True,items=out)
 
 @app.get('/agendamiento')
 def agendamiento_inicio():
@@ -1956,7 +1984,7 @@ def _slot_times(inicio,fin,minutos):
 def agenda_turnos():
  fecha=request.args.get('fecha') or datetime.date.today().isoformat();medico_id=request.args.get('medico_id',type=int);especialidad=(request.args.get('especialidad') or '').strip();c=db()
  meds=c.execute('select * from medicos order by nombre').fetchall();especialidades=c.execute("select distinct especialidad from medicos where coalesce(especialidad,'')<>'' order by especialidad").fetchall()
- pars=[fecha];sql='''select g.*,p.nombre paciente,p.telefono,m.nombre medico,e.nombre especialidad from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id left join especialidades e on e.id=g.especialidad_id where g.fecha=?'''
+ pars=[fecha];sql='''select g.*,p.nombre paciente,p.telefono,m.nombre medico,e.nombre especialidad,a.nombre aseguradora from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id left join especialidades e on e.id=g.especialidad_id left join aseguradoras a on a.id=g.aseguradora_id where g.fecha=?'''
  if medico_id:sql+=' and g.medico_id=?';pars.append(medico_id)
  if especialidad:sql+=' and m.especialidad=?';pars.append(especialidad)
  ag=c.execute(sql+' order by m.nombre,g.hora',pars).fetchall();booked={(x['medico_id'],x['hora'][:5]):x for x in ag};day=datetime.date.fromisoformat(fecha).weekday()
@@ -1969,6 +1997,47 @@ def agenda_turnos():
    ex=c.execute('''select 1 from agenda_excepciones where activo=1 and medico_id=? and fecha=? and (hora_inicio is null or ?>=hora_inicio) and (hora_fin is null or ?<hora_fin) limit 1''',(hr['medico_id'],fecha,hora,hora)).fetchone()
    if not ex:slots.append({'hora':hora,'medico_id':hr['medico_id'],'medico':hr['medico'],'especialidad':hr['especialidad'],'consultorio':hr['consultorio'] or '','minutos':hr['minutos_consulta'],'agenda':booked.get((hr['medico_id'],hora))})
  c.close();return render_template('agenda_turnos.html',fecha=fecha,medico_id=medico_id,especialidad=especialidad,meds=meds,especialidades=especialidades,slots=slots,puede_llamar=(user_has('AGENDA','LLAMAR') or user_has('CONSULTORIO','LLAMAR')))
+
+
+@app.post('/agendamiento/facturar-seleccion')
+def agenda_facturar_seleccion():
+ ids=[]
+ for raw in request.form.getlist('agenda_ids'):
+  try:ids.append(int(raw))
+  except:pass
+ if not ids:
+  flash('Seleccione al menos un turno para procesar.');return redirect(request.referrer or '/agendamiento/turnos')
+ c=db();ok=0;seguros=0;particulares=0;errores=[]
+ try:
+  for gid in ids:
+   g=c.execute("""select g.*,m.honorario_consulta,e.nombre especialidad from agenda g
+    join medicos m on m.id=g.medico_id left join especialidades e on e.id=g.especialidad_id where g.id=?""",(gid,)).fetchone()
+   if not g or g['facturada']:continue
+   q=c.execute('select id from consultas where agenda_id=?',(gid,)).fetchone()
+   if q:qid=q['id']
+   else:
+    precio=float(g['precio_pyg'] or 0);hon=float(g['honorario_consulta'] or 0)
+    qid=c.execute("""insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado,agenda_id,tipo_prestacion,origen_facturacion,facturada)
+     values(?,?,?,?,?,?,'PYG',1,?,?,?,?,?,'REALIZADA',?,'CONSULTA',?,0)""",(g['fecha'],g['hora'],g['paciente_id'],g['medico_id'],g['especialidad_id'],g['aseguradora_id'],precio,hon,precio,hon,g['motivo'],gid,'SEGURO' if g['aseguradora_id'] else 'PARTICULAR')).lastrowid
+    c.execute('update agenda set consulta_id=? where id=?',(qid,gid))
+   if g['aseguradora_id']:
+    existe=c.execute("select id from seguro_pendientes where origen_tipo='CONSULTA' and origen_id=?",(qid,)).fetchone()
+    if not existe:
+     c.execute("""insert into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado)
+      values(?,?,?,?,?,?,?,?,10,'PENDIENTE')""",(g['fecha'],g['aseguradora_id'],g['paciente_id'],'CONSULTA',qid,'SERVICIOS SANATORIALES','Consulta - '+(g['especialidad'] or 'Consulta médica'),float(g['precio_pyg'] or 0)))
+    c.execute("update agenda set facturada=1,condicion_venta='SEGURO',estado=case when estado='AGENDADO' then 'ATENDIDO' else estado end where id=?",(gid,))
+    c.execute("update consultas set facturada=1 where id=?",(qid,));seguros+=1
+   else:
+    # Particular seleccionado queda preparado para facturación particular, sin emitir automáticamente.
+    c.execute("update agenda set condicion_venta='PARTICULAR',estado=case when estado='AGENDADO' then 'ATENDIDO' else estado end where id=?",(gid,))
+    particulares+=1
+   ok+=1
+  c.commit();audit('AGENDA_FACTURACION_SELECCION',f'{ok} turnos; seguros={seguros}; particulares={particulares}')
+  flash(f'Procesados {ok} turnos. Seguros enviados a pendientes: {seguros}. Particulares preparados para facturación: {particulares}.')
+ except Exception as ex:
+  c.rollback();flash('No se pudo procesar la selección: '+str(ex))
+ finally:c.close()
+ return redirect(request.referrer or '/agendamiento/turnos')
 
 @app.route('/agendamiento/horarios',methods=['GET','POST'])
 def horarios_medicos():
@@ -2402,6 +2471,10 @@ def agenda_web_reservar():
 @app.get('/turnos-web/confirmacion')
 def agenda_web_confirmacion():
  gid=request.args.get('id',type=int);c=db();r=c.execute("select g.fecha,g.hora,p.nombre paciente,m.nombre medico,m.especialidad from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id where g.id=? and g.creado_por='WEB'",(gid,)).fetchone();c.close();return render_template('public_booking_success.html',r=r)
+
+@app.get('/health')
+def health():
+ return {'status':'ok','version':'13.9.14'},200
 
 ROUTE_MODULE.update({'conciliacion_bancaria':'FINANZAS','conciliacion_bancaria_detalle':'FINANZAS'})
 init_v1391()

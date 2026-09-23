@@ -3,7 +3,7 @@
 <p><a class="btn" href="/admisiones">← Volver a Admisiones</a></p>
 <form method="post" class="grid">
 <label>Fecha<input type="date" name="fecha" value="{{a.fecha}}" required></label>
-<label>Paciente<select name="paciente_id" required>{% for x in pats %}<option value="{{x.id}}" {% if x.id==a.paciente_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Paciente<div class="sc-searchbox" data-url="/api/buscar-pacientes" data-kind="paciente"><input type="search" data-search placeholder="Escriba nombre o número de cédula" autocomplete="off" value="{% for x in pats %}{% if x.id==a.paciente_id %}{{x.nombre}}{% endif %}{% endfor %}" required><input type="hidden" name="paciente_id" value="{{a.paciente_id}}" required><div class="sc-results" style="display:none"></div><div class="sc-selected">{% for x in pats %}{% if x.id==a.paciente_id %}{{x.documento or ''}}{% endif %}{% endfor %}</div></div></label>
 <label>Tipo<select name="tipo">{% for t in ['CONSULTA','URGENCIA','INTERNACION','QUIROFANO'] %}<option {% if t==a.tipo %}selected{% endif %}>{{t}}</option>{% endfor %}</select></label>
 <label>Médico<select name="medico_id"><option value="">Sin médico</option>{% for x in med %}<option value="{{x.id}}" {% if x.id==a.medico_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
 <label>Seguro<select name="aseguradora_id"><option value="">Particular</option>{% for x in aseg %}<option value="{{x.id}}" {% if x.id==a.aseguradora_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>

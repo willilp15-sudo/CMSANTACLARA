@@ -1,6 +1,35 @@
 {% extends 'base.html' %}{% block title %}Agenda de Turnos{% endblock %}{% block content %}
 <h2>Agenda de Turnos Médicos</h2>
-<div class="card"><form method="get" class="grid"><label>Fecha<input type="date" name="fecha" value="{{fecha}}" required></label><label>Médico<select name="medico_id"><option value="">Todos</option>{% for m in meds %}<option value="{{m.id}}" {% if medico_id==m.id %}selected{% endif %}>{{m.nombre}}</option>{% endfor %}</select></label><label>Especialidad<select name="especialidad"><option value="">Todas</option>{% for e in especialidades %}<option {% if especialidad==e.especialidad %}selected{% endif %}>{{e.especialidad}}</option>{% endfor %}</select></label><button>🔍 Mostrar turnos</button></form><div class="toolbar" style="margin-top:12px"><a class="btn" href="/agendamiento/horarios">⚙️ Configurar horarios médicos</a><a class="btn secondary" href="/agendamiento/nueva">➕ Nueva consulta fuera de grilla</a></div></div>
-<div class="card table"><table><tr><th>Hora</th><th>Paciente</th><th>Seguro/Estado</th><th>Especialidad</th><th>Médico</th><th>Consultorio</th><th>Teléfono</th><th>Acciones</th></tr>{% for s in slots %}<tr class="slot-{{(s.agenda.estado if s.agenda else 'DISPONIBLE')|lower|replace(' ','-')}}"><td><b>{{s.hora}}</b><br><small>{{s.minutos}} min</small></td><td>{% if s.agenda %}{{s.agenda.paciente}}{% else %}<b>DISPONIBLE</b>{% endif %}</td><td>{{s.agenda.estado if s.agenda else 'DISPONIBLE'}}</td><td>{{s.especialidad or ''}}</td><td>{{s.medico}}</td><td>{{s.consultorio}}</td><td>{{s.agenda.telefono if s.agenda else ''}}</td><td class="actions">{% if not s.agenda %}<a class="btn small" href="/agendamiento/nueva?fecha={{fecha}}&hora={{s.hora}}&medico_id={{s.medico_id}}">Agendar / Facturar</a>{% else %}{% if puede_llamar %}<button type="button" class="small" onclick="llamar({{s.agenda.id}})">🔊 Llamar</button>{% endif %}<form method="post" action="/agendamiento/turno/{{s.agenda.id}}/estado" class="inline"><select name="estado" onchange="this.form.submit()">{% for x in ['AGENDADO','EN ESPERA','LLAMADO','EN CONSULTA','ATENDIDO','CANCELADO','AUSENTE'] %}<option {% if s.agenda.estado==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></form>{% endif %}</td></tr>{% else %}<tr><td colspan="8">No hay horarios configurados para los filtros seleccionados. Use “Configurar horarios médicos”.</td></tr>{% endfor %}</table></div>
-<script>async function llamar(id){let r=await fetch('/llamar-paciente/'+id,{method:'POST'}),j=await r.json();if(!j.ok){alert(j.error||'No se pudo llamar');return}if('speechSynthesis' in window){speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(j.texto));}alert(j.texto);location.reload();}</script>
+<div class="card"><form method="get" class="grid"><label>Fecha<input type="date" name="fecha" value="{{fecha}}" required></label><label>Profesional<select name="medico_id"><option value="">Todos</option>{% for m in meds %}<option value="{{m.id}}" {% if medico_id==m.id %}selected{% endif %}>{{m.nombre}}</option>{% endfor %}</select></label><label>Especialidad<select name="especialidad"><option value="">Todas</option>{% for e in especialidades %}<option {% if especialidad==e.especialidad %}selected{% endif %}>{{e.especialidad}}</option>{% endfor %}</select></label><button>🔍 Mostrar agenda</button></form>
+<div class="toolbar" style="margin-top:10px"><a class="btn" href="/agendamiento/horarios">⚙️ Horarios</a><a class="btn secondary" href="/agendamiento/nueva">➕ Turno fuera de grilla</a><a class="btn secondary" href="/seguros/facturar">🧾 Pendientes Seguro</a></div></div>
+
+<form method="post" action="/agendamiento/facturar-seleccion" id="formFact">
+<div class="card table"><table>
+<tr><th>Hora</th><th>Paciente</th><th>Seguro</th><th>Consulta</th><th style="text-align:center">Fact.</th><th>Profesional</th><th>Observación</th><th>Teléfono</th><th>Acciones</th></tr>
+{% for s in slots %}
+{% set st=(s.agenda.estado if s.agenda else 'DISPONIBLE') %}
+<tr class="slot-{{st|lower|replace(' ','-')}}">
+<td><b>{{s.hora}}</b><br><small>{{s.minutos}} min</small></td>
+<td>{% if s.agenda %}<b>{{s.agenda.paciente}}</b>{% else %}<span style="opacity:.65">Disponible</span>{% endif %}</td>
+<td>{% if s.agenda %}{{s.agenda.aseguradora or 'PARTICULAR'}}{% else %}PARTICULAR{% endif %}</td>
+<td>{{st}}</td>
+<td style="text-align:center">{% if s.agenda %}<input type="checkbox" name="agenda_ids" value="{{s.agenda.id}}" {% if s.agenda.facturada %}checked disabled title="Ya enviado/facturado"{% endif %}>{% else %}<input type="checkbox" disabled>{% endif %}</td>
+<td>{{s.medico}}</td>
+<td>{{s.agenda.motivo if s.agenda else ''}}</td>
+<td>{{s.agenda.telefono if s.agenda else ''}}</td>
+<td>{% if not s.agenda %}<a class="btn small" href="/agendamiento/nueva?fecha={{fecha}}&hora={{s.hora}}&medico_id={{s.medico_id}}">Agendar</a>{% else %}
+{% if puede_llamar %}<button type="button" class="small" onclick="llamar({{s.agenda.id}})">🔊</button>{% endif %}
+<select name="estado_{{s.agenda.id}}" onchange="cambiarEstado({{s.agenda.id}},this.value)">{% for x in ['AGENDADO','EN ESPERA','LLAMADO','EN CONSULTA','ATENDIDO','CANCELADO','AUSENTE'] %}<option {% if s.agenda.estado==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select>
+{% endif %}</td></tr>
+{% else %}<tr><td colspan="9">No hay horarios configurados para los filtros seleccionados.</td></tr>{% endfor %}
+</table></div>
+<div class="toolbar"><button type="submit">✓ Procesar seleccionados para facturación</button><span class="muted">Los turnos con seguro pasan directamente a Pendientes de Facturación del Seguro. Los particulares quedan preparados para facturación particular.</span></div>
+</form>
+<script>
+async function llamar(id){let r=await fetch('/llamar-paciente/'+id,{method:'POST'}),j=await r.json();if(!j.ok){alert(j.error||'No se pudo llamar');return}if('speechSynthesis' in window){speechSynthesis.cancel();speechSynthesis.speak(new SpeechSynthesisUtterance(j.texto));}alert(j.texto)}
+async function cambiarEstado(id,estado){let f=new FormData();f.append('estado',estado);let r=await fetch('/agendamiento/turno/'+id+'/estado',{method:'POST',body:f});if(!r.ok){alert('No se pudo cambiar el estado');location.reload()}}
+</script>
+<style>
+.slot-disponible{background:#fff}.slot-agendado{background:#b7f05a}.slot-en-espera{background:#5de6e6}.slot-atendido,.slot-realizado{background:#d96b13;color:#111}.slot-cancelado,.slot-ausente{background:#eee}
+</style>
 {% endblock %}
