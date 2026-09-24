@@ -3,7 +3,7 @@
 <div class="toolbar no-print"><a class="btn" href="/ventas/carga">← Volver</a><button onclick="window.print()">🖨 Imprimir</button><a class="btn" target="_blank" href="/ventas/{{v.id}}/factura/pdf">📄 PDF</a></div>
 <div class="card invoice">
  <div style="display:flex;justify-content:space-between;gap:20px;align-items:flex-start;border-bottom:2px solid #222;padding-bottom:12px">
-  <div style="display:flex;gap:14px;align-items:center"><img src="/static/logo_santa_clara_cropped.png" style="max-width:150px;max-height:75px"><div><b>{{inst.razon_social if inst else 'Centro Médico Santa Clara'}}</b><br>RUC: {{inst.ruc if inst else '-'}}<br>{{inst.direccion if inst else ''}}</div></div>
+  <div style="display:flex;gap:14px;align-items:center"><img src="/static/santa_clara_logo_documentos.jpg" style="max-width:150px;max-height:75px"><div><b>{{inst.razon_social if inst else 'Centro Médico Santa Clara'}}</b><br>RUC: {{inst.ruc if inst else '-'}}<br>{{inst.direccion if inst else ''}}</div></div>
   <div style="border:1px solid #333;padding:10px;text-align:center;min-width:220px"><h2 style="margin:0">FACTURA</h2><b>N.º {{v.numero}}</b><br>Fecha: {{v.fecha}}<br>{{v.condicion_venta or ''}}</div>
  </div>
  <p><b>Cliente/Paciente:</b> {{v.cliente or '-'}} &nbsp; <b>RUC/CI:</b> {{v.ruc or '-'}}</p>

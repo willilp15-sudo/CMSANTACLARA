@@ -1,23 +1,17 @@
 from flask import Flask,render_template,request,redirect,session,flash,jsonify,send_file
-import sqlite3,os,hashlib,datetime,shutil,io,time,threading,secrets
-from urllib.parse import urlparse
+import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets
 from werkzeug.security import generate_password_hash, check_password_hash
 from pathlib import Path
 app=Flask(__name__)
 app.secret_key=os.environ.get('SECRET_KEY') or secrets.token_hex(32)
-app.config.update(
- SESSION_COOKIE_HTTPONLY=True,
- SESSION_COOKIE_SAMESITE='Lax',
- SESSION_COOKIE_SECURE=os.environ.get('RENDER','').lower() in ('1','true','yes') or bool(os.environ.get('RENDER_SERVICE_ID')),
- PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=8),
- MAX_CONTENT_LENGTH=16*1024*1024,
-)
+app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax',SESSION_COOKIE_SECURE=bool(os.environ.get('RENDER')),PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=8),MAX_CONTENT_LENGTH=16*1024*1024)
 
 # V13.5.9 - Base de datos persistente fuera de la carpeta de cada versión.
 # En Windows se guarda en %LOCALAPPDATA%\SantaClaraERP\data. De esta forma,
 # reemplazar/descomprimir una nueva versión del programa no reemplaza los datos.
 def _directorio_datos_persistente():
  base=os.environ.get('SANTA_CLARA_DATA_DIR')
+ if not base and os.environ.get('RENDER'): base='/var/data'
  if base:return os.path.abspath(os.path.expandvars(os.path.expanduser(base)))
  local=os.environ.get('LOCALAPPDATA')
  if local:return os.path.join(local,'SantaClaraERP','data')
@@ -26,58 +20,6 @@ def _directorio_datos_persistente():
 DATA_DIR=_directorio_datos_persistente()
 os.makedirs(DATA_DIR,exist_ok=True)
 DB=os.path.join(DATA_DIR,'santa_clara_v8.db')
-
-# Seguridad V13.9.17: contraseñas adaptativas, cabeceras, control de origen y rate-limit.
-def password_ok(stored, plain):
- if not stored:return False
- try:
-  if stored.startswith(('scrypt:','pbkdf2:')):return check_password_hash(stored,plain)
- except Exception:pass
- # Compatibilidad temporal con claves SHA-256 antiguas; se migran al iniciar sesión.
- return secrets.compare_digest(stored,hashlib.sha256(plain.encode()).hexdigest())
-
-def password_hash(plain):return generate_password_hash(plain,method='scrypt')
-
-_LOGIN_ATTEMPTS={}
-def _client_ip():
- # En Render ProxyFix no está configurado: X-Forwarded-For solo se usa para rate limit, no para autorización.
- return (request.headers.get('X-Forwarded-For','').split(',')[0].strip() or request.remote_addr or 'unknown')[:80]
-def _rate_limited(key,limit=8,window=300):
- now_ts=time.time(); arr=[x for x in _LOGIN_ATTEMPTS.get(key,[]) if now_ts-x<window]
- _LOGIN_ATTEMPTS[key]=arr
- return len(arr)>=limit
-
-def _record_attempt(key):
- _LOGIN_ATTEMPTS.setdefault(key,[]).append(time.time())
-
-def _same_origin_ok():
- # Bloquea POST cross-site. Acepta clientes sin Origin/Referer para compatibilidad interna.
- origin=request.headers.get('Origin')
- referer=request.headers.get('Referer')
- src=origin or referer
- if not src:return True
- try:
-  return urlparse(src).netloc==request.host
- except Exception:return False
-
-@app.before_request
-def seguridad_pre_request():
- if request.method in ('POST','PUT','PATCH','DELETE') and not _same_origin_ok():
-  return ('Solicitud rechazada por seguridad.',403)
-
-@app.after_request
-def security_headers(resp):
- resp.headers['X-Content-Type-Options']='nosniff'
- resp.headers['X-Frame-Options']='DENY'
- resp.headers['Referrer-Policy']='strict-origin-when-cross-origin'
- resp.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
- resp.headers['Cross-Origin-Opener-Policy']='same-origin'
- resp.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
- if request.is_secure or os.environ.get('RENDER_SERVICE_ID'):
-  resp.headers['Strict-Transport-Security']='max-age=31536000; includeSubDomains'
- if request.endpoint not in ('static',):
-  resp.headers['Cache-Control']='no-store'
- return resp
 
 def _buscar_base_anterior():
  # 1) Una base incluida junto a app.py (instalaciones antiguas).
@@ -127,8 +69,14 @@ preparar_base_persistente()
 def db():
  c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
 def h(s):return hashlib.sha256(s.encode()).hexdigest()
+def password_hash(s):return generate_password_hash(s,method='scrypt')
+def password_ok(stored,plain):
+ try:
+  if stored and (stored.startswith('scrypt:') or stored.startswith('pbkdf2:')): return check_password_hash(stored,plain)
+ except Exception: pass
+ return secrets.compare_digest(stored or '',h(plain))
 def now():return datetime.datetime.now().isoformat(timespec='seconds')
-LOGO_PATH=os.path.join(os.path.dirname(__file__),'static','logo_santa_clara_cropped.png')
+LOGO_PATH=os.path.join(os.path.dirname(__file__),'static','santa_clara_logo_documentos.jpg')
 def pdf_logo(width=120,height=82):
  from reportlab.platypus import Image
  if os.path.exists(LOGO_PATH):
@@ -195,7 +143,7 @@ CREATE TABLE IF NOT EXISTS enfermeria(id INTEGER PRIMARY KEY,fecha TEXT,admision
  # Plan de cuentas referencial paraguayo para sanatorio. INSERT OR IGNORE preserva cuentas y datos existentes.
  cuentas_py=[('1','ACTIVO','ACTIVO'),('1.1','ACTIVO CORRIENTE','ACTIVO'),('1.1.01','Caja y Bancos','ACTIVO'),('1.1.02','Créditos por Ventas / Clientes','ACTIVO'),('1.1.03','Inventarios','ACTIVO'),('1.1.04','IVA Crédito Fiscal','ACTIVO'),('1.2','ACTIVO NO CORRIENTE','ACTIVO'),('1.2.01','Propiedad, Planta y Equipo','ACTIVO'),('1.2.02','Depreciación Acumulada','ACTIVO'),('2','PASIVO','PASIVO'),('2.1','PASIVO CORRIENTE','PASIVO'),('2.1.01','Proveedores','PASIVO'),('2.1.02','IVA Débito Fiscal','PASIVO'),('2.1.03','Honorarios Médicos a Pagar','PASIVO'),('2.1.04','Obligaciones Laborales','PASIVO'),('2.1.05','Impuestos y Retenciones a Pagar','PASIVO'),('3','PATRIMONIO NETO','PATRIMONIO'),('3.1.01','Capital','PATRIMONIO'),('3.1.02','Reservas','PATRIMONIO'),('3.1.03','Resultados Acumulados','PATRIMONIO'),('4','INGRESOS','INGRESO'),('4.1.01','Ventas de Medicamentos y Productos','INGRESO'),('4.1.02','Servicios Sanatoriales','INGRESO'),('4.1.03','Consultas y Procedimientos','INGRESO'),('4.1.04','Cirugías','INGRESO'),('4.2.01','Ganancia por Diferencia de Cambio','INGRESO'),('5','COSTOS Y GASTOS','EGRESO'),('5.1.01','Costo de Ventas','EGRESO'),('5.2.01','Pérdida por Diferencia de Cambio','EGRESO'),('5.3.01','Honorarios Médicos','EGRESO'),('5.4.01','Sueldos y Jornales','EGRESO'),('5.4.02','Cargas Sociales','EGRESO'),('5.5.01','Servicios Básicos','EGRESO'),('5.5.02','Mantenimiento y Reparaciones','EGRESO'),('5.5.03','Depreciaciones','EGRESO')]
  for x in cuentas_py:c.execute('INSERT OR IGNORE INTO plan_cuentas(codigo,nombre,tipo) VALUES(?,?,?)',x)
- if not c.execute('select 1 from usuarios').fetchone():c.execute('insert into usuarios(nombre,usuario,clave,rol) values(?,?,?,?)',('Administrador','admin',h('SantaClara2026!'),'ADMIN'))
+ if not c.execute('select 1 from usuarios').fetchone():c.execute('insert into usuarios(nombre,usuario,clave,rol) values(?,?,?,?)',('Administrador','admin',password_hash(os.environ.get('ADMIN_PASSWORD','SantaClara2026!')),'ADMIN'))
  # Migración IVA por producto/servicio y desglose fiscal
  for tabla,col,defn in [
   ('productos','iva_pct','REAL DEFAULT 10'),('servicios','iva_pct','REAL DEFAULT 10'),('compra_items','iva_pct','REAL DEFAULT 10'),('venta_items','iva_pct','REAL DEFAULT 10'),('cargos_paciente','iva_pct','REAL DEFAULT 10'),
@@ -248,16 +196,13 @@ def auth():
 @app.route('/login',methods=['GET','POST'])
 def login():
  if request.method=='POST':
-  ip=_client_ip(); key='login:'+ip
-  if _rate_limited(key,8,300):
-   return ('Demasiados intentos. Espere 5 minutos e intente nuevamente.',429)
-  usuario=(request.form.get('usuario') or '').strip(); clave=request.form.get('clave') or ''
-  c=db();u=c.execute('select * from usuarios where usuario=? and activo=1',(usuario,)).fetchone()
-  if u and password_ok(u['clave'],clave):
-   if not u['clave'].startswith(('scrypt:','pbkdf2:')):
-    c.execute('update usuarios set clave=? where id=?',(password_hash(clave),u['id']));c.commit()
-   c.close();session.clear();session.permanent=True;session['user']=u['usuario'];session['name']=u['nombre'];return redirect('/')
-  c.close();_record_attempt(key);time.sleep(0.25);flash('Usuario o contraseña incorrectos')
+  c=db();u=c.execute('select * from usuarios where usuario=? and activo=1',(request.form['usuario'],)).fetchone()
+  if u and password_ok(u['clave'],request.form['clave']):
+   if not (u['clave'] or '').startswith(('scrypt:','pbkdf2:')):
+    c.execute('update usuarios set clave=? where id=?',(password_hash(request.form['clave']),u['id']));c.commit()
+   c.close();session.permanent=True;session['user']=u['usuario'];session['name']=u['nombre'];return redirect('/')
+  c.close()
+  flash('Usuario o contraseña incorrectos')
  return render_template('login.html')
 @app.get('/logout')
 def logout():session.clear();return redirect('/login')
@@ -663,6 +608,74 @@ def cancelar(tipo,i):
 def cobrar(i):return cancelar('COBRO',i)
 @app.post('/pagar/<int:i>')
 def pagar(i):return cancelar('PAGO',i)
+
+def init_v13917_pagos_proveedores():
+ c=db()
+ c.execute("""CREATE TABLE IF NOT EXISTS pagos_proveedores(
+  id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,cxp_id INTEGER NOT NULL,proveedor_id INTEGER NOT NULL,
+  compra_id INTEGER,documento TEXT,medio TEXT,moneda TEXT,importe REAL,tipo_cambio REAL,importe_pyg REAL,
+  cuenta_debe TEXT,cuenta_haber TEXT,asiento_id INTEGER,creado_por TEXT,creado_en TEXT)""")
+ c.commit();c.close()
+init_v13917_pagos_proveedores()
+
+@app.route('/compras/cuentas-proveedores')
+def cuentas_pendientes_proveedores():
+ c=db();q=(request.args.get('q') or '').strip();estado=request.args.get('estado','PENDIENTE')
+ sql="""select x.*,t.nombre proveedor,t.ruc,c.numero factura,c.fecha fecha_compra,c.fecha_vencimiento
+ from cxp x join terceros t on t.id=x.tercero_id left join compras c on c.id=x.compra_id where 1=1"""
+ par=[]
+ if estado=='PENDIENTE':sql+=" and x.saldo>0.0001"
+ elif estado=='PAGADO':sql+=" and x.saldo<=0.0001"
+ if q:
+  sql+=" and (t.nombre like ? collate nocase or t.ruc like ? or c.numero like ?)"
+  like='%'+q+'%';par += [like,like,like]
+ sql+=" order by t.nombre,c.fecha,x.id"
+ rows=c.execute(sql,par).fetchall()
+ resumen=c.execute("""select t.id,t.nombre,t.ruc,count(x.id) documentos,sum(x.saldo) saldo
+ from cxp x join terceros t on t.id=x.tercero_id where x.saldo>0.0001 group by t.id,t.nombre,t.ruc order by t.nombre""").fetchall()
+ c.close();return render_template('supplier_pending.html',rows=rows,resumen=resumen,q=q,estado=estado)
+
+@app.route('/compras/pagos-proveedores',methods=['GET','POST'])
+def pagos_proveedores():
+ c=db()
+ if request.method=='POST':
+  try:
+   cxpid=int(request.form['cxp_id']);r=c.execute("""select x.*,t.nombre proveedor from cxp x join terceros t on t.id=x.tercero_id where x.id=?""",(cxpid,)).fetchone()
+   if not r or float(r['saldo'] or 0)<=0:raise ValueError('La cuenta seleccionada no tiene saldo pendiente.')
+   imp=float(request.form['importe']); 
+   if imp<=0 or imp>float(r['saldo'])+0.0001:raise ValueError('El importe debe ser mayor a cero y no superar el saldo pendiente.')
+   fecha=request.form['fecha'];mon=r['moneda'] or 'PYG';lado=request.form.get('lado_cotizacion','VENTA')
+   tc=1.0 if mon=='PYG' else tc_dnit(c,fecha,mon,lado);pyg=round(imp*tc,2);orig=round(imp*float(r['tipo_cambio_origen'] or 1),2)
+   debe=request.form['cuenta_debe'];haber=request.form['cuenta_haber']
+   if debe==haber:raise ValueError('Cuenta Debe y Cuenta Haber deben ser diferentes.')
+   for cuenta in (debe,haber):
+    if not c.execute('select 1 from plan_cuentas where codigo=? and imputable=1',(cuenta,)).fetchone():raise ValueError('Cuenta contable inválida: '+cuenta)
+   lines=[(debe,orig,0,imp,'Cancelación cuenta proveedor'),(haber,0,pyg,imp,'Pago a proveedor')]
+   dif=pyg-orig
+   if abs(dif)>0.01:
+    # Conserva el criterio contable existente del ERP para pagos en moneda extranjera.
+    if dif>0:lines.append(('5.2.01',dif,0,0,'Pérdida por diferencia de cambio'))
+    else:lines.append(('4.2.01',0,-dif,0,'Ganancia por diferencia de cambio'))
+   aid=asiento(c,fecha,'Pago a proveedor '+r['proveedor'],'PAGO_PROVEEDOR',0,mon,tc,lines)
+   cur=c.execute("""insert into pagos_proveedores(fecha,cxp_id,proveedor_id,compra_id,documento,medio,moneda,importe,tipo_cambio,importe_pyg,cuenta_debe,cuenta_haber,asiento_id,creado_por,creado_en)
+    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(fecha,cxpid,r['tercero_id'],r['compra_id'],request.form.get('documento'),request.form['medio'],mon,imp,tc,pyg,debe,haber,aid,session.get('user'),now()))
+   pid=cur.lastrowid;c.execute('update asientos set origen_id=? where id=?',(pid,aid))
+   c.execute("update cxp set saldo=saldo-?,estado=case when saldo-?<=0.0001 then 'PAGADO' else 'PENDIENTE' end where id=?",(imp,imp,cxpid))
+   c.execute("""insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id)
+    values(?,'EGRESO',?,?,?,?,?,'Pago a proveedor','PAGO_PROVEEDOR',?)""",(fecha,request.form['medio'],mon,tc,imp,pyg,pid))
+   c.commit();audit('PAGO_PROVEEDOR',f'Pago {pid} / CxP {cxpid} / {imp} {mon}');flash('Pago a proveedor registrado y contabilizado.')
+  except Exception as ex:c.rollback();flash(str(ex))
+  c.close();return redirect('/compras/pagos-proveedores')
+ q=(request.args.get('q') or '').strip();sql="""select x.*,t.nombre proveedor,t.ruc,c.numero factura,c.fecha fecha_compra
+ from cxp x join terceros t on t.id=x.tercero_id left join compras c on c.id=x.compra_id where x.saldo>0.0001"""
+ par=[]
+ if q:
+  like='%'+q+'%';sql+=" and (t.nombre like ? collate nocase or t.ruc like ? or c.numero like ?)";par=[like,like,like]
+ sql+=" order by t.nombre,c.fecha,x.id"
+ pendientes=c.execute(sql,par).fetchall();cuentas=c.execute('select * from plan_cuentas where imputable=1 order by codigo').fetchall()
+ pagos=c.execute("""select p.*,t.nombre proveedor,c.numero factura from pagos_proveedores p join terceros t on t.id=p.proveedor_id left join compras c on c.id=p.compra_id order by p.id desc limit 200""").fetchall()
+ c.close();return render_template('supplier_payments.html',pendientes=pendientes,cuentas=cuentas,pagos=pagos,q=q)
+
 @app.route('/finanzas')
 def finanzas():
  c=db();rx=c.execute('select x.*,t.nombre tercero from cxc x join terceros t on t.id=x.tercero_id order by x.id desc').fetchall();px=c.execute('select x.*,t.nombre tercero from cxp x join terceros t on t.id=x.tercero_id order by x.id desc').fetchall();mov=c.execute('select * from caja_banco order by id desc').fetchall();c.close();return render_template('finance.html',rx=rx,px=px,mov=mov)
@@ -690,6 +703,7 @@ def config_sanatorio():
  cols=[r['name'] for r in c.execute('pragma table_info(medicos)').fetchall()]
  if 'precio_consulta' not in cols:c.execute('alter table medicos add column precio_consulta REAL DEFAULT 0')
  if 'honorario_consulta' not in cols:c.execute('alter table medicos add column honorario_consulta REAL DEFAULT 0')
+ if 'consultorio_numero' not in cols:c.execute('alter table medicos add column consultorio_numero TEXT')
  c.execute('CREATE TABLE IF NOT EXISTS especialidades(id INTEGER PRIMARY KEY,nombre TEXT UNIQUE,precio_consulta REAL DEFAULT 0,honorario_medico REAL DEFAULT 0,activo INT DEFAULT 1)')
  ecols=[r['name'] for r in c.execute('pragma table_info(especialidades)').fetchall()]
  if 'minutos_consulta' not in ecols:c.execute('alter table especialidades add column minutos_consulta INT DEFAULT 15')
@@ -709,9 +723,9 @@ def config_sanatorio():
   elif k=='medico':
    esp=request.form['especialidad']; precio=float(request.form.get('precio_consulta') or 0); hon=float(request.form.get('honorario_consulta') or 0)
    c.execute('insert or ignore into especialidades(nombre,precio_consulta,honorario_medico) values(?,?,?)',(esp,precio,hon))
-   c.execute('insert into medicos(nombre,registro,especialidad,precio_consulta,honorario_consulta) values(?,?,?,?,?)',(request.form['nombre'],request.form['registro'],esp,precio,hon))
+   c.execute('insert into medicos(nombre,registro,especialidad,precio_consulta,honorario_consulta,consultorio_numero) values(?,?,?,?,?,?)',(request.form['nombre'],request.form['registro'],esp,precio,hon,request.form.get('consultorio_numero','').strip()))
   elif k=='actualizar_medico':
-   c.execute('update medicos set especialidad=?,precio_consulta=?,honorario_consulta=? where id=?',(request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),int(request.form['medico_id'])))
+   c.execute('update medicos set especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=? where id=?',(request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),int(request.form['medico_id'])))
   elif k=='aseguradora':
    cur=c.execute("insert into terceros(tipo,ruc,nombre,moneda) values('CLIENTE',?,?,?)",(request.form['ruc'],request.form['nombre'],request.form['moneda']));c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda) values(?,?,?,?)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda']))
   elif k=='cama':
@@ -1002,6 +1016,7 @@ ROUTE_MODULE={
  'consultas':'CONSULTORIO','liquidaciones_medicas':'FINANZAS','informes_consultas':'INFORMES','config_sanatorio':'CONFIG_SANATORIO',
  'productos':'STOCK','compras':'COMPRAS','ventas':'VENTAS','finanzas':'FINANZAS','contabilidad':'CONTABILIDAD','libros':'CONTABILIDAD'
 }
+ROUTE_MODULE.update({'cuentas_pendientes_proveedores':'COMPRAS','pagos_proveedores':'COMPRAS'})
 @app.before_request
 def modular_guard():
  # Rutas públicas / autenticación.
@@ -1026,6 +1041,7 @@ def modular_guard():
   'producto_editar':('STOCK','EDITAR'),'producto_eliminar':('STOCK','ANULAR'),
   'api_productos_buscar':('STOCK','VER'),
   'compras':('COMPRAS','CREAR' if request.method=='POST' else 'VER'),
+  'cuentas_pendientes_proveedores':('COMPRAS','VER'),'pagos_proveedores':('COMPRAS','CREAR' if request.method=='POST' else 'VER'),
   'compra_ver':('COMPRAS','VER'),'compra_editar':('COMPRAS','EDITAR'),
   'compra_eliminar':('COMPRAS','ANULAR'),'compra_cuotas':('COMPRAS','EDITAR'),
   'anular_compra':('COMPRAS','ANULAR'),
@@ -1611,9 +1627,11 @@ def mis_pacientes():
 @app.post('/llamar-paciente/<int:gid>')
 def llamar_paciente(gid):
  if not (user_has('AGENDA','LLAMAR') or user_has('CONSULTORIO','LLAMAR')):return jsonify(ok=False,error='Sin permiso para llamar pacientes'),403
- c=db();r=c.execute('''select g.*,p.nombre paciente,m.nombre medico from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id where g.id=?''',(gid,)).fetchone()
+ c=db();r=c.execute('''select g.*,p.nombre paciente,m.consultorio_numero from agenda g join pacientes p on p.id=g.paciente_id join medicos m on m.id=g.medico_id where g.id=?''',(gid,)).fetchone()
  if not r:c.close();return jsonify(ok=False,error='Agenda no encontrada'),404
- texto=f"Paciente {r['paciente']}, favor pasar al consultorio del doctor {r['medico']}";c.execute('insert into llamados_pacientes(agenda_id,fecha_hora,medico_id,texto,usuario) values(?,?,?,?,?)',(gid,now(),r['medico_id'],texto,session['user']));c.execute("update agenda set estado='LLAMADO' where id=?",(gid,));c.commit();c.close();return jsonify(ok=True,texto=texto)
+ numero=(r['consultorio_numero'] or '').strip()
+ if not numero:c.close();return jsonify(ok=False,error='Este médico no tiene número de consultorio configurado.'),400
+ texto=f"Paciente {r['paciente']}, favor pasar al consultorio número {numero}";c.execute('insert into llamados_pacientes(agenda_id,fecha_hora,medico_id,texto,usuario) values(?,?,?,?,?)',(gid,now(),r['medico_id'],texto,session['user']));c.execute("update agenda set estado='LLAMADO' where id=?",(gid,));c.commit();c.close();return jsonify(ok=True,texto=texto)
 
 @app.route('/historia-clinica/<int:pid>',methods=['GET','POST'])
 def historia_clinica_v12(pid):
@@ -1653,41 +1671,58 @@ def preparar_actualizacion_segura():
    c.execute("INSERT INTO schema_migrations(version,aplicado_en) VALUES(?,?)",('V13.3',now()));c.commit()
  finally:c.close()
 
-def backup_automatico_5min():
- """Copia consistente SQLite cada 5 minutos. Conserva 72 copias (6 h) y el backup diario existente."""
- if not os.path.exists(DB):return
- carpeta=os.path.join(DATA_DIR,'backups','5min');os.makedirs(carpeta,exist_ok=True)
- stamp=datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
- destino=os.path.join(carpeta,'santa_clara_'+stamp+'.db')
- tmp=destino+'.tmp'
- src=None;dst=None
- try:
-  src=sqlite3.connect(DB,timeout=30);dst=sqlite3.connect(tmp)
-  src.backup(dst);dst.close();dst=None;src.close();src=None
-  os.replace(tmp,destino)
-  copias=sorted([os.path.join(carpeta,x) for x in os.listdir(carpeta) if x.startswith('santa_clara_') and x.endswith('.db')],key=os.path.getmtime,reverse=True)
-  for viejo in copias[72:]:
-   try:os.remove(viejo)
-   except OSError:pass
- except Exception as e:
-  print('[Santa Clara] Error backup automático:',e)
- finally:
-  try:
-   if dst:dst.close()
-   if src:src.close()
-   if os.path.exists(tmp):os.remove(tmp)
-  except Exception:pass
+# Seguridad web y respaldo automático V13.9.20-R1
+_login_attempts={}
+_login_lock=threading.Lock()
 
-def _backup_worker():
+@app.before_request
+def seguridad_basica():
+ if request.endpoint=='login' and request.method=='POST':
+  ip=request.headers.get('X-Forwarded-For',request.remote_addr or '').split(',')[0].strip()
+  ahora=time.time()
+  with _login_lock:
+   intentos=[t for t in _login_attempts.get(ip,[]) if ahora-t<300]
+   if len(intentos)>=8:return ('Demasiados intentos de acceso. Intente nuevamente en unos minutos.',429)
+   intentos.append(ahora);_login_attempts[ip]=intentos
+ if request.method in ('POST','PUT','PATCH','DELETE'):
+  origin=request.headers.get('Origin')
+  if origin and origin.rstrip('/') != request.host_url.rstrip('/'):
+   return ('Solicitud rechazada por seguridad.',403)
+
+@app.after_request
+def cabeceras_seguridad(resp):
+ resp.headers['X-Content-Type-Options']='nosniff'
+ resp.headers['X-Frame-Options']='SAMEORIGIN'
+ resp.headers['Referrer-Policy']='strict-origin-when-cross-origin'
+ resp.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=()'
+ resp.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-ancestors 'self'"
+ if os.environ.get('RENDER'):resp.headers['Strict-Transport-Security']='max-age=31536000; includeSubDomains'
+ return resp
+
+@app.get('/health')
+def health():
+ try:
+  c=db();c.execute('select 1').fetchone();c.close();return jsonify(status='ok',database='ok'),200
+ except Exception as e:return jsonify(status='error'),503
+
+def backup_sqlite_5min():
+ carpeta=os.path.join(DATA_DIR,'backups','5min');os.makedirs(carpeta,exist_ok=True)
  while True:
-  try:backup_automatico_5min()
-  except Exception as e:print('[Santa Clara] Backup worker:',e)
+  try:
+   if os.path.exists(DB):
+    destino=os.path.join(carpeta,'santa_clara_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
+    src=sqlite3.connect(DB);dst=sqlite3.connect(destino)
+    try:src.backup(dst)
+    finally:dst.close();src.close()
+    copias=sorted([os.path.join(carpeta,x) for x in os.listdir(carpeta) if x.endswith('.db')],key=os.path.getmtime,reverse=True)
+    for viejo in copias[288:]:
+     try:os.remove(viejo)
+     except OSError:pass
+  except Exception as e:print('[Santa Clara] Backup 5 min:',e)
   time.sleep(300)
 
 def iniciar_backup_automatico():
- # Con la configuración actual de Render (1 worker) inicia un único hilo daemon.
- if os.environ.get('SANTA_CLARA_DISABLE_AUTO_BACKUP','0')!='1':
-  threading.Thread(target=_backup_worker,name='backup-5min',daemon=True).start()
+ t=threading.Thread(target=backup_sqlite_5min,name='backup-santa-clara',daemon=True);t.start()
 
 backup_inicio()
 iniciar_backup_automatico()
@@ -2673,88 +2708,6 @@ def agenda_web_confirmacion():
 
 ROUTE_MODULE.update({'conciliacion_bancaria':'FINANZAS','conciliacion_bancaria_detalle':'FINANZAS'})
 init_v1391()
-
-# ===== V13.9.18: integración financiera corregida + diagnóstico =====
-def init_v13918_finanzas():
- c=db();c.executescript("""
- CREATE TABLE IF NOT EXISTS cotizaciones_dnit(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,moneda TEXT NOT NULL,compra REAL NOT NULL,venta REAL NOT NULL,fuente TEXT DEFAULT 'DNIT',creado_por TEXT,creado_en TEXT,UNIQUE(fecha,moneda));
- CREATE TABLE IF NOT EXISTS movimientos_financieros_manuales(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,numero TEXT UNIQUE,documento TEXT,concepto TEXT NOT NULL,moneda TEXT NOT NULL,lado_cotizacion TEXT DEFAULT 'VENTA',importe_moneda REAL NOT NULL,tipo_cambio REAL NOT NULL,importe_pyg REAL NOT NULL,cuenta_debe TEXT NOT NULL,cuenta_haber TEXT NOT NULL,asiento_id INTEGER,usuario TEXT,creado_en TEXT);
- CREATE TABLE IF NOT EXISTS ajustes_diferencia_cambio(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,movimiento_id INTEGER NOT NULL,moneda TEXT NOT NULL,tc_original REAL NOT NULL,tc_cierre REAL NOT NULL,diferencia_pyg REAL NOT NULL,cuenta_afectada TEXT,cuenta_resultado TEXT,asiento_id INTEGER,usuario TEXT,creado_en TEXT,UNIQUE(fecha,movimiento_id));
- CREATE INDEX IF NOT EXISTS idx_dnit_fecha_moneda ON cotizaciones_dnit(moneda,fecha);
- CREATE INDEX IF NOT EXISTS idx_movfin_fecha ON movimientos_financieros_manuales(fecha);
- """);c.commit();c.close()
-
-def _dnit_tc(c,fecha,moneda,lado='VENTA'):
- if moneda=='PYG':return 1.0
- col='compra' if str(lado).upper()=='COMPRA' else 'venta'
- r=c.execute(f"select {col} tc from cotizaciones_dnit where moneda=? and fecha<=? order by fecha desc limit 1",(moneda,fecha)).fetchone()
- return float(r['tc']) if r and r['tc'] else None
-
-@app.route('/cotizaciones-dnit',methods=['GET','POST'])
-def cotizaciones_dnit():
- c=db()
- if request.method=='POST':
-  fecha=(request.form.get('fecha') or '').strip();moneda=(request.form.get('moneda') or '').strip().upper()
-  try:compra=float(request.form.get('compra') or 0);venta=float(request.form.get('venta') or 0)
-  except ValueError:compra=venta=0
-  if not fecha or not moneda or compra<=0 or venta<=0:c.close();flash('Complete fecha, moneda y cotizaciones válidas.');return redirect('/cotizaciones-dnit')
-  c.execute("insert into cotizaciones_dnit(fecha,moneda,compra,venta,fuente,creado_por,creado_en) values(?,?,?,?,?,?,?) on conflict(fecha,moneda) do update set compra=excluded.compra,venta=excluded.venta,fuente=excluded.fuente,creado_por=excluded.creado_por,creado_en=excluded.creado_en",(fecha,moneda,compra,venta,'DNIT',session.get('user'),now()));c.commit();c.close();audit('COTIZACION_DNIT',f'{fecha} {moneda} compra={compra} venta={venta}');flash('Cotización DNIT guardada.');return redirect('/cotizaciones-dnit')
- mons=c.execute("select * from monedas where activa=1 and codigo<>'PYG' order by codigo").fetchall();rows=c.execute('select * from cotizaciones_dnit order by fecha desc,moneda limit 500').fetchall();c.close();return render_template('exchange_dnit.html',mons=mons,rows=rows)
-
-@app.route('/finanzas/movimientos-manuales',methods=['GET','POST'])
-def movimientos_financieros_manuales():
- c=db()
- if request.method=='POST':
-  fecha=(request.form.get('fecha') or '').strip();documento=(request.form.get('documento') or '').strip();concepto=(request.form.get('concepto') or '').strip();moneda=(request.form.get('moneda') or 'PYG').strip().upper();lado=(request.form.get('lado_cotizacion') or 'VENTA').upper();debe=(request.form.get('cuenta_debe') or '').strip();haber=(request.form.get('cuenta_haber') or '').strip()
-  try:importe=float(request.form.get('importe_moneda') or 0)
-  except ValueError:importe=0
-  if not fecha or not concepto or importe<=0 or not debe or not haber or debe==haber:c.close();flash('Verifique fecha, concepto, importe y que las cuentas Debe/Haber sean diferentes.');return redirect('/finanzas/movimientos-manuales')
-  if not c.execute('select 1 from plan_cuentas where codigo=? and imputable=1',(debe,)).fetchone() or not c.execute('select 1 from plan_cuentas where codigo=? and imputable=1',(haber,)).fetchone():c.close();flash('Seleccione cuentas contables imputables válidas.');return redirect('/finanzas/movimientos-manuales')
-  tc=_dnit_tc(c,fecha,moneda,lado)
-  if tc is None:c.close();flash(f'No existe cotización DNIT de {lado} para {moneda} en esa fecha o una fecha anterior.');return redirect('/finanzas/movimientos-manuales')
-  pyg=round(importe*tc,2);numero=f'MF-{datetime.datetime.now():%Y%m%d%H%M%S%f}'
-  try:
-   c.execute('BEGIN IMMEDIATE');cur=c.execute('insert into movimientos_financieros_manuales(fecha,numero,documento,concepto,moneda,lado_cotizacion,importe_moneda,tipo_cambio,importe_pyg,cuenta_debe,cuenta_haber,usuario,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,numero,documento,concepto,moneda,lado,importe,tc,pyg,debe,haber,session.get('user'),now()));mid=cur.lastrowid
-   aid=asiento(c,fecha,concepto,'MOVIMIENTO_FINANCIERO_MANUAL',mid,moneda,tc,[(debe,pyg,0,importe,'Debe movimiento manual'),(haber,0,pyg,-importe,'Haber movimiento manual')]);c.execute('update movimientos_financieros_manuales set asiento_id=? where id=?',(aid,mid));c.commit()
-  except Exception:c.rollback();c.close();raise
-  c.close();audit('MOVIMIENTO_FINANCIERO_MANUAL',numero);flash('Movimiento y asiento registrados correctamente.');return redirect('/finanzas/movimientos-manuales')
- mons=c.execute('select * from monedas where activa=1 order by codigo').fetchall();cuentas=c.execute('select * from plan_cuentas where imputable=1 order by codigo').fetchall();rows=c.execute("select m.*,d.nombre debe_nombre,h.nombre haber_nombre from movimientos_financieros_manuales m left join plan_cuentas d on d.codigo=m.cuenta_debe left join plan_cuentas h on h.codigo=m.cuenta_haber order by m.id desc limit 500").fetchall();c.close();return render_template('financial_manual.html',mons=mons,cuentas=cuentas,rows=rows)
-
-@app.route('/contabilidad/diferencia-cambio',methods=['GET','POST'])
-def diferencia_cambio():
- c=db()
- if request.method=='POST':
-  fecha=(request.form.get('fecha') or '').strip();moneda=(request.form.get('moneda') or '').strip().upper();lado=(request.form.get('lado_cotizacion') or 'VENTA').upper();ganancia=(request.form.get('cuenta_ganancia') or '').strip();perdida=(request.form.get('cuenta_perdida') or '').strip();tc_cierre=_dnit_tc(c,fecha,moneda,lado)
-  if not fecha or moneda=='PYG' or tc_cierre is None or not ganancia or not perdida:c.close();flash('Complete la fecha, moneda extranjera, cotización DNIT y cuentas de resultado.');return redirect('/contabilidad/diferencia-cambio')
-  movs=c.execute('select * from movimientos_financieros_manuales where moneda=? and fecha<=? order by id',(moneda,fecha)).fetchall();creados=0
-  try:
-   c.execute('BEGIN IMMEDIATE')
-   for m in movs:
-    if c.execute('select 1 from ajustes_diferencia_cambio where fecha=? and movimiento_id=?',(fecha,m['id'])).fetchone():continue
-    dif=round(float(m['importe_moneda'])*(tc_cierre-float(m['tipo_cambio'])),2)
-    if abs(dif)<0.01:continue
-    afectada=m['cuenta_debe']
-    if dif>0:lineas=[(afectada,dif,0,0,'Revaluación diferencia de cambio'),(ganancia,0,dif,0,'Ganancia por diferencia de cambio')];resultado=ganancia
-    else:x=abs(dif);lineas=[(perdida,x,0,0,'Pérdida por diferencia de cambio'),(afectada,0,x,0,'Revaluación diferencia de cambio')];resultado=perdida
-    aid=asiento(c,fecha,f'Diferencia de cambio {moneda} - {m["numero"]}','DIFERENCIA_CAMBIO',m['id'],'PYG',1,lineas);c.execute('insert into ajustes_diferencia_cambio(fecha,movimiento_id,moneda,tc_original,tc_cierre,diferencia_pyg,cuenta_afectada,cuenta_resultado,asiento_id,usuario,creado_en) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,m['id'],moneda,m['tipo_cambio'],tc_cierre,dif,afectada,resultado,aid,session.get('user'),now()));creados+=1
-   c.commit()
-  except Exception:c.rollback();c.close();raise
-  c.close();audit('DIFERENCIA_CAMBIO',f'{fecha} {moneda}: {creados} ajustes');flash(f'Ajuste completado: {creados} asiento(s) generado(s).');return redirect('/contabilidad/diferencia-cambio')
- mons=c.execute("select * from monedas where activa=1 and codigo<>'PYG' order by codigo").fetchall();cuentas=c.execute('select * from plan_cuentas where imputable=1 order by codigo').fetchall();rows=c.execute('select * from ajustes_diferencia_cambio order by id desc limit 500').fetchall();c.close();return render_template('exchange_difference.html',mons=mons,cuentas=cuentas,rows=rows)
-
-@app.get('/health')
-def health():
- try:c=db();c.execute('select 1').fetchone();c.close();return jsonify(status='ok',database='ok',backup_interval_minutes=5),200
- except Exception:return jsonify(status='error',database='error'),503
-
-@app.get('/auditoria')
-def auditoria_alias():return redirect('/auditoria-detallada')
-@app.get('/cajas/cierres')
-def cierres_alias():return redirect('/ventas/cierres-caja')
-@app.get('/cirugias')
-def cirugias_alias():return redirect('/informes/cirugias')
-ROUTE_MODULE.update({'cotizaciones_dnit':'FINANZAS','movimientos_financieros_manuales':'FINANZAS','diferencia_cambio':'CONTABILIDAD','auditoria_alias':'USUARIOS','cierres_alias':'FINANZAS','cirugias_alias':'QUIROFANO'})
-init_v13918_finanzas()
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
