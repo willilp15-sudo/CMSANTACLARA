@@ -338,7 +338,7 @@ def compras():
  if buscado:
   like='%'+q+'%'
   rows=c.execute("select x.*,t.nombre tercero from compras x join terceros t on t.id=x.proveedor_id where x.numero like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(like,like,like,like)).fetchall()
- ters=c.execute("select * from terceros where tipo in ('PROVEEDOR','AMBOS')").fetchall();prods=[];mons=c.execute('select * from monedas').fetchall();c.close();return render_template('transaction.html',kind='Compra',rows=rows,ters=ters,prods=prods,mons=mons,buscado=buscado,q=q)
+ ters=c.execute("select * from terceros where tipo in ('PROVEEDOR','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('transaction.html',kind='Compra',rows=rows,ters=ters,prods=prods,mons=mons,buscado=buscado,q=q)
 
 
 
@@ -557,7 +557,7 @@ def ventas():
  if buscado:
   like='%'+q+'%'
   rows=c.execute("select x.*,t.nombre tercero from ventas x join terceros t on t.id=x.cliente_id where x.numero like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(like,like,like,like)).fetchall()
- ters=c.execute("select * from terceros where tipo in ('CLIENTE','AMBOS')").fetchall();prods=[];mons=c.execute('select * from monedas').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();c.close();return render_template('transaction.html',kind='Venta',rows=rows,ters=ters,prods=prods,mons=mons,cuentas=cuentas,poses=poses,buscado=buscado,q=q)
+ ters=c.execute("select * from terceros where tipo in ('CLIENTE','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();c.close();return render_template('transaction.html',kind='Venta',rows=rows,ters=ters,prods=prods,mons=mons,cuentas=cuentas,poses=poses,buscado=buscado,q=q)
 
 @app.route('/ventas/recepcion-caja',methods=['GET','POST'])
 def recepcion_caja_unificada():
@@ -1057,9 +1057,9 @@ def modular_guard():
  # La búsqueda de productos es una operación auxiliar necesaria tanto para Ventas como Compras.
  # El control de acceso se hace aquí para no exigir permiso STOCK a cajeros/compradores.
  if request.endpoint=='api_productos_buscar':
-  if user_has('STOCK','VER') or user_has('VENTAS','VER') or user_has('VENTAS','CREAR') or user_has('COMPRAS','VER') or user_has('COMPRAS','CREAR'):
-   return
-  return (jsonify(error='Sin permiso para consultar productos'),403)
+  # Endpoint auxiliar: cualquier usuario autenticado puede consultar el catálogo.
+  # La autorización de crear ventas/compras sigue controlada por la ruta principal.
+  return
 
  # Administración de usuarios/roles: permiso explícito y exclusivo.
  if request.endpoint and request.endpoint.startswith('admin_'):
