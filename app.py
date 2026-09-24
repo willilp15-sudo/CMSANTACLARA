@@ -76,12 +76,41 @@ def password_ok(stored,plain):
  except Exception: pass
  return secrets.compare_digest(stored or '',h(plain))
 def now():return datetime.datetime.now().isoformat(timespec='seconds')
-LOGO_PATH=os.path.join(os.path.dirname(__file__),'static','santa_clara_logo_documentos.jpg')
+DEFAULT_LOGO='santa_clara_logo_documentos.jpg'
+BRANDING_DIR=os.path.join(DATA_DIR,'branding')
+os.makedirs(BRANDING_DIR,exist_ok=True)
+
+def _logo_archivo_configurado():
+ try:
+  c=db(); r=c.execute('select logo_archivo from institucion_config where id=1').fetchone(); c.close()
+  return (r['logo_archivo'] if r and r['logo_archivo'] else DEFAULT_LOGO)
+ except Exception:
+  return DEFAULT_LOGO
+
+def logo_path_actual():
+ nombre=os.path.basename(_logo_archivo_configurado())
+ persistente=os.path.join(BRANDING_DIR,nombre)
+ if os.path.isfile(persistente): return persistente
+ candidato=os.path.join(app.root_path,'static',nombre)
+ if os.path.isfile(candidato): return candidato
+ return os.path.join(app.root_path,'static',DEFAULT_LOGO)
+
 def pdf_logo(width=120,height=82):
  from reportlab.platypus import Image
- if os.path.exists(LOGO_PATH):
-  im=Image(LOGO_PATH,width=width,height=height); im.hAlign='LEFT'; return im
+ ruta=logo_path_actual()
+ if os.path.exists(ruta):
+  im=Image(ruta,width=width,height=height); im.hAlign='LEFT'; return im
  return None
+
+@app.get('/branding/logo')
+def branding_logo():
+ ruta=logo_path_actual()
+ if os.path.isfile(ruta): return send_file(ruta,max_age=300)
+ return ('',404)
+
+@app.context_processor
+def identidad_visual_global():
+ return {'logo_url':'/branding/logo'}
 def monto_letras(n):
  n=int(round(float(n or 0))); u=['','UNO','DOS','TRES','CUATRO','CINCO','SEIS','SIETE','OCHO','NUEVE','DIEZ','ONCE','DOCE','TRECE','CATORCE','QUINCE','DIECISEIS','DIECISIETE','DIECIOCHO','DIECINUEVE','VEINTE','VEINTIUNO','VEINTIDOS','VEINTITRES','VEINTICUATRO','VEINTICINCO','VEINTISEIS','VEINTISIETE','VEINTIOCHO','VEINTINUEVE']; d=['','','TREINTA','CUARENTA','CINCUENTA','SESENTA','SETENTA','OCHENTA','NOVENTA']; ce=['','CIENTO','DOSCIENTOS','TRESCIENTOS','CUATROCIENTOS','QUINIENTOS','SEISCIENTOS','SETECIENTOS','OCHOCIENTOS','NOVECIENTOS']
  def sub(x):
@@ -1020,11 +1049,17 @@ ROUTE_MODULE.update({'cuentas_pendientes_proveedores':'COMPRAS','pagos_proveedor
 @app.before_request
 def modular_guard():
  # Rutas públicas / autenticación.
- publicos={None,'login','logout','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion'}
+ publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion'}
  if request.endpoint in publicos:return
  if not session.get('user'):return redirect('/login')
  if request.endpoint=='cambiar_mi_clave':return
  if request.endpoint in ('api_buscar_pacientes','api_buscar_proveedores'):return
+ # La búsqueda de productos es una operación auxiliar necesaria tanto para Ventas como Compras.
+ # El control de acceso se hace aquí para no exigir permiso STOCK a cajeros/compradores.
+ if request.endpoint=='api_productos_buscar':
+  if user_has('STOCK','VER') or user_has('VENTAS','VER') or user_has('VENTAS','CREAR') or user_has('COMPRAS','VER') or user_has('COMPRAS','CREAR'):
+   return
+  return (jsonify(error='Sin permiso para consultar productos'),403)
 
  # Administración de usuarios/roles: permiso explícito y exclusivo.
  if request.endpoint and request.endpoint.startswith('admin_'):
@@ -1039,7 +1074,6 @@ def modular_guard():
   'tercero_editar':('FINANZAS','EDITAR'),'tercero_eliminar':('FINANZAS','ANULAR'),
   'productos':('STOCK','CREAR' if request.method=='POST' else 'VER'),
   'producto_editar':('STOCK','EDITAR'),'producto_eliminar':('STOCK','ANULAR'),
-  'api_productos_buscar':('STOCK','VER'),
   'compras':('COMPRAS','CREAR' if request.method=='POST' else 'VER'),
   'cuentas_pendientes_proveedores':('COMPRAS','VER'),'pagos_proveedores':('COMPRAS','CREAR' if request.method=='POST' else 'VER'),
   'compra_ver':('COMPRAS','VER'),'compra_editar':('COMPRAS','EDITAR'),
@@ -2474,7 +2508,7 @@ def factura_venta_pdf(venta_id):
     if not v: flash('Factura no encontrada.'); return redirect('/ventas/carga')
     b=BytesIO();doc=SimpleDocTemplate(b,pagesize=A4,rightMargin=12*mm,leftMargin=12*mm,topMargin=10*mm,bottomMargin=10*mm)
     st=getSampleStyleSheet(); story=[]
-    logo=os.path.join(app.root_path,'static','logo_santa_clara_cropped.png')
+    logo=logo_path_actual()
     head=[]
     if os.path.exists(logo): head.append(Image(logo,width=42*mm,height=20*mm))
     else: head.append(Paragraph('<b>CENTRO MÉDICO SANTA CLARA</b>',st['Heading2']))
@@ -2538,9 +2572,19 @@ def configuracion_empresa():
         if logo and logo.filename:
             ext=Path(logo.filename).suffix.lower()
             if ext in ('.png','.jpg','.jpeg','.webp'):
-                nombre='logo_empresa'+ext
-                logo.save(os.path.join(app.root_path,'static',nombre))
-                c.execute('update institucion_config set logo_archivo=? where id=1',(nombre,))
+                try:
+                    from PIL import Image as PILImage
+                    logo.stream.seek(0); imagen=PILImage.open(logo.stream); imagen.verify(); logo.stream.seek(0)
+                    nombre='logo_empresa'+ext
+                    destino=os.path.join(BRANDING_DIR,nombre)
+                    # Mantener una sola imagen institucional activa para documentos.
+                    for anterior in Path(BRANDING_DIR).glob('logo_empresa.*'):
+                        try: anterior.unlink()
+                        except OSError: pass
+                    logo.save(destino)
+                    c.execute('update institucion_config set logo_archivo=? where id=1',(nombre,))
+                except Exception:
+                    flash('Logo no actualizado: el archivo no es una imagen válida.')
             else: flash('Logo no actualizado: use PNG, JPG, JPEG o WEBP.')
         c.commit();audit('CONFIG_EMPRESA','Actualización de datos institucionales y documentos');flash('Configuración de la empresa guardada correctamente.')
         c.close();return redirect('/configuracion-empresa')

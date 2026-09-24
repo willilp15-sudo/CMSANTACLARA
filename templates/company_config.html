@@ -12,7 +12,10 @@
 <label>Prefijo factura<input name="prefijo_factura" value="{{inst['prefijo_factura'] or '001-001'}}"></label><label>Próximo N.º factura<input type="number" min="1" name="proximo_numero_factura" value="{{inst['proximo_numero_factura'] or 1}}"></label>
 <label>Prefijo recibo<input name="prefijo_recibo" value="{{inst['prefijo_recibo'] or 'REC'}}"></label><label>Próximo N.º recibo<input type="number" min="1" name="proximo_numero_recibo" value="{{inst['proximo_numero_recibo'] or 1}}"></label>
 <label>Ambiente SIFEN<select name="ambiente_sifen"><option value="SIN_INTEGRACION" {% if inst['ambiente_sifen']=='SIN_INTEGRACION' %}selected{% endif %}>Sin integración</option><option value="PRUEBAS" {% if inst['ambiente_sifen']=='PRUEBAS' %}selected{% endif %}>Pruebas</option><option value="PRODUCCION" {% if inst['ambiente_sifen']=='PRODUCCION' %}selected{% endif %}>Producción</option></select></label></div>
-<h3>Identidad visual</h3><div class="grid"><label>Logo institucional<input type="file" name="logo" accept="image/png,image/jpeg,image/webp"></label><div><b>Logo actual</b><br><img src="{{url_for('static',filename=inst['logo_archivo'] or 'santa_clara_logo_documentos.jpg')}}" style="max-width:220px;max-height:90px"></div></div>
+<h3>Identidad visual de documentos</h3>
+<p>Seleccione una sola imagen institucional. Esta imagen se utilizará automáticamente en facturas, recibos, informes y documentos generados por el sistema.</p>
+<div class="grid"><label>Imagen / logo para documentos<input type="file" name="logo" accept="image/png,image/jpeg,image/webp"><small>Formatos permitidos: PNG, JPG, JPEG o WEBP. Al guardar, reemplaza la imagen institucional anterior.</small></label><div><b>Imagen actualmente activa</b><br><img src="{{logo_url}}?v={{inst['logo_archivo'] or ''}}" style="max-width:280px;max-height:110px;object-fit:contain;background:white;padding:8px;border:1px solid #ddd;border-radius:8px"></div></div>
+<p><b>Fondo institucional:</b> el sistema utiliza únicamente el fondo oficial configurado por el administrador. El fondo no se mezcla con la imagen seleccionada para documentos.</p>
 <label>Pie de documentos<textarea name="pie_documento" rows="3">{{inst['pie_documento'] or ''}}</textarea></label>
 <div style="margin-top:16px"><button class="btn" type="submit">💾 Guardar configuración</button></div></form></div>
 {% endblock %}
