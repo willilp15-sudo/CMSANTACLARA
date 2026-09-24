@@ -1,3 +1,23 @@
+# Santa Clara ERP V13.9.21 - Procesos Unificados
+
+Actualización enfocada en simplificar la navegación sin eliminar funciones ni datos.
+
+## Menú unificado
+- Ventas y Recepción
+- Agenda y Consultorio
+- Internación y Enfermería
+- Farmacia y Stock
+- Compras y Proveedores
+- Laboratorio
+- Finanzas y Bancos
+- Contabilidad e Informes
+- Configuración y Seguridad
+
+Se eliminaron del menú accesos duplicados que llevaban a la misma ruta. Las rutas internas se conservan para compatibilidad con datos y procesos existentes.
+
+## Producción
+Mantiene la configuración de Render, base persistente en /var/data y las protecciones/backups incorporados en la revisión segura anterior.
+
 # Santa Clara ERP Hospitalario V8 Integrado
 
 Sistema en español que integra operación sanatorial, administración, inventario, finanzas y contabilidad en una sola base de datos.
