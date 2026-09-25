@@ -383,3 +383,29 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - El PDF rubricado del Libro Diario usa A4 vertical, foliado por página y encabezado repetido.
 - Los demás libros mantienen vista normal/rubricada y PDF, conservando su estructura contable propia.
 - La presentación rubricada facilita impresión/archivo; no afirma sustituir trámites formales de rúbrica o autorización que correspondan.
+
+## V13.9.58 — Importación y actualización de CxC / CxP
+- Botón directo en Cuentas por Cobrar para importar/actualizar desde XLSX, CSV o TXT.
+- Botón directo en Cuentas por Pagar para importar/actualizar desde XLSX, CSV o TXT.
+- Coincidencia por RUC + número de documento: actualiza la cuenta existente y evita duplicarla.
+- Si el documento no existe, crea el registro importado y lo relaciona con el tercero.
+- Actualiza importe, saldo, moneda, tipo de cambio y estado.
+- Plantilla Excel descargable para CxC y CxP.
+- Auditoría de cada registro creado o actualizado, guardando estado anterior y nuevo.
+
+
+## V13.9.59 — Intercambio universal de libros contables
+- Todos los informes/libros contables permiten exportar XLSX, CSV, TXT, TSV, JSON y PDF.
+- Cada libro muestra acceso directo a Importar este libro.
+- Diario/Mayor/Movimientos se canalizan a importación de asientos para conservar partida doble.
+- Compras/IVA y Ventas/IVA se canalizan a sus documentos fuente.
+- Estados derivados (balances, resultados, flujo y patrimonio) se recalculan desde la contabilidad y no se importan como saldos aislados.
+- PDF se mantiene como formato de salida/archivo, no como entrada contable automática.
+
+## V13.9.60 — Gestión editable de Aseguradoras y Camas
+- Aseguradoras: ver y editar razón social, nombre comercial, RUC, teléfono, correo, dirección, contacto, datos de facturación, convenio, observaciones, moneda y estado.
+- Mantiene el mismo ID y sincroniza el tercero vinculado para conservar relaciones históricas.
+- Camas: ver y editar código, habitación, tipo, descripción, tarifa diaria, observaciones y estado activo/inactivo.
+- Protección: una cama con admisión abierta no puede inactivarse.
+- Las camas inactivas dejan de ofrecerse para nuevas admisiones.
+- Auditoría de altas y modificaciones.

@@ -851,6 +851,13 @@ def config_sanatorio():
  c.execute('CREATE TABLE IF NOT EXISTS especialidades(id INTEGER PRIMARY KEY,nombre TEXT UNIQUE,precio_consulta REAL DEFAULT 0,honorario_medico REAL DEFAULT 0,activo INT DEFAULT 1)')
  ecols=[r['name'] for r in c.execute('pragma table_info(especialidades)').fetchall()]
  if 'minutos_consulta' not in ecols:c.execute('alter table especialidades add column minutos_consulta INT DEFAULT 15')
+ # V13.9.60: aseguradoras y camas editables, preservando IDs y relaciones históricas
+ acols=[r['name'] for r in c.execute('pragma table_info(aseguradoras)').fetchall()]
+ for col,ddl in [('nombre_comercial','TEXT'),('telefono','TEXT'),('email','TEXT'),('direccion','TEXT'),('contacto','TEXT'),('datos_facturacion','TEXT'),('convenio','TEXT'),('observaciones','TEXT'),('activo','INTEGER DEFAULT 1')]:
+  if col not in acols:c.execute(f'alter table aseguradoras add column {col} {ddl}')
+ ccols=[r['name'] for r in c.execute('pragma table_info(camas)').fetchall()]
+ for col,ddl in [('tipo','TEXT DEFAULT \'Internación\''),('descripcion','TEXT'),('tarifa_diaria','REAL DEFAULT 0'),('activo','INTEGER DEFAULT 1'),('observaciones','TEXT')]:
+  if col not in ccols:c.execute(f'alter table camas add column {col} {ddl}')
  if request.method=='POST':
   k=request.form['kind']
   if k=='servicio':c.execute('insert into servicios(codigo,nombre,categoria,precio_pyg,cuenta_ingreso,iva_pct) values(?,?,?,?,?,?)',(request.form['codigo'],request.form['nombre'],request.form['categoria'],float(request.form['precio']),request.form['cuenta'],float(request.form.get('iva_pct') or 0)))
@@ -872,14 +879,35 @@ def config_sanatorio():
    c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,int(request.form['medico_id'])))
    audit('EDITAR_MEDICO',request.form['medico_id'])
   elif k=='aseguradora':
-   cur=c.execute("insert into terceros(tipo,ruc,nombre,moneda) values('CLIENTE',?,?,?)",(request.form['ruc'],request.form['nombre'],request.form['moneda']));c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda) values(?,?,?,?)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda']))
+   cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,?,?)",(request.form['ruc'],request.form['nombre'],request.form.get('telefono'),request.form['moneda']))
+   aid=c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda,nombre_comercial,telefono,email,direccion,contacto,datos_facturacion,convenio,observaciones,activo) values(?,?,?,?,?,?,?,?,?,?,?,?,1)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda'],request.form.get('nombre_comercial'),request.form.get('telefono'),request.form.get('email'),request.form.get('direccion'),request.form.get('contacto'),request.form.get('datos_facturacion'),request.form.get('convenio'),request.form.get('observaciones'))).lastrowid
+   audit_change(c,'CREAR','ASEGURADORAS',aid,{},dict(request.form))
+  elif k=='actualizar_aseguradora':
+   aid=int(request.form['aseguradora_id']); old=c.execute('select * from aseguradoras where id=?',(aid,)).fetchone()
+   if old:
+    vals=(request.form['nombre'].strip(),request.form.get('nombre_comercial','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),request.form.get('contacto','').strip(),request.form.get('datos_facturacion','').strip(),request.form.get('convenio','').strip(),request.form.get('observaciones','').strip(),request.form.get('moneda') or 'PYG',1 if request.form.get('activo')=='1' else 0,aid)
+    c.execute('update aseguradoras set nombre=?,nombre_comercial=?,ruc=?,telefono=?,email=?,direccion=?,contacto=?,datos_facturacion=?,convenio=?,observaciones=?,moneda=?,activo=? where id=?',vals)
+    if old['tercero_id']:c.execute('update terceros set nombre=?,ruc=?,telefono=?,moneda=? where id=?',(vals[0],vals[2],vals[3],vals[10],old['tercero_id']))
+    audit_change(c,'EDITAR','ASEGURADORAS',aid,snapshot(old),{'nombre':vals[0],'ruc':vals[2],'activo':vals[11]})
   elif k=='cama':
    hid=c.execute('select id from habitaciones where nombre=?',(request.form['habitacion'],)).fetchone()
    if not hid:hid=c.execute('insert into habitaciones(nombre,tipo) values(?,?)',(request.form['habitacion'],request.form.get('tipo','Internación'))).lastrowid
    else:hid=hid['id']
-   c.execute('insert into camas(habitacion_id,codigo) values(?,?)',(hid,request.form['codigo']))
+   cid=c.execute('insert into camas(habitacion_id,codigo,tipo,descripcion,tarifa_diaria,activo,observaciones) values(?,?,?,?,?,1,?)',(hid,request.form['codigo'],request.form.get('tipo','Internación'),request.form.get('descripcion'),float(request.form.get('tarifa_diaria') or 0),request.form.get('observaciones'))).lastrowid
+   audit_change(c,'CREAR','CAMAS',cid,{},dict(request.form))
+  elif k=='actualizar_cama':
+   cid=int(request.form['cama_id']); old=c.execute('select * from camas where id=?',(cid,)).fetchone()
+   if old:
+    ocupada=c.execute("select count(*) n from admisiones where cama_id=? and estado='ABIERTA'",(cid,)).fetchone()['n']>0
+    if ocupada and request.form.get('activo')!='1':
+     flash('No se puede inactivar una cama con una internación/admisión abierta.');c.close();return redirect('/config-sanatorio')
+    hab=request.form.get('habitacion','').strip(); hr=c.execute('select id from habitaciones where nombre=?',(hab,)).fetchone()
+    if not hr:hid=c.execute('insert into habitaciones(nombre,tipo) values(?,?)',(hab,request.form.get('tipo','Internación'))).lastrowid
+    else:hid=hr['id']
+    c.execute('update camas set habitacion_id=?,codigo=?,tipo=?,descripcion=?,tarifa_diaria=?,activo=?,observaciones=? where id=?',(hid,request.form['codigo'].strip(),request.form.get('tipo','Internación'),request.form.get('descripcion','').strip(),float(request.form.get('tarifa_diaria') or 0),1 if request.form.get('activo')=='1' else 0,request.form.get('observaciones','').strip(),cid))
+    audit_change(c,'EDITAR','CAMAS',cid,snapshot(old),{'habitacion':hab,'codigo':request.form['codigo'],'activo':1 if request.form.get('activo')=='1' else 0})
   c.commit();return redirect('/config-sanatorio')
- data={x:c.execute('select * from '+x+' order by id desc').fetchall() for x in ['servicios','medicos','aseguradoras']};data['especialidades']=c.execute('select * from especialidades order by activo desc,nombre').fetchall();data['camas']=c.execute('select c.*,h.nombre habitacion from camas c join habitaciones h on h.id=c.habitacion_id').fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_config.html',data=data,mons=mons)
+ data={x:c.execute('select * from '+x+' order by id desc').fetchall() for x in ['servicios','medicos','aseguradoras']};data['especialidades']=c.execute('select * from especialidades order by activo desc,nombre').fetchall();data['camas']=c.execute("select c.*,h.nombre habitacion,exists(select 1 from admisiones a where a.cama_id=c.id and a.estado='ABIERTA') ocupada_actual from camas c join habitaciones h on h.id=c.habitacion_id order by c.id desc").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_config.html',data=data,mons=mons)
 @app.route('/admisiones',methods=['GET','POST'])
 def hospital_admisiones():
  c=db()
@@ -894,7 +922,7 @@ def hospital_admisiones():
   if aseg_id:_registrar_visacion(c,aseg_id,int(request.form['paciente_id']),request.form['tipo'],aid,request.form.get('medico_id') or None)
   if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,))
   c.commit();audit('ADMISION',str(cur.lastrowid));return redirect('/admisiones')
- rows=c.execute('select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id order by a.id desc').fetchall();pats=c.execute('select * from pacientes').fetchall();med=c.execute('select * from medicos').fetchall();aseg=c.execute('select * from aseguradoras').fetchall();camas=c.execute("select * from camas where estado='LIBRE'").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_admissions.html',rows=rows,pats=pats,med=med,aseg=aseg,camas=camas,mons=mons)
+ rows=c.execute('select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id order by a.id desc').fetchall();pats=c.execute('select * from pacientes').fetchall();med=c.execute('select * from medicos').fetchall();aseg=c.execute('select * from aseguradoras').fetchall();camas=c.execute("select * from camas where estado='LIBRE' and coalesce(activo,1)=1").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_admissions.html',rows=rows,pats=pats,med=med,aseg=aseg,camas=camas,mons=mons)
 @app.route('/cuenta-paciente/<int:aid>',methods=['GET','POST'])
 def cuenta_paciente(aid):
  c=db();a=c.execute('select a.*,p.nombre paciente,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone()
@@ -3664,6 +3692,42 @@ def contabilidad_csv(tipo):
  if tipo not in {x[0] for x in ACCOUNTING_REPORTS}:return ('Informe contable no encontrado',404)
  desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();cuenta=request.args.get('cuenta') or None;c=db();titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta);c.close();return _tabular_csv(headers,rows,f'{tipo}_{desde}_{hasta}.csv')
 
+# ===== V13.9.59: exportación universal de libros contables =====
+@app.get('/contabilidad/informe/<tipo>/exportar/<formato>')
+def contabilidad_exportar_formato(tipo,formato):
+ if tipo not in {x[0] for x in ACCOUNTING_REPORTS}: return ('Informe contable no encontrado',404)
+ desde=request.args.get('desde') or '1900-01-01'; hasta=request.args.get('hasta') or datetime.date.today().isoformat(); cuenta=request.args.get('cuenta') or None
+ c=db(); titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta); c.close()
+ formato=(formato or '').lower()
+ if formato in ('xlsx','excel'):
+  return _tabular_xlsx(titulo,headers,rows,f'{tipo}_{desde}_{hasta}.xlsx')
+ if formato=='csv': return _tabular_csv(headers,rows,f'{tipo}_{desde}_{hasta}.csv',',')
+ if formato in ('tsv','txt'):
+  delim='\t' if formato=='tsv' else ';'
+  ext='tsv' if formato=='tsv' else 'txt'
+  return _tabular_csv(headers,rows,f'{tipo}_{desde}_{hasta}.{ext}',delim)
+ if formato=='json':
+  import json
+  data=[]
+  for r in rows:data.append({str(headers[i]): (r[i] if i<len(r) else None) for i in range(len(headers))})
+  raw=json.dumps({'libro':titulo,'desde':desde,'hasta':hasta,'registros':data},ensure_ascii=False,indent=2,default=str).encode('utf-8')
+  bio=io.BytesIO(raw);bio.seek(0);return send_file(bio,as_attachment=True,download_name=f'{tipo}_{desde}_{hasta}.json',mimetype='application/json; charset=utf-8')
+ if formato=='pdf':
+  args=request.args.to_dict(flat=True); args['modo']=args.get('modo','normal')
+  from urllib.parse import urlencode
+  return redirect('/contabilidad/informe/'+tipo+'/pdf?'+urlencode(args))
+ return ('Formato no admitido. Use XLSX, CSV, TXT, TSV, JSON o PDF.',400)
+
+@app.get('/contabilidad/informe/<tipo>/importar')
+def contabilidad_importar_desde_libro(tipo):
+ if tipo not in {x[0] for x in ACCOUNTING_REPORTS}: return ('Libro no encontrado',404)
+ # Los libros derivados no deben grabarse como saldos independientes: se reconstruyen desde Diario/operaciones.
+ if tipo in ('diario','mayor','movimientos'):
+  return redirect('/contabilidad/intercambio?tipo=diario&origen='+tipo)
+ if tipo=='compras_iva': return redirect('/contabilidad/intercambio?tipo=compras&origen='+tipo)
+ if tipo=='ventas_iva': return redirect('/contabilidad/intercambio?tipo=ventas&origen='+tipo)
+ return redirect('/contabilidad/intercambio?tipo=derivado&origen='+tipo)
+
 def _ruc_sin_dv(ruc):
  s=str(ruc or '').strip().replace('.','').replace(' ','')
  return s.split('-')[0] if '-' in s else s
@@ -3739,7 +3803,7 @@ def rrhh_informes_csv():
  if not _rrhh_perm():return ('Acceso no autorizado',403)
  periodo=_rrhh_periodo(request.args.get('periodo'));c=db();rows=c.execute('''select e.documento,e.nombre,e.cargo,l.periodo,l.salario_base,l.haberes,l.ips_obrero,l.ips_patronal,l.anticipos,l.prestamos,l.otros_descuentos,l.neto,l.costo_empresa,l.estado from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();c.close();headers=['CI','Funcionario','Cargo','Periodo','Salario base','Haberes','IPS obrero','IPS patronal','Anticipos','Préstamos','Otros descuentos','Neto','Costo empresa','Estado'];return _tabular_csv(headers,rows,f'rrhh_{periodo}.csv')
 
-ROUTE_MODULE.update({'intercambio_centro':'INFORMES','intercambio_validar':'INFORMES','marangatu_exportar':'CONTABILIDAD','informe_excel_tabla':'INFORMES','informe_csv_tabla':'INFORMES','contabilidad_csv':'CONTABILIDAD','rrhh_informes_excel':'RRHH','rrhh_informes_csv':'RRHH'})
+ROUTE_MODULE.update({'intercambio_centro':'INFORMES','intercambio_validar':'INFORMES','marangatu_exportar':'CONTABILIDAD','informe_excel_tabla':'INFORMES','informe_csv_tabla':'INFORMES','contabilidad_csv':'CONTABILIDAD','contabilidad_exportar_formato':'CONTABILIDAD','contabilidad_importar_desde_libro':'CONTABILIDAD','rrhh_informes_excel':'RRHH','rrhh_informes_csv':'RRHH'})
 
 # ===== V13.9.50: Importación / exportación contable operativa =====
 def _leer_tabla_subida(f):
@@ -4277,3 +4341,106 @@ ROUTE_MODULE.update({'seguro_visaciones':'FACTURACION','seguro_visacion_archivo'
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
+
+# ===== V13.9.58 - Importacion / actualizacion CxC y CxP =====
+def _imp_norm(v):
+    return str(v or '').strip()
+def _imp_num(v):
+    if v is None or v=='': return 0.0
+    if isinstance(v,(int,float)): return float(v)
+    s=str(v).strip().replace('Gs.','').replace('₲','').replace(' ','')
+    if ',' in s and '.' in s:
+        s=s.replace('.','').replace(',','.')
+    elif ',' in s: s=s.replace(',','.')
+    return float(s or 0)
+def _imp_rows(file):
+    name=(file.filename or '').lower()
+    data=file.read()
+    if name.endswith('.xlsx'):
+        from openpyxl import load_workbook
+        wb=load_workbook(io.BytesIO(data),data_only=True,read_only=True);ws=wb.active
+        vals=list(ws.iter_rows(values_only=True))
+    elif name.endswith('.csv') or name.endswith('.txt'):
+        import csv
+        raw=data.decode('utf-8-sig',errors='replace'); sample=raw[:4096]
+        try: delim=csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
+        except Exception: delim=';'
+        vals=list(csv.reader(io.StringIO(raw),delimiter=delim))
+    else: raise ValueError('Formato no admitido. Use XLSX, CSV o TXT.')
+    if not vals:return []
+    heads=[_imp_norm(x).lower().replace(' ','_').replace('º','').replace('°','') for x in vals[0]]
+    aliases={'ruc_ci':'ruc','documento_tercero':'ruc','cliente_ruc':'ruc','proveedor_ruc':'ruc','razon_social':'tercero','cliente':'tercero','proveedor':'tercero','nombre':'tercero','factura':'documento','numero':'documento','nro_factura':'documento','nro_documento':'documento','tc':'tipo_cambio','tipo_cambio_origen':'tipo_cambio','monto':'importe','total':'importe','saldo_pendiente':'saldo'}
+    heads=[aliases.get(h,h) for h in heads]
+    return [dict(zip(heads,row)) for row in vals[1:] if any(_imp_norm(x) for x in row)]
+
+def _tercero_import(c,ruc,nombre,tipo):
+    ruc=_imp_norm(ruc);nombre=_imp_norm(nombre) or ruc or 'SIN NOMBRE'
+    row=c.execute("select * from terceros where trim(coalesce(ruc,''))=trim(?) order by id limit 1",(ruc,)).fetchone() if ruc else None
+    if not row: row=c.execute("select * from terceros where lower(trim(nombre))=lower(trim(?)) order by id limit 1",(nombre,)).fetchone()
+    if row:return row['id']
+    cur=c.execute('insert into terceros(tipo,ruc,nombre,moneda) values(?,?,?,?)',(tipo,ruc,nombre,'PYG'));return cur.lastrowid
+
+def _importar_cuentas(tipo,file):
+    rows=_imp_rows(file);c=db();actualizados=nuevos=errores=0;detalle=[]
+    try:
+      c.execute('''create table if not exists importacion_cuentas_log(id integer primary key,fecha text,tipo text,archivo text,accion text,registro_id int,documento text,tercero text,antes text,despues text,usuario text)''')
+      for n,r in enumerate(rows,2):
+       try:
+        doc=_imp_norm(r.get('documento'));ruc=_imp_norm(r.get('ruc'));nom=_imp_norm(r.get('tercero'))
+        if not doc: raise ValueError('Falta documento/factura')
+        moneda=(_imp_norm(r.get('moneda')) or 'PYG').upper();tc=_imp_num(r.get('tipo_cambio')) or 1
+        imp=_imp_num(r.get('importe'));saldo=_imp_num(r.get('saldo'))
+        if imp<=0: raise ValueError('Importe debe ser mayor a cero')
+        if saldo<0 or saldo>imp+0.01: raise ValueError('Saldo inválido')
+        tid=_tercero_import(c,ruc,nom,'CLIENTE' if tipo=='CXC' else 'PROVEEDOR')
+        if tipo=='CXC':
+          base='ventas';tab='cxc';fk='venta_id';terfk='cliente_id'
+        else:
+          base='compras';tab='cxp';fk='compra_id';terfk='proveedor_id'
+        b=c.execute(f'select * from {base} where {terfk}=? and trim(numero)=trim(?) order by id desc limit 1',(tid,doc)).fetchone()
+        if not b:
+          fecha=_imp_norm(r.get('fecha')) or now()[:10];total_pyg=imp*tc
+          cur=c.execute(f'''insert into {base}(fecha,{terfk},numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,estado) values(?,?,?,?,?,0,0,?,?,?,?)''',(fecha,tid,doc,moneda,tc,imp,imp,total_pyg,'IMPORTADA'))
+          bid=cur.lastrowid
+        else: bid=b['id']
+        x=c.execute(f'select * from {tab} where {fk}=? order by id desc limit 1',(bid,)).fetchone()
+        estado='PAGADO' if saldo<=0.0001 else 'PENDIENTE'
+        after={'importe':imp,'saldo':saldo,'moneda':moneda,'tipo_cambio_origen':tc,'importe_pyg':imp*tc,'estado':estado}
+        import json
+        if x:
+          before=dict(x);c.execute(f'update {tab} set tercero_id=?,moneda=?,tipo_cambio_origen=?,importe=?,saldo=?,importe_pyg=?,estado=? where id=?',(tid,moneda,tc,imp,saldo,imp*tc,estado,x['id']));rid=x['id'];actualizados+=1;accion='ACTUALIZAR'
+        else:
+          before={};cur=c.execute(f'insert into {tab}({fk},tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(bid,tid,moneda,tc,imp,saldo,imp*tc,estado));rid=cur.lastrowid;nuevos+=1;accion='CREAR'
+        c.execute('insert into importacion_cuentas_log(fecha,tipo,archivo,accion,registro_id,documento,tercero,antes,despues,usuario) values(?,?,?,?,?,?,?,?,?,?)',(now(),tipo,file.filename,accion,rid,doc,nom or ruc,json.dumps(before,ensure_ascii=False,default=str),json.dumps(after,ensure_ascii=False),session.get('user')))
+       except Exception as e:
+        errores+=1;detalle.append(f'Fila {n}: {e}')
+      c.commit()
+    except Exception:
+      c.rollback();raise
+    finally:c.close()
+    audit('IMPORTAR_'+tipo,f'{file.filename}: {actualizados} actualizadas, {nuevos} nuevas, {errores} errores')
+    return actualizados,nuevos,errores,detalle
+
+@app.route('/finanzas/importar/<tipo>',methods=['GET','POST'])
+def importar_cuentas(tipo):
+ tipo=tipo.upper()
+ if tipo not in ('CXC','CXP'):return redirect('/finanzas')
+ if request.method=='POST':
+  f=request.files.get('archivo')
+  if not f or not f.filename:flash('Seleccione un archivo XLSX, CSV o TXT.');return redirect(request.path)
+  try:
+   a,n,e,d=_importar_cuentas(tipo,f);flash(f'Importación terminada: {a} cuentas actualizadas, {n} nuevas, {e} con error.' + ((' Primeros errores: '+' | '.join(d[:3])) if d else ''))
+   return redirect('/finanzas')
+  except Exception as ex:flash('No se pudo importar: '+str(ex));return redirect(request.path)
+ return render_template('import_accounts.html',tipo=tipo)
+
+@app.route('/finanzas/plantilla/<tipo>.xlsx')
+def plantilla_cuentas(tipo):
+ tipo=tipo.upper()
+ if tipo not in ('CXC','CXP'):return redirect('/finanzas')
+ from openpyxl import Workbook
+ wb=Workbook();ws=wb.active;ws.title=tipo
+ ws.append(['RUC','Tercero','Documento','Fecha','Moneda','Tipo Cambio','Importe','Saldo'])
+ ws.append(['80000000-0','Ejemplo '+('Cliente' if tipo=='CXC' else 'Proveedor'),'001-001-0000001',now()[:10],'PYG',1,1000000,1000000])
+ bio=io.BytesIO();wb.save(bio);bio.seek(0)
+ return send_file(bio,as_attachment=True,download_name=f'Plantilla_{tipo}_Santa_Clara.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
