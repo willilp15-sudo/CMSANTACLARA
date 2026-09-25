@@ -73,3 +73,42 @@ main{transition:margin-left .22s ease;min-width:0}
 @media(max-width:1200px){.purchase-grid-5{grid-template-columns:repeat(3,minmax(0,1fr))}.purchase-search-row{grid-template-columns:minmax(280px,1fr) 110px 160px 110px}.purchase-bottom-grid{grid-template-columns:1fr}}
 @media(max-width:760px){.purchase-grid-5,.purchase-grid-3{grid-template-columns:1fr 1fr}.purchase-search-row{grid-template-columns:1fr 1fr}.purchase-search-row .producto-buscador-wrap{grid-column:1/-1!important}.purchase-section-title{align-items:flex-start;flex-direction:column}.purchase-bottom-grid{grid-template-columns:1fr}.purchase-actions button{flex:1;min-width:0}}
 @media(max-width:520px){.purchase-grid-5,.purchase-grid-3,.purchase-search-row,.purchase-total-cards{grid-template-columns:1fr}.purchase-actions{flex-direction:column}.purchase-actions button{width:100%}}
+
+/* V13.9.28 - CENTRALIZACION GLOBAL DE TODOS LOS PANELES
+   El ERP actual usa barra superior; no debe reservar espacio lateral para el antiguo sidebar. */
+main.erp-workspace{
+  margin-left:0!important;
+  margin-right:0!important;
+  width:100%!important;
+  max-width:none!important;
+  padding:14px 20px 30px!important;
+}
+/* Todo contenido funcional queda centrado, nunca pegado a un costado. */
+main.erp-workspace>header,
+main.erp-workspace>.page-nav,
+main.erp-workspace>.alert,
+main.erp-workspace>.card,
+main.erp-workspace>.cards,
+main.erp-workspace>.toolbar,
+main.erp-workspace>.table,
+main.erp-workspace>form,
+main.erp-workspace>.purchase-form,
+main.erp-workspace>.transaction-compact,
+main.erp-workspace>.panel,
+main.erp-workspace>section{
+  width:min(100%,1500px)!important;
+  max-width:1500px!important;
+  margin-left:auto!important;
+  margin-right:auto!important;
+}
+/* Formularios y tarjetas internas ocupan el ancho central disponible. */
+main.erp-workspace form .card,
+main.erp-workspace form .purchase-section,
+main.erp-workspace form .table,
+main.erp-workspace form .grid{
+  max-width:100%!important;
+}
+.purchase-form{width:min(100%,1500px)!important;max-width:1500px!important;margin-left:auto!important;margin-right:auto!important}
+.purchase-section{margin-left:auto!important;margin-right:auto!important}
+@media(max-width:900px){main.erp-workspace{margin-left:0!important;padding:10px 12px 24px!important}}
+@media(max-width:560px){main.erp-workspace{padding:8px!important}}
