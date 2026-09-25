@@ -357,3 +357,8 @@ V13.9.40: edición completa de médicos (datos personales, profesionales, contac
 
 ## V13.9.50 - Importación / Exportación Contable
 Se incorporó el centro operativo de intercambio contable con plantillas, validación previa e importación confirmada de Plan de Cuentas y Libro Diario, además de exportación tabular en los informes contables.
+
+## V13.9.51 — Corrección exportación CSV
+- Corrige Internal Server Error al exportar CSV en Informes, Contabilidad, Plan de Cuentas y RR.HH.
+- Causa corregida: el wrapper de texto podía cerrar el buffer binario antes de que Flask/Render terminara de transmitirlo.
+- CSV generado en UTF-8 con BOM para compatibilidad con Excel y caracteres españoles.

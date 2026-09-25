@@ -3539,9 +3539,16 @@ def _tabular_xlsx(titulo,headers,rows,filename):
  return send_file(bio,as_attachment=True,download_name=filename,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 def _tabular_csv(headers,rows,filename,delimiter=','):
- bio=io.BytesIO();txt=io.TextIOWrapper(bio,encoding='utf-8-sig',newline='',write_through=True);w=csv.writer(txt,delimiter=delimiter,lineterminator='\n');w.writerow(headers)
- for r in rows:w.writerow(['' if v is None else v for v in r])
- txt.flush();bio.seek(0);return send_file(bio,as_attachment=True,download_name=filename,mimetype='text/csv; charset=utf-8')
+ # Generar primero como texto evita que TextIOWrapper cierre el BytesIO
+ # antes de que Flask/WSGI termine de transmitir el archivo en Render.
+ txt=io.StringIO(newline='')
+ w=csv.writer(txt,delimiter=delimiter,lineterminator='\n')
+ w.writerow([_safe(v) for v in headers])
+ for r in rows:
+  w.writerow(['' if v is None else v for v in r])
+ data=('\ufeff'+txt.getvalue()).encode('utf-8')
+ bio=io.BytesIO(data);bio.seek(0)
+ return send_file(bio,as_attachment=True,download_name=filename,mimetype='text/csv; charset=utf-8')
 
 @app.get('/informes/<tipo>/excel')
 def informe_excel_tabla(tipo):
@@ -3926,4 +3933,43 @@ def sifen_reintentar_venta(venta_id):
     # Esta versión no declara envío exitoso sin respuesta real del WS.
     c.execute("update ventas set sifen_intentos=coalesce(sifen_intentos,0)+1,sifen_ultimo_intento=?,estado_sifen=case when estado_sifen='RECHAZADO' then 'PENDIENTE_REENVIO' else coalesce(estado_sifen,'NO_ENVIADO') end where id=?",(now(),venta_id));c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'REENVIO','PENDIENTE',f'Factura {v["numero"]}: solicitud de reenvío registrada; requiere transmisor XML/WS SIFEN activo'));c.commit();c.close();flash('Reintento registrado en el monitor. No se marcará como aprobado sin respuesta real de SIFEN.');return redirect('/sifen/monitor')
 
-ROUTE_MODULE.update({'nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION','nota_credito_venta_pdf':'FACTURACION','nota_credito_compra_pdf':'COMPRAS'})
+
+# ===== V13.9.52: Centro de Notas de Crédito + diagnóstico SIFEN =====
+@app.get('/notas-credito')
+def notas_credito_centro():
+    c=db()
+    ventas=c.execute("""select n.*,v.numero factura,t.nombre cliente
+      from notas_credito_ventas n join ventas v on v.id=n.venta_id
+      left join terceros t on t.id=v.cliente_id order by n.id desc limit 500""").fetchall()
+    compras=c.execute("""select n.*,co.numero compra,t.nombre proveedor
+      from notas_credito_compras n join compras co on co.id=n.compra_id
+      left join terceros t on t.id=co.proveedor_id order by n.id desc limit 500""").fetchall()
+    c.close()
+    return render_template('credit_notes_center.html',ventas=ventas,compras=compras)
+
+@app.post('/sifen/monitor/nc/<int:nid>/reintentar')
+def sifen_reintentar_nc(nid):
+    c=db(); n=c.execute('select * from notas_credito_ventas where id=?',(nid,)).fetchone()
+    if not n: c.close(); return ('Nota de Crédito no encontrada',404)
+    # No simular transmisión: la versión actual aún no contiene generador XML NCE + firma + WS SIFEN.
+    c.execute("update notas_credito_ventas set estado_sifen='PENDIENTE_ENVIO' where id=?",(nid,))
+    c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",
+              (now(),'NCE_REENVIO','PENDIENTE_ENVIO',f'NC {n["numero"]}: reenvío solicitado; pendiente del transmisor XML/firma/WS SIFEN'))
+    c.commit(); c.close()
+    flash('La Nota de Crédito quedó en cola. Aún no se transmite hasta activar el transmisor XML/firma/WS SIFEN.')
+    return redirect('/sifen/monitor')
+
+@app.get('/diagnostico/sistema')
+def diagnostico_sistema():
+    c=db(); checks=[]
+    for tabla in ('ventas','venta_items','compras','compra_items','notas_credito_ventas','notas_credito_compras','sifen_puntos_expedicion','sifen_eventos'):
+        try:
+            n=c.execute('select count(*) from '+tabla).fetchone()[0]; checks.append((tabla,'OK',n))
+        except Exception as e: checks.append((tabla,'ERROR',str(e)))
+    try:
+        dup=c.execute("select numero,count(*) n from ventas where coalesce(numero,'')<>'' group by numero having count(*)>1").fetchall()
+    except Exception as e: dup=[]; checks.append(('correlatividad','ERROR',str(e)))
+    c.close()
+    return render_template('system_diagnostics.html',checks=checks,duplicados=dup)
+
+ROUTE_MODULE.update({'notas_credito_centro':'FACTURACION','sifen_reintentar_nc':'FACTURACION','diagnostico_sistema':'CONFIGURACION','nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION','nota_credito_venta_pdf':'FACTURACION','nota_credito_compra_pdf':'COMPRAS'})

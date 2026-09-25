@@ -1,0 +1,8 @@
+{% extends 'base.html' %}{% block title %}Notas de Crédito{% endblock %}{% block content %}
+<div class="card" style="max-width:1500px;margin:auto"><h2>Notas de Crédito</h2>
+<div class="toolbar"><a class="btn" href="/sifen/monitor">📡 Monitor SIFEN</a><a class="btn" href="/ventas">Facturas emitidas</a><a class="btn" href="/compras">Compras</a></div>
+<h3>Notas de Crédito de Ventas</h3><table><tr><th>NC</th><th>Fecha</th><th>Factura</th><th>Cliente</th><th>Total</th><th>Estado SIFEN</th><th>Acciones</th></tr>
+{% for n in ventas %}<tr><td>{{n.numero}}</td><td>{{n.fecha}}</td><td>{{n.factura}}</td><td>{{n.cliente or '-'}}</td><td>{{'{:,.0f}'.format(n.total or 0)}}</td><td><b>{{n.estado_sifen or 'PENDIENTE_ENVIO'}}</b></td><td><a class="btn" target="_blank" href="/notas-credito/ventas/{{n.id}}/pdf">📄 PDF / Imprimir</a> <form method="post" action="/sifen/monitor/nc/{{n.id}}/reintentar" style="display:inline"><button>↻ Enviar / Reintentar</button></form></td></tr>{% else %}<tr><td colspan="7">No hay Notas de Crédito de ventas.</td></tr>{% endfor %}</table>
+<h3>Notas de Crédito de Compras</h3><table><tr><th>NC</th><th>Fecha</th><th>Compra</th><th>Proveedor</th><th>Total</th><th>Acción</th></tr>
+{% for n in compras %}<tr><td>{{n.numero}}</td><td>{{n.fecha}}</td><td>{{n.compra}}</td><td>{{n.proveedor or '-'}}</td><td>{{'{:,.0f}'.format(n.total or 0)}}</td><td><a class="btn" target="_blank" href="/notas-credito/compras/{{n.id}}/pdf">📄 PDF / Imprimir</a></td></tr>{% else %}<tr><td colspan="6">No hay Notas de Crédito de compras.</td></tr>{% endfor %}</table></div>
+{% endblock %}
