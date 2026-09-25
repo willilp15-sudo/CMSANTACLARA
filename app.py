@@ -934,6 +934,57 @@ def hospital_admisiones():
   if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,))
   c.commit();audit('ADMISION',str(cur.lastrowid));return redirect('/admisiones')
  rows=c.execute('select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id order by a.id desc').fetchall();pats=c.execute('select * from pacientes').fetchall();med=c.execute('select * from medicos').fetchall();aseg=c.execute('select * from aseguradoras').fetchall();camas=c.execute("select * from camas where estado='LIBRE' and coalesce(activo,1)=1").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_admissions.html',rows=rows,pats=pats,med=med,aseg=aseg,camas=camas,mons=mons)
+@app.route('/admisiones/<int:aid>/editar',methods=['GET','POST'])
+def editar_admision(aid):
+ c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
+ if not a:
+  c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
+ if request.method=='POST':
+  antes=snapshot(a);fecha=request.form.get('fecha') or a['fecha'];pid=int(request.form.get('paciente_id') or a['paciente_id']);tipo=(request.form.get('tipo') or a['tipo']).strip().upper();mid=int(request.form['medico_id']) if request.form.get('medico_id') else None;aseg=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None;mon=(request.form.get('moneda') or a['moneda'] or 'PYG').upper();tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));nueva_cama=int(request.form['cama_id']) if request.form.get('cama_id') else None
+  if aseg and not all((request.form.get(k) or '').strip() for k in ('numero_visacion','fecha_visacion','hora_visacion')):
+   c.close();flash('Atención por seguro: complete número, fecha y hora de visación.');return redirect(request.path)
+  if aseg and not (request.form.get('medico_visacion_id') or mid):
+   c.close();flash('Atención por seguro: seleccione el médico que realiza la atención.');return redirect(request.path)
+  if nueva_cama and nueva_cama!=a['cama_id']:
+   oc=c.execute("select 1 from admisiones where cama_id=? and estado='ABIERTA' and id<>? limit 1",(nueva_cama,aid)).fetchone()
+   if oc:c.close();flash('La cama seleccionada está ocupada por otra admisión.');return redirect(request.path)
+  c.execute('update admisiones set fecha=?,paciente_id=?,tipo=?,medico_id=?,aseguradora_id=?,moneda=?,tipo_cambio=?,cama_id=? where id=?',(fecha,pid,tipo,mid,aseg,mon,tc,nueva_cama,aid))
+  if a['cama_id'] and a['cama_id']!=nueva_cama:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
+  if nueva_cama:c.execute("update camas set estado='OCUPADA' where id=?",(nueva_cama,))
+  if aseg:
+   v=c.execute("select * from seguro_visaciones where origen_id=? and origen_tipo in ('CONSULTA','URGENCIA','INTERNACION','QUIROFANO') order by id desc limit 1",(aid,)).fetchone()
+   if v:
+    orig,guard,ft=(v['archivo_nombre'],v['archivo_guardado'],v['archivo_tipo'])
+    if request.files.get('archivo_visacion') and request.files['archivo_visacion'].filename:orig,guard,ft=_guardar_archivo_visacion(request.files['archivo_visacion'])
+    c.execute('update seguro_visaciones set fecha=?,hora=?,numero_visacion=?,aseguradora_id=?,paciente_id=?,medico_id=?,origen_tipo=?,archivo_nombre=?,archivo_guardado=?,archivo_tipo=?,observacion=? where id=?',(request.form['fecha_visacion'],request.form['hora_visacion'],request.form['numero_visacion'].strip(),aseg,pid,int(request.form.get('medico_visacion_id') or mid),tipo,orig,guard,ft,request.form.get('observacion_visacion'),v['id']))
+   else:_registrar_visacion(c,aseg,pid,tipo,aid,mid)
+  audit_change(c,'EDITAR','ADMISION',aid,antes,snapshot(c.execute('select * from admisiones where id=?',(aid,)).fetchone()))
+  c.commit();c.close();flash('Admisión modificada correctamente.');return redirect('/admisiones')
+ pats=c.execute('select * from pacientes order by nombre').fetchall();med=c.execute('select * from medicos order by nombre').fetchall();asegs=c.execute('select * from aseguradoras where coalesce(activo,1)=1 or id=? order by nombre',(a['aseguradora_id'] or -1,)).fetchall();camas=c.execute("select c.* from camas c where coalesce(c.activo,1)=1 and (c.id=? or not exists(select 1 from admisiones x where x.cama_id=c.id and x.estado='ABIERTA' and x.id<>?)) order by c.codigo",(a['cama_id'] or -1,aid)).fetchall();mons=c.execute('select * from monedas').fetchall();v=c.execute("select * from seguro_visaciones where origen_id=? and origen_tipo in ('CONSULTA','URGENCIA','INTERNACION','QUIROFANO') order by id desc limit 1",(aid,)).fetchone();c.close();return render_template('hospital_admission_edit.html',a=a,pats=pats,med=med,aseg=asegs,camas=camas,mons=mons,v=v)
+
+@app.post('/admisiones/<int:aid>/eliminar')
+def eliminar_admision(aid):
+ c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
+ if not a:c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
+ refs=[('cargos_paciente','admision_id'),('enfermeria','admision_id'),('facturas_sanatorio','admision_id')]
+ for tab,col in refs:
+  try:n=c.execute(f'select count(*) from {tab} where {col}=?',(aid,)).fetchone()[0]
+  except Exception:n=0
+  if n:c.close();flash('No se puede eliminar: la admisión tiene movimientos relacionados. Puede anularla si corresponde.');return redirect('/admisiones')
+ if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
+ c.execute('delete from admisiones where id=?',(aid,));audit_change(c,'ELIMINAR','ADMISION',aid,snapshot(a),{});c.commit();c.close();flash('Admisión eliminada.');return redirect('/admisiones')
+
+@app.post('/admisiones/<int:aid>/anular')
+def anular_admision(aid):
+ c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone();motivo=(request.form.get('motivo') or '').strip()
+ if not a:c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
+ if not motivo:c.close();flash('Debe indicar el motivo de anulación.');return redirect('/admisiones')
+ fac=c.execute('select 1 from facturas_sanatorio where admision_id=? limit 1',(aid,)).fetchone()
+ if fac:c.close();flash('No se puede anular una admisión ya facturada. Debe realizar la corrección mediante el documento fiscal correspondiente.');return redirect('/admisiones')
+ c.execute("update admisiones set estado='ANULADA' where id=?",(aid,))
+ if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
+ audit_change(c,'ANULAR','ADMISION',aid,snapshot(a),{'estado':'ANULADA'},motivo);c.commit();c.close();flash('Admisión anulada correctamente.');return redirect('/admisiones')
+
 @app.route('/cuenta-paciente/<int:aid>',methods=['GET','POST'])
 def cuenta_paciente(aid):
  c=db();a=c.execute('select a.*,p.nombre paciente,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone()
@@ -1217,6 +1268,7 @@ ROUTE_MODULE={
  'productos':'STOCK','compras':'COMPRAS','ventas':'VENTAS','finanzas':'FINANZAS','contabilidad':'CONTABILIDAD','libros':'CONTABILIDAD'
 }
 ROUTE_MODULE.update({'cuentas_pendientes_proveedores':'COMPRAS','pagos_proveedores':'COMPRAS'})
+ROUTE_MODULE.update({'editar_admision':'ADMISION','eliminar_admision':'ADMISION','anular_admision':'ADMISION'})
 @app.before_request
 def modular_guard():
  # Rutas públicas / autenticación.
@@ -4383,13 +4435,13 @@ def _imp_num(v):
 _IMP_ALIASES={
  'ruc':'ruc','ruc_ci':'ruc','rucci':'ruc','ci_ruc':'ruc','documento_tercero':'ruc','cliente_ruc':'ruc','proveedor_ruc':'ruc','nro_ruc':'ruc',
  'razon_social':'tercero','razon_social_nombre':'tercero','cliente':'tercero','proveedor':'tercero','nombre':'tercero','denominacion':'tercero','tercero':'tercero',
- 'documento':'documento','factura':'documento','numero':'documento','nro':'documento','nro_factura':'documento','numero_factura':'documento','factura_nro':'documento',
+ 'documento':'documento','factura':'documento','numero':'documento','nro':'documento','n_factura':'documento','no_factura':'documento','n_fact':'documento','nro_factura':'documento','numero_factura':'documento','factura_nro':'documento',
  'nro_documento':'documento','numero_documento':'documento','documento_nro':'documento','nro_comprobante':'documento','numero_comprobante':'documento',
  'comprobante':'documento','comprobante_nro':'documento','nro_doc':'documento','num_doc':'documento','doc_nro':'documento','nro_cuenta':'documento',
- 'fecha':'fecha','fecha_documento':'fecha','fecha_factura':'fecha','fecha_emision':'fecha','emision':'fecha',
+ 'fecha':'fecha','fecha_cr':'fecha','fecha_creacion':'fecha','fecha_documento':'fecha','fecha_factura':'fecha','fecha_emision':'fecha','emision':'fecha','fecha_venc':'fecha_vencimiento','fecha_vencimiento':'fecha_vencimiento',
  'moneda':'moneda','cod_moneda':'moneda','codigo_moneda':'moneda',
  'tc':'tipo_cambio','tipo_cambio':'tipo_cambio','tipo_cambio_origen':'tipo_cambio','cotizacion':'tipo_cambio','cambio':'tipo_cambio',
- 'importe':'importe','monto':'importe','total':'importe','importe_total':'importe','monto_total':'importe','valor_total':'importe','deuda_original':'importe',
+ 'importe':'importe','monto':'importe','total':'importe','importe_total':'importe','monto_total':'importe','valor_total':'importe','deuda_original':'importe','cuota':'cuota','n_compra':'numero_compra','no_compra':'numero_compra',
  'saldo':'saldo','saldo_pendiente':'saldo','saldo_actual':'saldo','saldo_documento':'saldo','pendiente':'saldo','importe_pendiente':'saldo','monto_pendiente':'saldo'
 }
 
@@ -4459,7 +4511,7 @@ def _importar_cuentas(tipo,file):
         doc=_imp_norm(r.get('documento'));ruc=_imp_norm(r.get('ruc'));nom=_imp_norm(r.get('tercero'))
         if not doc: raise ValueError('Falta documento/factura')
         moneda=(_imp_norm(r.get('moneda')) or 'PYG').upper();tc=_imp_num(r.get('tipo_cambio')) or 1
-        imp=_imp_num(r.get('importe'));saldo=_imp_num(r.get('saldo'))
+        imp=_imp_num(r.get('importe'));saldo=_imp_num(r.get('saldo')) if 'saldo' in r and _imp_norm(r.get('saldo'))!='' else imp
         if imp<=0: raise ValueError('Importe debe ser mayor a cero')
         if saldo<0 or saldo>imp+0.01: raise ValueError('Saldo inválido')
         tid=_tercero_import(c,ruc,nom,'CLIENTE' if tipo=='CXC' else 'PROVEEDOR')

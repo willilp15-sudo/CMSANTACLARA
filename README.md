@@ -432,3 +432,13 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - Corrige error HTTP 500 al agregar una aseguradora.
 - Causa: sentencia INSERT de terceros tenía cinco marcadores para cuatro valores después del tipo CLIENTE.
 - Conserva edición de aseguradoras, visaciones y relaciones históricas.
+
+## V13.9.64 — Corrección Admisiones + Importador Gasparini
+- Se implementa la ruta real `/admisiones/<id>/editar`, corrigiendo el 404 del botón Modificar.
+- Edición segura de fecha, paciente, tipo, médico, aseguradora, cama, moneda, tipo de cambio y visación.
+- Cambio de cama valida ocupación, libera la cama anterior y ocupa la nueva.
+- Se implementan rutas seguras para Eliminar y Anular admisiones, que ya estaban referenciadas por la interfaz.
+- Se corrige el selector de médico de visación en la pantalla de admisiones.
+- El importador CxC/CxP reconoce `N° Factura` / `Nº Factura` de Gasparini (normalizado como `n_factura`), además de Fecha Cr y Fecha Venc.
+- Si el archivo de cuentas pendientes no trae columna Saldo, usa Importe como saldo pendiente en vez de marcar la cuenta como pagada.
+- Mantiene compatibilidad XLS, XLSX, CSV y TXT.

@@ -1,0 +1,21 @@
+{% extends 'base.html' %}{% block content %}
+<div style="max-width:1200px;margin:0 auto"><h2>✏️ Modificar admisión #{{a.id}}</h2>
+<form method="post" enctype="multipart/form-data" class="grid" data-visacion-form>
+<label>Fecha<input type="date" name="fecha" value="{{a.fecha}}" required></label>
+<label>Paciente<select name="paciente_id" required>{% for x in pats %}<option value="{{x.id}}" {% if x.id==a.paciente_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Tipo<select name="tipo">{% for t in ['CONSULTA','URGENCIA','INTERNACION','QUIROFANO'] %}<option {% if t==a.tipo %}selected{% endif %}>{{t}}</option>{% endfor %}</select></label>
+<label>Médico<select name="medico_id"><option value="">Sin médico</option>{% for x in med %}<option value="{{x.id}}" {% if x.id==a.medico_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Aseguradora<select name="aseguradora_id"><option value="">Particular</option>{% for x in aseg %}<option value="{{x.id}}" {% if x.id==a.aseguradora_id %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Cama<select name="cama_id"><option value="">Sin cama</option>{% for x in camas %}<option value="{{x.id}}" {% if x.id==a.cama_id %}selected{% endif %}>{{x.codigo}}</option>{% endfor %}</select></label>
+<label>Moneda<select name="moneda">{% for x in mons %}<option value="{{x.codigo}}" {% if x.codigo==a.moneda %}selected{% endif %}>{{x.codigo}}</option>{% endfor %}</select></label>
+<label>Tipo de cambio<input name="tipo_cambio" type="number" step=".0001" value="{{a.tipo_cambio or 1}}"></label>
+<div class="visacion-seguro" style="display:none;grid-column:1/-1;border:1px solid #d9e2ec;border-radius:12px;padding:14px"><h4>🛡️ Visación del seguro</h4><div class="grid">
+<label>N.º de visación<input name="numero_visacion" value="{{v.numero_visacion if v else ''}}" data-vis-required></label>
+<label>Fecha de visación<input type="date" name="fecha_visacion" value="{{v.fecha if v else a.fecha}}" data-vis-required></label>
+<label>Hora de visación<input type="time" name="hora_visacion" value="{{v.hora if v else ''}}" data-vis-required></label>
+<label>Médico que realiza la atención<select name="medico_visacion_id" data-vis-required><option value="">Seleccionar</option>{% for x in med %}<option value="{{x.id}}" {% if (v and x.id==v.medico_id) or (not v and x.id==a.medico_id) %}selected{% endif %}>{{x.nombre}}</option>{% endfor %}</select></label>
+<label>Nueva foto/PDF (opcional)<input type="file" name="archivo_visacion" accept="application/pdf,image/jpeg,image/png,image/webp"></label>
+<label>Observación<input name="observacion_visacion" value="{{v.observacion if v else ''}}"></label></div>{% if v and v.archivo_nombre %}<small>Archivo actual: {{v.archivo_nombre}}. Solo seleccione otro si desea reemplazarlo.</small>{% endif %}</div>
+<div style="grid-column:1/-1;display:flex;gap:10px"><button type="submit">💾 Guardar cambios</button><a class="btn" href="/admisiones">Cancelar</a></div></form></div>
+<script>(()=>{const f=document.querySelector('form[data-visacion-form]'),sel=f.querySelector('select[name="aseguradora_id"]'),box=f.querySelector('.visacion-seguro');const sync=()=>{const on=!!sel.value;box.style.display=on?'block':'none';box.querySelectorAll('[data-vis-required]').forEach(x=>x.required=on)};sel.addEventListener('change',sync);sync()})();</script>
+{% endblock %}
