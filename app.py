@@ -520,6 +520,7 @@ def ventas_unificado():
 def ventas():
  c=db()
  if request.method=='POST':
+  success_vid=None
   try:
    fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'))
    condicion=(request.form.get('condicion_venta') or 'CONTADO').upper();medio=(request.form.get('forma_cobro') or '').strip();ref=(request.form.get('referencia_cobro') or '').strip();cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None;pos_id=int(request.form.get('terminal_pos_id') or 0) or None
@@ -584,9 +585,18 @@ def ventas():
    if cobro_inicial>0:lineas.append(('1.1.01',cobro_inicial*tc,0,cobro_inicial,'Cobro inicial'))
    if saldo>0:lineas.append(('1.1.02',saldo*tc,0,saldo,'Cuenta a cobrar'))
    lineas += [('4.1.01',0,base_total*tc,base_total,'Venta'),('2.1.02',0,ivag,iva,'IVA débito'),('5.1.01',costg,0,0,'Costo de venta'),('1.1.03',0,costg,0,'Salida inventario')]
-   asiento(c,fecha,'Venta '+request.form['numero'],'VENTA',vid,mon,tc,lineas);c.commit();audit('VENTA',str(vid));flash('Venta registrada con '+str(len(detalle))+' ítem(s).')
+   asiento(c,fecha,'Venta '+request.form['numero'],'VENTA',vid,mon,tc,lineas)
+   # V13.9.39: en TEST se genera el CDC conforme a la estructura del Manual Técnico.
+   try:
+    cdc_test=_generar_cdc_test_venta(c,vid,fecha,request.form['numero'])
+    if cdc_test: flash('CDC de PRUEBA generado: '+cdc_test+' · Sin valor fiscal hasta validación SIFEN TEST.')
+   except Exception as sx:
+    _sifen_log('CDC_TEST','ERROR',f'Venta {vid}: {sx}')
+    flash('Venta creada, pero no se pudo generar el CDC TEST: '+str(sx))
+   c.commit();success_vid=vid;audit('VENTA',str(vid));flash('Venta facturada correctamente con '+str(len(detalle))+' ítem(s).')
   except Exception as e:c.rollback();flash(str(e))
   finally:c.close()
+  if success_vid: return redirect(f'/ventas/{success_vid}/factura')
   return redirect('/ventas/carga')
  q=(request.args.get('q') or '').strip(); buscado=bool(q); rows=[]
  if buscado:
@@ -768,6 +778,8 @@ def config_sanatorio():
  if 'precio_consulta' not in cols:c.execute('alter table medicos add column precio_consulta REAL DEFAULT 0')
  if 'honorario_consulta' not in cols:c.execute('alter table medicos add column honorario_consulta REAL DEFAULT 0')
  if 'consultorio_numero' not in cols:c.execute('alter table medicos add column consultorio_numero TEXT')
+ for col,ddl in [('documento','TEXT'),('ruc','TEXT'),('telefono','TEXT'),('email','TEXT'),('direccion','TEXT'),('activo','INTEGER DEFAULT 1')]:
+  if col not in cols:c.execute(f'alter table medicos add column {col} {ddl}')
  c.execute('CREATE TABLE IF NOT EXISTS especialidades(id INTEGER PRIMARY KEY,nombre TEXT UNIQUE,precio_consulta REAL DEFAULT 0,honorario_medico REAL DEFAULT 0,activo INT DEFAULT 1)')
  ecols=[r['name'] for r in c.execute('pragma table_info(especialidades)').fetchall()]
  if 'minutos_consulta' not in ecols:c.execute('alter table especialidades add column minutos_consulta INT DEFAULT 15')
@@ -787,9 +799,10 @@ def config_sanatorio():
   elif k=='medico':
    esp=request.form['especialidad']; precio=float(request.form.get('precio_consulta') or 0); hon=float(request.form.get('honorario_consulta') or 0)
    c.execute('insert or ignore into especialidades(nombre,precio_consulta,honorario_medico) values(?,?,?)',(esp,precio,hon))
-   c.execute('insert into medicos(nombre,registro,especialidad,precio_consulta,honorario_consulta,consultorio_numero) values(?,?,?,?,?,?)',(request.form['nombre'],request.form['registro'],esp,precio,hon,request.form.get('consultorio_numero','').strip()))
+   c.execute('insert into medicos(nombre,registro,especialidad,precio_consulta,honorario_consulta,consultorio_numero,documento,ruc,telefono,email,direccion,activo) values(?,?,?,?,?,?,?,?,?,?,?,1)',(request.form['nombre'].strip(),request.form.get('registro','').strip(),esp,precio,hon,request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip()))
   elif k=='actualizar_medico':
-   c.execute('update medicos set especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=? where id=?',(request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),int(request.form['medico_id'])))
+   c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,int(request.form['medico_id'])))
+   audit('EDITAR_MEDICO',request.form['medico_id'])
   elif k=='aseguradora':
    cur=c.execute("insert into terceros(tipo,ruc,nombre,moneda) values('CLIENTE',?,?,?)",(request.form['ruc'],request.form['nombre'],request.form['moneda']));c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda) values(?,?,?,?)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda']))
   elif k=='cama':
@@ -2623,9 +2636,11 @@ def _kude_footer(story,inst,cdc=None,consulta_url=None,es_dte=False):
     from reportlab.lib.units import mm
     from reportlab.platypus import Table,TableStyle,Paragraph,Spacer
     from reportlab.lib.styles import getSampleStyleSheet
-    st=getSampleStyleSheet(); e=_kude_empresa(inst); qr=_kude_qr_flowable(consulta_url or cdc)
+    st=getSampleStyleSheet(); e=_kude_empresa(inst); qr=_kude_qr_flowable(consulta_url) if (es_dte and consulta_url) else None
     if es_dte and cdc:
         txt=f"<b>Consulte este Documento Electrónico con el CDC:</b><br/>{cdc}<br/><b>ESTE DOCUMENTO ES UNA REPRESENTACIÓN GRÁFICA DE UN DOCUMENTO ELECTRÓNICO (XML)</b>"
+    elif cdc:
+        txt=f'<b>CDC DE PRUEBA (SIFEN TEST):</b><br/>{cdc}<br/><b>NO ENVIADO / NO APROBADO · SIN VALOR FISCAL</b><br/>Generado localmente para pruebas de integración.'
     else:
         txt='<b>DOCUMENTO EMITIDO POR SANTA CLARA ERP</b><br/>Este comprobante no debe identificarse como DTE aprobado por SIFEN mientras no cuente con CDC y aprobación correspondiente.'
     if e['pie']: txt += '<br/>'+str(e['pie'])
@@ -2685,7 +2700,7 @@ def factura_venta_pdf(venta_id):
     t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1,rowHeights=[8*mm]+[10*mm]*(len(data)-1));t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
     total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
     tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
-    url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if v['cdc'] else None
+    url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if es_dte and v['cdc'] else None
     _kude_footer(story,inst,v['cdc'],url,es_dte)
     doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
 
@@ -3177,8 +3192,8 @@ def configuracion_sifen():
         accion=request.form.get('accion','guardar')
         if accion=='guardar':
             # Seguridad: esta versión habilita únicamente TEST. Producción requiere activación deliberada posterior.
-            vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','establecimiento','punto_expedicion','csc_id','csc')]
-            c.execute("update sifen_config set ambiente='TEST',ruc=?,dv=?,timbrado=?,establecimiento=?,punto_expedicion=?,csc_id=?,csc=?,actualizado_en=? where id=1",(*vals,now()))
+            vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','establecimiento','punto_expedicion','csc_id','csc','tipo_contribuyente')]
+            c.execute("update sifen_config set ambiente='TEST',ruc=?,dv=?,timbrado=?,establecimiento=?,punto_expedicion=?,csc_id=?,csc=?,tipo_contribuyente=?,actualizado_en=? where id=1",(*vals,now()))
             c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN TEST actualizada');flash('Configuración SIFEN TEST guardada.')
         elif accion=='certificado':
             archivo=request.files.get('certificado');password=request.form.get('password','')
@@ -3210,3 +3225,53 @@ def configuracion_sifen():
     return render_template('sifen_config.html',cfg=cfg,logs=logs,test_base=SIFEN_TEST_BASE)
 
 ROUTE_MODULE.update({'configuracion_sifen':'CONFIG_SANATORIO'})
+
+
+# ===== V13.9.39: Facturar al confirmar venta + CDC local de PRUEBA =====
+def init_v13939_facturacion_venta_test():
+    c=db()
+    scols={r['name'] for r in c.execute('pragma table_info(sifen_config)').fetchall()}
+    if 'tipo_contribuyente' not in scols:
+        c.execute("alter table sifen_config add column tipo_contribuyente TEXT DEFAULT '2'")
+    vcols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,defn in [('codigo_seguridad_sifen','TEXT'),('cdc_ambiente','TEXT')]:
+        if col not in vcols:c.execute(f'alter table ventas add column {col} {defn}')
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.39-venta-factura-cdc-test',?)",(now(),))
+    c.commit();c.close()
+init_v13939_facturacion_venta_test()
+
+def _mod11_cdc(base43):
+    if not str(base43).isdigit(): raise ValueError('La base del CDC debe ser numérica.')
+    k=2; total=0
+    for ch in reversed(str(base43)):
+        total += int(ch)*k; k += 1
+        if k>11:k=2
+    r=11-(total%11)
+    return '0' if r in (10,11) else str(r)
+
+def _solo_digitos(v):
+    return ''.join(ch for ch in str(v or '') if ch.isdigit())
+
+def _generar_cdc_test_venta(c,venta_id,fecha,numero):
+    import secrets
+    cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    if not cfg or str(cfg['ambiente'] or '').upper()!='TEST': return None
+    if not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']):
+        raise ValueError('El certificado SIFEN TEST no está instalado en el servidor.')
+    ruc=_solo_digitos(cfg['ruc']); dv=_solo_digitos(cfg['dv']); est=_solo_digitos(cfg['establecimiento']); pexp=_solo_digitos(cfg['punto_expedicion'])
+    tip=_solo_digitos(cfg['tipo_contribuyente'] or '2')
+    if not (ruc and dv and est and pexp and tip): raise ValueError('Complete RUC, DV, establecimiento, punto de expedición y tipo de contribuyente en Configuración SIFEN.')
+    if len(ruc)>8: raise ValueError('El RUC emisor del CDC no puede superar 8 dígitos.')
+    ruc=ruc.zfill(8); est=est.zfill(3); pexp=pexp.zfill(3)
+    # Número de documento: se toman los últimos 7 dígitos del comprobante y se completa con ceros.
+    nd=_solo_digitos(numero)[-7:].zfill(7)
+    fec=_solo_digitos(fecha)[:8]
+    if len(fec)!=8: raise ValueError('La fecha de emisión no permite formar AAAAMMDD.')
+    # C002=01 Factura electrónica; B002=1 emisión normal; B004=9 dígitos de seguridad.
+    codseg=f'{secrets.randbelow(1_000_000_000):09d}'
+    base='01'+ruc+dv[:1]+est+pexp+nd+tip[:1]+fec+'1'+codseg
+    if len(base)!=43: raise ValueError(f'Longitud base CDC inválida ({len(base)}).')
+    cdc=base+_mod11_cdc(base)
+    c.execute("update ventas set cdc=?,estado_sifen='TEST_GENERADO',codigo_seguridad_sifen=?,cdc_ambiente='TEST' where id=?",(cdc,codseg,venta_id))
+    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'CDC_TEST','GENERADO',f'Venta {venta_id} · CDC {cdc} · NO ENVIADO / NO APROBADO'))
+    return cdc

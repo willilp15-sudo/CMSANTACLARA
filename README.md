@@ -352,3 +352,5 @@ V13.6.5.1 FIX Configuración Empresa
 - Menu reorganizado segun Stock y Facturacion, Cuentas Corrientes, Informes, Recursos Humanos, Bancos, Control de Sistema, Contabilidad y Laboratorio.
 - Se mantienen Agenda/Consultorio, impresion termica, Laboratorio, identidad visual y llamador por numero de consultorio.
 - Corregido definitivamente el orden de inicializacion ROUTE_MODULE.
+
+V13.9.40: edición completa de médicos (datos personales, profesionales, contacto, honorarios, consultorio y estado), conservando historial.
