@@ -1946,12 +1946,16 @@ def recibo_pdf(rid):
  from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
  c=db(); r=c.execute("select rp.*,v.numero factura,t.nombre cliente,t.ruc,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from recibos_pago rp join ventas v on v.id=rp.venta_id join terceros t on t.id=rp.tercero_id left join cuentas_bancarias cb on cb.id=rp.cuenta_bancaria_id left join terminales_pos tp on tp.id=rp.terminal_pos_id where rp.id=?",(rid,)).fetchone(); inst=c.execute('select * from institucion_config where id=1').fetchone(); c.close()
  if not r:return 'Recibo no encontrado',404
- bio=io.BytesIO(); doc=SimpleDocTemplate(bio,pagesize=A4,leftMargin=10*mm,rightMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm); st=getSampleStyleSheet(); story=[]; logo=pdf_logo(105,72)
- if logo:story.append(logo)
- story += [Paragraph('<b>'+str(inst['nombre'] or 'CENTRO MEDICO SANTA CLARA')+'</b>',st['Heading2']),Paragraph('R.U.C.: '+str(inst['ruc'] or 'Configurar')+' &nbsp;&nbsp; Timbrado: '+str(inst['timbrado'] or 'Configurar'),st['Normal']),Paragraph(str(inst['direccion'] or '')+' '+str(inst['telefono'] or '')+' '+str(inst['email'] or ''),st['Normal']),Spacer(1,3*mm),Paragraph('<b>RECIBO DE DINERO</b><br/><b>'+str(r['numero'])+'</b>',st['Title']),Spacer(1,3*mm)]
- datos=[['Fecha de Emisión: '+str(r['fecha']),'R.U.C./C.I.: '+str(r['ruc'] or '')],['Moneda: '+str(r['moneda'])+'   Tipo de Cambio: '+str(r['tipo_cambio'] or ''),'Razón Social: '+str(r['cliente'])]]; t=Table(datos,colWidths=[90*mm,90*mm]); t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.5,colors.grey),('INNERGRID',(0,0),(-1,-1),.25,colors.lightgrey),('FONTSIZE',(0,0),(-1,-1),8),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),5)])); story += [t,Spacer(1,2*mm)]
- comp=[['Comprobante','Concepto','Importe Pagado'],[r['factura'],'Venta / Consulta',f"{r['importe']:,.0f}"],['','TOTAL COBRADO',f"{r['importe']:,.0f}"]]; t=Table(comp,colWidths=[55*mm,80*mm,45*mm]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.5,colors.grey),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8)])); story += [t,Paragraph('Son: '+monto_letras(r['importe']),st['Normal']),Spacer(1,2*mm)]
- entidad=' '.join(x for x in [r['banco'] or '',r['cuenta_alias'] or r['numero_cuenta'] or '',r['terminal_pos'] or ''] if x); cob=[['Método','Entidad / Cuenta','Referencia','Moneda','Importe'],[r['medio'],entidad,r['referencia'] or '',r['moneda'],f"{r['importe']:,.0f}"]]; t=Table(cob,colWidths=[32*mm,62*mm,35*mm,22*mm,29*mm]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.5,colors.grey),('FONTSIZE',(0,0),(-1,-1),7.5),('ALIGN',(-1,1),(-1,-1),'RIGHT')])); story += [Paragraph('<b>Composición del Cobro</b>',st['Heading3']),t,Spacer(1,16*mm),Table([['_______________________________','_______________________________'],['Entregué conforme','Recibí conforme']],colWidths=[90*mm,90*mm],style=[('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTSIZE',(0,0),(-1,-1),8)])]; doc.build(story); bio.seek(0); return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
+ bio=io.BytesIO();doc=SimpleDocTemplate(bio,pagesize=A4,leftMargin=10*mm,rightMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm);st=getSampleStyleSheet();story=[]
+ _kude_header(story,inst,'RECIBO DE DINERO',r['numero'],'Comprobante de Recibo')
+ datos=[[Paragraph('<b>Nombre o Razón Social:</b> '+str(r['cliente']),st['Normal']),Paragraph('<b>RUC/Documento:</b> '+str(r['ruc'] or '-'),st['Normal'])],[Paragraph('<b>Fecha y hora:</b> '+str(r['fecha']),st['Normal']),Paragraph('<b>Moneda:</b> '+str(r['moneda']),st['Normal'])],[Paragraph('<b>Factura relacionada:</b> '+str(r['factura']),st['Normal']),Paragraph('<b>Medio de cobro:</b> '+str(r['medio']),st['Normal'])]]
+ t=Table(datos,colWidths=[95*mm,91*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('INNERGRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story += [t,Spacer(1,2*mm)]
+ entidad=' '.join(x for x in [r['banco'] or '',r['cuenta_alias'] or r['numero_cuenta'] or '',r['terminal_pos'] or ''] if x)
+ comp=[['Comprobante','Concepto','Entidad / Cuenta','Referencia','Importe'],[r['factura'],'Cobro de factura',entidad,r['referencia'] or '',f"{float(r['importe'] or 0):,.0f}"],['','','','TOTAL COBRADO',f"{float(r['importe'] or 0):,.0f}"]]
+ t=Table(comp,colWidths=[34*mm,46*mm,45*mm,31*mm,30*mm],rowHeights=[8*mm,18*mm,9*mm]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTNAME',(-2,-1),(-1,-1),'Helvetica-Bold'),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t,Spacer(1,2*mm),Paragraph('<b>Son:</b> '+monto_letras(r['importe']),st['Normal'])]
+ _kude_footer(story,inst,None,None,False)
+ doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
+
 
 # ===== V13.4.7: recibos históricos, cuentas receptoras y PDF de informes =====
 @app.route('/bancos/cuentas',methods=['GET','POST'])
@@ -2523,6 +2527,56 @@ init_v1361_codigos_internos()
 
 
 
+
+# ===== V13.9.35: formato documental institucional tipo KuDE =====
+def _kude_empresa(inst):
+    def g(k,default=''):
+        try: return inst[k] or default
+        except Exception: return default
+    ruc=g('ruc','-'); dv=g('dv','')
+    if dv and '-' not in str(ruc): ruc=f"{ruc}-{dv}"
+    return {
+      'nombre':g('razon_social',g('nombre','CENTRO MEDICO SANTA CLARA')),
+      'fantasia':g('nombre_fantasia',g('nombre','CENTRO MEDICO SANTA CLARA')),
+      'ruc':ruc,'timbrado':g('timbrado','-'),'inicio':g('timbrado_desde','-'),
+      'direccion':g('direccion',''),'ciudad':g('ciudad',''),'departamento':g('departamento',''),
+      'telefono':g('telefono',''),'email':g('email',''),'pie':g('pie_documento','')
+    }
+
+def _kude_qr_flowable(text,size_mm=28):
+    if not text: return None
+    try:
+        from reportlab.graphics.barcode import qr
+        from reportlab.graphics.shapes import Drawing
+        from reportlab.lib.units import mm
+        q=qr.QrCodeWidget(text); b=q.getBounds(); w=b[2]-b[0]; h=b[3]-b[1]
+        d=Drawing(size_mm*mm,size_mm*mm,transform=[size_mm*mm/w,0,0,size_mm*mm/h,0,0]); d.add(q); return d
+    except Exception:return None
+
+def _kude_header(story,inst,tipo,numero,subtitulo='Representación gráfica del documento emitido por el sistema'):
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Table,TableStyle,Paragraph,Image,Spacer
+    st=getSampleStyleSheet(); e=_kude_empresa(inst); logo=logo_path_actual()
+    iz=[]
+    if os.path.exists(logo): iz.append(Image(logo,width=38*mm,height=18*mm))
+    iz += [Paragraph('<b>'+str(e['nombre'])+'</b>',st['Heading3']),Paragraph(str(e['direccion'])+' '+str(e['ciudad'])+' '+str(e['departamento']),st['Normal']),Paragraph('Tel.: '+str(e['telefono'])+' &nbsp; Email: '+str(e['email']),st['Normal'])]
+    der=Paragraph(f"<b>RUC:</b> {e['ruc']}<br/><b>Timbrado N°:</b> {e['timbrado']}<br/><b>Inicio de vigencia:</b> {e['inicio']}<br/><br/><b>{tipo}</b><br/><font size=12><b>N°: {numero}</b></font>",st['Normal'])
+    t=Table([[iz,der]],colWidths=[124*mm,62*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('LINEBEFORE',(1,0),(1,0),1,colors.black),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),7),('RIGHTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));story += [Paragraph('<para alignment="center"><b>'+subtitulo+'</b></para>',st['Normal']),t,Spacer(1,2*mm)]
+
+def _kude_footer(story,inst,cdc=None,consulta_url=None,es_dte=False):
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Table,TableStyle,Paragraph,Spacer
+    st=getSampleStyleSheet(); e=_kude_empresa(inst); qr=_kude_qr_flowable(consulta_url or cdc)
+    if es_dte and cdc:
+        txt=f"<b>Consulte este Documento Electrónico con el CDC:</b><br/>{cdc}<br/><b>ESTE DOCUMENTO ES UNA REPRESENTACIÓN GRÁFICA DE UN DOCUMENTO ELECTRÓNICO (XML)</b>"
+    else:
+        txt='<b>DOCUMENTO EMITIDO POR SANTA CLARA ERP</b><br/>Este comprobante no debe identificarse como DTE aprobado por SIFEN mientras no cuente con CDC y aprobación correspondiente.'
+    if e['pie']: txt += '<br/>'+str(e['pie'])
+    row=[Paragraph(txt,st['Normal']),qr or Paragraph('',st['Normal'])]
+    t=Table([row],colWidths=[150*mm,36*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));story += [Spacer(1,3*mm),t]
+
 # ===== V13.6.4: Factura imprimible/PDF y preparación SIFEN =====
 def init_v1364_factura_electronica():
     c=db()
@@ -2557,36 +2611,28 @@ def factura_venta_pdf(venta_id):
     from flask import send_file
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image
+    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
     v,items,inst=_factura_venta_data(venta_id)
     if not v: flash('Factura no encontrada.'); return redirect('/ventas/carga')
-    b=BytesIO();doc=SimpleDocTemplate(b,pagesize=A4,rightMargin=12*mm,leftMargin=12*mm,topMargin=10*mm,bottomMargin=10*mm)
-    st=getSampleStyleSheet(); story=[]
-    logo=logo_path_actual()
-    head=[]
-    if os.path.exists(logo): head.append(Image(logo,width=42*mm,height=20*mm))
-    else: head.append(Paragraph('<b>CENTRO MÉDICO SANTA CLARA</b>',st['Heading2']))
-    datos=f"<b>{(inst['razon_social'] if inst and 'razon_social' in inst.keys() else 'Centro Médico Santa Clara') or 'Centro Médico Santa Clara'}</b><br/>RUC: {(inst['ruc'] if inst and 'ruc' in inst.keys() else '') or '-'}<br/>{(inst['direccion'] if inst and 'direccion' in inst.keys() else '') or ''}"
-    head.append(Paragraph(datos,st['Normal']))
-    box=Table([[Paragraph('<b>FACTURA</b>',st['Heading2'])],[f"N.º {v['numero'] or v['id']}"],[f"Fecha: {v['fecha']}"],[f"Condición: {v['condicion_venta'] or '-'}"]],colWidths=[52*mm])
-    box.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTSIZE',(0,0),(-1,-1),9)]))
-    h=Table([[head[0],head[1],box]],colWidths=[45*mm,82*mm,52*mm]);h.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP')]));story += [h,Spacer(1,4*mm)]
-    story += [Paragraph(f"<b>Cliente/Paciente:</b> {v['cliente'] or '-'} &nbsp;&nbsp; <b>RUC/CI:</b> {v['ruc'] or '-'}",st['Normal']),Paragraph(f"<b>Moneda:</b> {v['moneda']} &nbsp;&nbsp; <b>Tipo de cambio:</b> {v['tipo_cambio'] or 1}",st['Normal']),Spacer(1,3*mm)]
-    data=[['Código','Descripción','Cant.','Precio IVA incl.','IVA','Total']]
-    for x in items:data.append([x['codigo'] or '',x['nombre'] or '',f"{x['cantidad']:,.2f}",f"{x['precio']:,.0f}",('Exento' if not x['iva_pct'] else f"{x['iva_pct']:g}%"),f"{x['total']:,.0f}"])
-    t=Table(data,colWidths=[25*mm,67*mm,18*mm,28*mm,18*mm,28*mm],repeatRows=1);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8),('ALIGN',(2,1),(-1,-1),'RIGHT')]));story += [t,Spacer(1,3*mm)]
-    totals=[['Gravado 10%',f"{v['gravado_10'] or 0:,.0f}"],['IVA 10%',f"{v['iva_10'] or 0:,.0f}"],['Gravado 5%',f"{v['gravado_5'] or 0:,.0f}"],['IVA 5%',f"{v['iva_5'] or 0:,.0f}"],['Exento',f"{v['exento_iva'] or 0:,.0f}"],['TOTAL',f"{v['total'] or 0:,.0f} {v['moneda']}"]]
-    tt=Table(totals,colWidths=[38*mm,38*mm],hAlign='RIGHT');tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.35,colors.grey),('ALIGN',(1,0),(1,-1),'RIGHT'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]));story.append(tt)
-    pago=(v['forma_cobro'] or '-') + ((' / Ref. '+v['referencia_cobro']) if v['referencia_cobro'] else '')
-    story += [Spacer(1,3*mm),Paragraph(f"<b>Forma de pago:</b> {pago}",st['Normal'])]
-    if v['cdc']:
-        story += [Paragraph(f"<b>CDC:</b> {v['cdc']} &nbsp; <b>Estado SIFEN:</b> {v['estado_sifen'] or '-'}",st['Normal'])]
-    else:
-        story += [Paragraph('<font size=7>Representación generada por el sistema. No se identifica como DTE aprobado por SIFEN mientras no exista CDC/aprobación.</font>',st['Normal'])]
-    doc.build(story);b.seek(0)
-    return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
+    b=BytesIO();doc=SimpleDocTemplate(b,pagesize=A4,rightMargin=10*mm,leftMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm);st=getSampleStyleSheet();story=[]
+    es_dte=bool(v['cdc']) and str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
+    _kude_header(story,inst,'FACTURA ELECTRÓNICA' if es_dte else 'FACTURA',v['numero'] or v['id'],'KuDE de Factura Electrónica' if es_dte else 'Comprobante de Factura')
+    cli=[[Paragraph('<b>Nombre o Razón Social:</b> '+str(v['cliente'] or '-'),st['Normal']),Paragraph('<b>Condición de Venta:</b> '+str(v['condicion_venta'] or '-'),st['Normal'])],[Paragraph('<b>RUC/Documento:</b> '+str(v['ruc'] or '-'),st['Normal']),Paragraph('<b>Moneda:</b> '+str(v['moneda'] or 'PYG'),st['Normal'])],[Paragraph('<b>Fecha y hora:</b> '+str(v['fecha']),st['Normal']),Paragraph('<b>Forma de pago:</b> '+str(v['forma_cobro'] or '-'),st['Normal'])]]
+    tc=Table(cli,colWidths=[95*mm,91*mm]);tc.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('INNERGRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story += [tc,Spacer(1,2*mm)]
+    data=[['Cod.','Descripción','UNI','Cantidad','Precio Unitario','Descuento','Exentas','5%','10%']]
+    ex=iva5=iva10=0
+    for x in items:
+        pct=float(x['iva_pct'] or 0); total=float(x['total'] or 0); exv=total if pct==0 else 0; v5=total if pct==5 else 0; v10=total if pct==10 else 0; ex+=exv;iva5+=v5;iva10+=v10
+        data.append([x['codigo'] or '',x['nombre'] or '','UNI',f"{float(x['cantidad'] or 0):,.2f}",f"{float(x['precio'] or 0):,.0f}",'0',f"{exv:,.0f}" if exv else '',f"{v5:,.0f}" if v5 else '',f"{v10:,.0f}" if v10 else ''])
+    while len(data)<12:data.append(['','','','','','','','',''])
+    t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1,rowHeights=[8*mm]+[10*mm]*(len(data)-1));t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
+    total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
+    tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
+    url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if v['cdc'] else None
+    _kude_footer(story,inst,v['cdc'],url,es_dte)
+    doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
 
 
 # ===== V13.6.5: Configuración institucional centralizada =====
@@ -3028,3 +3074,5 @@ def arqueo_caja_pdf(apertura_id):
  doc.build(story);buf.seek(0);return send_file(buf,as_attachment=True,download_name='arqueo_caja_%s.pdf'%ar['id'],mimetype='application/pdf')
 
 ROUTE_MODULE.update({'arqueo_caja_diario':'CAJA','arqueo_caja_pdf':'CAJA'})
+
+# V13.9.35 - Formato documental unificado tipo KuDE para facturas, recibos y futuros documentos electrónicos.
