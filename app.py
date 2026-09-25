@@ -1371,6 +1371,14 @@ def init_v1398_flujo_consultorio():
  c.commit();c.close()
 init_v1398_flujo_consultorio()
 
+def init_v13933_caja_consultorio():
+ c=db()
+ try:
+  c.execute("CREATE TABLE IF NOT EXISTS caja_pendientes_consultorio(id INTEGER PRIMARY KEY,consulta_id INTEGER UNIQUE,agenda_id INTEGER,paciente_id INTEGER NOT NULL,fecha TEXT NOT NULL,descripcion TEXT,importe_pyg REAL NOT NULL DEFAULT 0,estado TEXT NOT NULL DEFAULT 'PENDIENTE',venta_id INTEGER,creado_en TEXT,procesado_en TEXT)")
+  c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.33-consultorio-a-caja',?)",(now(),));c.commit()
+ finally:c.close()
+init_v13933_caja_consultorio()
+
 @app.route('/agenda/pendientes-facturacion')
 def agenda_pendientes_facturacion():
  c=db();rows=c.execute("""select g.*,p.nombre paciente,p.documento,m.nombre medico,e.nombre especialidad,a.nombre aseguradora
@@ -1395,8 +1403,9 @@ def agenda_facturar(gid):
    values(?,?,?,?,?,?,?,?,?,'PENDIENTE')""",(g['fecha'],g['aseguradora_id'],g['paciente_id'],'CONSULTA',qid,'SERVICIOS SANATORIALES','Consulta - '+(g['especialidad'] or 'Consulta médica'),precio,10))
    c.execute("update agenda set facturada=1,condicion_venta='SEGURO' where id=?",(gid,));flash('Consulta enviada a pendientes de facturación del seguro.')
   else:
-   # Particular queda en lista para emitir la factura desde Ventas/Facturación, sin cobrar al agendar.
-   c.execute("update agenda set condicion_venta='PARTICULAR' where id=?",(gid,));flash('Consulta particular registrada como realizada y pendiente de emisión de factura.')
+   desc='Consulta - '+(g['especialidad'] or 'Consulta médica')
+   c.execute("insert or ignore into caja_pendientes_consultorio(consulta_id,agenda_id,paciente_id,fecha,descripcion,importe_pyg,estado,creado_en) values(?,?,?,?,?,?,'PENDIENTE',?)",(qid,gid,g['paciente_id'],g['fecha'],desc,precio,now()))
+   c.execute("update agenda set facturada=1,condicion_venta='PENDIENTE_CAJA' where id=?",(gid,));flash('Prestación registrada y enviada a Caja Central para facturación y cobro.')
   c.commit();audit('CONSULTA_REALIZADA_PENDIENTE_FACTURACION',str(gid))
  except Exception as ex:c.rollback();flash(str(ex))
  finally:c.close()
@@ -2863,12 +2872,15 @@ init_v13930_caja_central()
 
 @app.get('/ventas/caja-central')
 def caja_central_facturacion():
- q=(request.args.get('q') or '').strip();c=db();cuentas=[]
+ q=(request.args.get('q') or '').strip();c=db();cuentas=[];consultas=[]
  if q:
   like='%'+q+'%';digits=''.join(ch for ch in q if ch.isdigit())
   sql="""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where (p.nombre like ? or coalesce(p.documento,'') like ? or coalesce(r.numero,'') like ? or cast(a.id as text)=?) and exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100"""
-  cuentas=c.execute(sql,(like,like,like,digits or '-1')).fetchall()
- c.close();return render_template('cash_account_locator.html',q=q,cuentas=cuentas)
+  cuentas=c.execute(sql,(like,like,like,digits or q)).fetchall()
+  consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' and (p.nombre like ? or coalesce(p.documento,'') like ? or cast(k.consulta_id as text)=?) order by k.id desc limit 100""",(like,like,digits or q)).fetchall()
+ else:
+  consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' order by k.id desc limit 100""").fetchall()
+ c.close();return render_template('cash_account_locator.html',q=q,cuentas=cuentas,consultas=consultas)
 
 @app.get('/ventas/caja-central/<int:aid>')
 def caja_central_detalle(aid):
@@ -2901,7 +2913,36 @@ def caja_central_facturar(aid):
  except Exception as e:c.rollback();flash('No se pudo facturar la cuenta: '+str(e));return redirect(f'/ventas/caja-central/{aid}')
  finally:c.close()
 
-ROUTE_MODULE.update({'caja_central_facturacion':'CAJA','caja_central_detalle':'CAJA','caja_central_facturar':'FACTURACION'})
+@app.get('/ventas/caja-central/consultorio/<int:pid>')
+def caja_central_consultorio_detalle(pid):
+ c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();c.close()
+ if not x:flash('La prestación ya fue facturada o no existe.');return redirect('/ventas/caja-central')
+ return render_template('cash_consult_detail.html',x=x)
+
+@app.post('/ventas/caja-central/consultorio/<int:pid>/facturar')
+def caja_central_consultorio_facturar(pid):
+ c=db()
+ try:
+  x=c.execute("select k.*,p.nombre paciente,p.tercero_id from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone()
+  if not x:raise ValueError('La prestación ya fue procesada o no existe.')
+  if not x['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero=(request.form.get('numero') or '').strip();medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
+  if not numero:raise ValueError('Ingrese el número de factura.')
+  if c.execute('select 1 from ventas where numero=?',(numero,)).fetchone():raise ValueError('Ya existe una factura con ese número.')
+  if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de cobrar en efectivo.')
+  base,iva=desglosar_iva_incluido(total,10)
+  vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,x['tercero_id'],numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
+  c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,1,total,total,total,0,10,x['descripcion']))
+  c.execute("update caja_pendientes_consultorio set estado='FACTURADO',venta_id=?,procesado_en=? where id=?",(vid,now(),pid));c.execute('update consultas set facturada=1,venta_id=? where id=?',(vid,x['consulta_id']))
+  c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,x['tercero_id'],'PYG',1,total,0,0,'PAGADO'))
+  c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro consultorio '+x['paciente'],'VENTA',vid))
+  if medio=='Efectivo':
+   ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro consultorio '+x['paciente'],total,'VENTA',vid,session.get('user')))
+  asiento(c,fecha,'Factura consultorio '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,base,base,'Servicio'),('2.1.02',0,iva,iva,'IVA débito')]);c.commit();audit('FACTURAR_CONSULTORIO_CAJA',f'{pid}:{vid}');flash('Prestación facturada y cobrada correctamente en Caja.');return redirect(f'/ventas/{vid}/factura')
+ except Exception as e:c.rollback();flash('No se pudo facturar: '+str(e));return redirect(f'/ventas/caja-central/consultorio/{pid}')
+ finally:c.close()
+
+ROUTE_MODULE.update({'caja_central_facturacion':'CAJA','caja_central_detalle':'CAJA','caja_central_facturar':'FACTURACION','caja_central_consultorio_detalle':'CAJA','caja_central_consultorio_facturar':'FACTURACION'})
 
 # ===== V13.9.31: Arqueo de Caja Diario con PDF =====
 def init_v13931_arqueo():

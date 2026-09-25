@@ -1,21 +1,13 @@
 {% extends 'base.html' %}
 {% block title %}Inicio{% endblock %}
 {% block content %}
-<div class="inicio-santa-clara">
-  <img src="{{logo_url}}" alt="Centro Médico Santa Clara">
-</div>
+<div class="inicio-santa-clara" aria-label="Inicio Santa Clara"></div>
 <style>
+/* V13.9.34: el inicio usa exclusivamente el background institucional global.
+   Se elimina el logo/imagen central superpuesta para evitar duplicación visual. */
 .inicio-santa-clara{
-  min-height:calc(100vh - 180px);
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  padding:30px;
-}
-.inicio-santa-clara img{
-  width:min(620px,82vw);
-  max-height:58vh;
-  object-fit:contain;
+  min-height:calc(100vh - 115px);
+  width:100%;
 }
 </style>
 {% endblock %}
