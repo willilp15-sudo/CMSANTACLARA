@@ -1,0 +1,7 @@
+{% extends 'base.html' %}{% block title %}Seguridad y Backups{% endblock %}{% block content %}
+<div class="panel" style="max-width:1100px;margin:0 auto"><h2>🛡️ Backup manual de la base de datos</h2>
+<p>Los backups automáticos están desactivados. Cree una copia cuando lo necesite, especialmente antes de una actualización importante.</p>
+<p><b>Espacio libre:</b> {{'%.1f'|format(free/1024/1024)}} MB de {{'%.1f'|format(total/1024/1024)}} MB</p>
+<form method="post" onsubmit="return confirm('¿Crear ahora un backup completo de la base de datos?')"><button class="btn">💾 Crear backup ahora</button></form>
+<h3>Copias manuales disponibles</h3><table><tr><th>Archivo</th><th>Fecha</th><th>Tamaño</th><th>Acciones</th></tr>{% for f in files %}<tr><td>{{f.name}}</td><td>{{f.mtime}}</td><td>{{'%.1f'|format(f.size/1024/1024)}} MB</td><td><a class="btn" href="/seguridad/backups/descargar/{{f.name}}">⬇ Descargar</a> <form method="post" action="/seguridad/backups/eliminar/{{f.name}}" style="display:inline" onsubmit="return confirm('¿Eliminar esta copia?')"><button class="btn secondary">🗑 Eliminar</button></form></td></tr>{% else %}<tr><td colspan="4">Todavía no hay backups manuales.</td></tr>{% endfor %}</table></div>
+{% endblock %}

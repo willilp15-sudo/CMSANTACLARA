@@ -49,20 +49,8 @@ def preparar_base_persistente():
   print('[Santa Clara] Se creará una nueva base persistente en:',DB)
 
 def backup_inicio():
- if not os.path.exists(DB):return
- carpeta=os.path.join(DATA_DIR,'backups');os.makedirs(carpeta,exist_ok=True)
- # Una copia por día al primer inicio; conserva las 30 más recientes.
- hoy=datetime.date.today().strftime('%Y%m%d')
- destino=os.path.join(carpeta,'santa_clara_'+hoy+'.db')
- if not os.path.exists(destino):
-  try:shutil.copy2(DB,destino)
-  except OSError:pass
- try:
-  copias=sorted([os.path.join(carpeta,x) for x in os.listdir(carpeta) if x.startswith('santa_clara_') and x.endswith('.db')],key=os.path.getmtime,reverse=True)
-  for viejo in copias[30:]:
-   try:os.remove(viejo)
-   except OSError:pass
- except OSError:pass
+ # V13.9.32: desactivado. Los backups se crean únicamente de forma manual.
+ return
 
 preparar_base_persistente()
 
@@ -776,6 +764,8 @@ def hospital_admisiones():
 @app.route('/cuenta-paciente/<int:aid>',methods=['GET','POST'])
 def cuenta_paciente(aid):
  c=db();a=c.execute('select a.*,p.nombre paciente,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone()
+ if not a:
+  c.close();flash('La cuenta o admisión solicitada no existe. Puede localizar la cuenta desde Caja Central.');return redirect('/ventas/caja-central')
  if request.method=='POST':
   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));tipo=request.form['tipo'];ref=int(request.form['referencia_id']);qty=float(request.form['cantidad'])
   if tipo=='PRODUCTO':
@@ -1817,10 +1807,7 @@ def iniciar_backup_automatico():
 
 # IMPORTANTE: liberar backups antiguos ANTES de cualquier copia o migración.
 limpiar_backups_emergencia()
-backup_inicio()
-limpiar_backups_emergencia()
 preparar_actualizacion_segura()
-iniciar_backup_automatico()
 init()
 
 def sincronizar_clientes_pacientes(c):
@@ -2812,6 +2799,53 @@ def agenda_web_confirmacion():
 
 ROUTE_MODULE.update({'conciliacion_bancaria':'FINANZAS','conciliacion_bancaria_detalle':'FINANZAS'})
 init_v1391()
+
+
+
+# ===== V13.9.32: Backups exclusivamente manuales =====
+def _backup_manual_files():
+ raiz=os.path.join(DATA_DIR,'backups','manual');os.makedirs(raiz,exist_ok=True)
+ out=[]
+ for f in Path(raiz).glob('santa_clara_manual_*.db'):
+  try:out.append({'name':f.name,'size':f.stat().st_size,'mtime':datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime('%d/%m/%Y %H:%M:%S')})
+  except OSError:pass
+ return sorted(out,key=lambda x:x['name'],reverse=True)
+
+@app.route('/seguridad/backups',methods=['GET','POST'])
+def backups_manuales():
+ if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):
+  flash('No tiene permiso para administrar backups.');return redirect('/')
+ raiz=os.path.join(DATA_DIR,'backups','manual');os.makedirs(raiz,exist_ok=True)
+ if request.method=='POST':
+  try:
+   total,used,free=shutil.disk_usage(DATA_DIR);dbsize=os.path.getsize(DB) if os.path.exists(DB) else 0
+   if free < dbsize + 100*1024*1024: raise RuntimeError('No hay espacio libre suficiente para crear una copia manual. Libere espacio antes de continuar.')
+   destino=os.path.join(raiz,'santa_clara_manual_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
+   src=sqlite3.connect(DB);dst=sqlite3.connect(destino)
+   try:src.backup(dst)
+   finally:dst.close();src.close()
+   audit('BACKUP_MANUAL',os.path.basename(destino));flash('Backup manual creado correctamente.')
+  except Exception as e:flash('No se pudo crear el backup: '+str(e))
+  return redirect('/seguridad/backups')
+ total,used,free=shutil.disk_usage(DATA_DIR);return render_template('manual_backups.html',files=_backup_manual_files(),free=free,total=total)
+
+@app.get('/seguridad/backups/descargar/<path:nombre>')
+def backup_manual_descargar(nombre):
+ if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):return redirect('/')
+ from flask import send_from_directory
+ if '/' in nombre or '\\' in nombre:return ('Archivo inválido',400)
+ return send_from_directory(os.path.join(DATA_DIR,'backups','manual'),nombre,as_attachment=True)
+
+@app.post('/seguridad/backups/eliminar/<path:nombre>')
+def backup_manual_eliminar(nombre):
+ if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):return redirect('/')
+ if '/' not in nombre and '\\' not in nombre:
+  f=os.path.join(DATA_DIR,'backups','manual',nombre)
+  try:os.remove(f);audit('ELIMINAR_BACKUP_MANUAL',nombre);flash('Backup eliminado.')
+  except OSError:flash('No se pudo eliminar el backup.')
+ return redirect('/seguridad/backups')
+
+ROUTE_MODULE.update({'backups_manuales':'CONFIG_SANATORIO','backup_manual_descargar':'CONFIG_SANATORIO','backup_manual_eliminar':'CONFIG_SANATORIO'})
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
