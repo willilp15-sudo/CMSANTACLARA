@@ -1025,24 +1025,84 @@ def facturar_admision(aid):
  base10_pyg,iva10_pyg=desglosar_iva_incluido(total10_pyg,10);base5_pyg,iva5_pyg=desglosar_iva_incluido(total5_pyg,5)
  subtotal_pyg=base10_pyg+base5_pyg+exento_pyg;iva_pyg=iva10_pyg+iva5_pyg;totg=total10_pyg+total5_pyg+exento_pyg
  subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];num=request.form['numero'];cur=c.execute('insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,ter,num,mon,tc,subtotal,iva,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));fid=cur.lastrowid;c.execute('update cargos_paciente set facturado=1 where admision_id=? and facturado=0',(aid,));c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,ter,num,mon,tc,(base10_pyg+base5_pyg)/tc,iva,exento_pyg/tc,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));vid=c.execute('select last_insert_rowid()').fetchone()[0];c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(vid,ter,mon,tc,total,total,totg));asiento(c,fecha,'Factura sanatorial '+num,'FACTURA_SANATORIO',fid,mon,tc,[('1.1.02',totg,0,total,'Paciente/Seguro'),('4.1.02',0,subtotal_pyg,subtotal,'Servicios sanatoriales'),('2.1.02',0,iva_pyg,iva,'IVA débito')]);c.commit();audit('FACTURA_SANATORIO',str(fid));return redirect(f'/cuenta-paciente/{aid}')
-@app.post('/alta/<int:aid>')
+# ===== V13.9.66: liquidación de cobertura por seguro ítem por ítem =====
+def init_v13966_cobertura_seguro():
+ c=db()
+ c.executescript("""
+ CREATE TABLE IF NOT EXISTS seguro_coberturas(
+   id INTEGER PRIMARY KEY, admision_id INTEGER NOT NULL, cargo_id INTEGER NOT NULL UNIQUE,
+   total_pyg REAL NOT NULL DEFAULT 0, cubierto_seguro_pyg REAL NOT NULL DEFAULT 0,
+   diferencia_paciente_pyg REAL NOT NULL DEFAULT 0, categoria TEXT, iva_pct REAL DEFAULT 10,
+   venta_paciente_id INTEGER, seguro_pendiente_id INTEGER, creado_por TEXT, creado_en TEXT
+ );
+ """)
+ c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
+ c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.66-cobertura-seguro',?)",(now(),))
+ c.commit();c.close()
+init_v13966_cobertura_seguro()
+
+@app.route('/alta/<int:aid>',methods=['GET','POST'])
 def alta(aid):
- c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
+ c=db();a=c.execute('''select a.*,p.nombre paciente,p.tercero_id paciente_tercero,
+ sg.nombre aseguradora,sg.tercero_id seguro_tercero from admisiones a
+ join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?''',(aid,)).fetchone()
  if not a:
   c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
  asegurado=bool(a['aseguradora_id']) and a['tipo'] in ('URGENCIA','INTERNACION','QUIROFANO')
- nuevo_estado='PENDIENTE_FACTURACION' if asegurado else 'ALTA'
- c.execute("update admisiones set estado=?,fecha_cierre=?,cerrado_por=? where id=?",(nuevo_estado,now(),session.get('user'),aid))
- if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
- if asegurado:
-  # Genera los pendientes únicamente al cerrar la cuenta; no crea venta, factura, CxC ni asiento todavía.
-  for r in c.execute('select cp.*,a.aseguradora_id,a.paciente_id from cargos_paciente cp join admisiones a on a.id=cp.admision_id where cp.admision_id=? and cp.facturado=0',(aid,)).fetchall():
-   cat,iva=clasificar_cargo_seguro(c,r)
-   c.execute("insert or ignore into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado) values(?,?,?,?,?,?,?,?,?,'PENDIENTE')",(r['fecha'],r['aseguradora_id'],r['paciente_id'],'CARGO',r['id'],cat,r['descripcion'],r['total_pyg'],iva))
- c.commit();c.close()
- audit('CIERRE_CUENTA_SEGURO' if asegurado else 'ALTA',str(aid))
- flash('Cuenta cerrada. Quedó pendiente de facturación al seguro.' if asegurado else 'Alta registrada correctamente.')
- return redirect('/admisiones')
+ if request.method=='GET':
+  if not asegurado:
+   c.close();flash('Esta admisión no corresponde a una cuenta de seguro.');return redirect(f'/cuenta-paciente/{aid}')
+  if a['estado']!='ABIERTA':
+   c.close();flash('La cuenta ya fue cerrada o procesada.');return redirect(f'/cuenta-paciente/{aid}')
+  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
+  puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and factura_electronica=1 order by predeterminado desc,establecimiento,punto_expedicion").fetchall()
+  c.close();return render_template('insurance_coverage_close.html',a=a,items=items,puntos=puntos)
+ if a['estado']!='ABIERTA':
+  c.close();flash('La cuenta ya fue cerrada o procesada.');return redirect(f'/cuenta-paciente/{aid}')
+ if not asegurado:
+  c.execute("update admisiones set estado='ALTA',fecha_cierre=?,cerrado_por=? where id=?",(now(),session.get('user'),aid))
+  if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
+  c.commit();c.close();audit('ALTA',str(aid));flash('Alta registrada correctamente.');return redirect('/admisiones')
+ try:
+  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
+  if not items:raise ValueError('No hay cargos pendientes para liquidar.')
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();liquid=[];total_seg=0.0;total_pac=0.0
+  for r in items:
+   total=float(r['total_pyg'] or 0);raw=(request.form.get(f'cubierto_{r["id"]}') or '0').strip().replace('.','').replace(',','.')
+   cub=float(raw or 0)
+   if cub < -0.0001 or cub-total > 0.01:raise ValueError(f'Cobertura inválida para {r["descripcion"]}: debe estar entre 0 y {total:,.0f} Gs.')
+   cub=max(0.0,min(total,cub));dif=round(total-cub,2);cat,iva=clasificar_cargo_seguro(c,r);liquid.append((r,cub,dif,cat,iva));total_seg+=cub;total_pac+=dif
+  vid_pac=None;fid_pac=None;numero_pac=None
+  if total_pac>0.005:
+   numero_pac,punto=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'))
+   tot10=sum(dif for r,cub,dif,cat,iva in liquid if iva==10);tot5=sum(dif for r,cub,dif,cat,iva in liquid if iva==5);exento=sum(dif for r,cub,dif,cat,iva in liquid if iva==0)
+   b10,i10=desglosar_iva_incluido(tot10,10);b5,i5=desglosar_iva_incluido(tot5,5);subtotal=b10+b5+exento;iva=i10+i5
+   v=c.execute('''insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta)
+    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,a['paciente_tercero'],numero_pac,'PYG',1,b10+b5,iva,exento,total_pac,total_pac,b10,i10,b5,i5,exento,'CREDITO'));vid_pac=v.lastrowid
+   c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto['id'],punto['establecimiento'],punto['punto_expedicion'],vid_pac))
+   for r,cub,dif,cat,ivap in liquid:
+    if dif<=0.005:continue
+    base,_iv=desglosar_iva_incluido(dif,ivap) if ivap else (dif,0)
+    c.execute('''insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)''',(vid_pac,None,1,dif,base,dif,0,ivap,(r['descripcion'] or 'Ítem')+' - diferencia no cubierta por seguro'))
+   fid_pac=c.execute('''insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,aid,a['paciente_tercero'],numero_pac,'PYG',1,subtotal,iva,total_pac,total_pac,b10,i10,b5,i5,exento)).lastrowid
+   c.execute("insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,'PENDIENTE')",(vid_pac,a['paciente_tercero'],'PYG',1,total_pac,total_pac,total_pac))
+   asiento(c,fecha,'Diferencia no cubierta por seguro '+numero_pac,'FACTURA_SANATORIO',fid_pac,'PYG',1,[('1.1.02',total_pac,0,total_pac,'Cuenta a cobrar paciente'),('4.1.02',0,subtotal,subtotal,'Prestaciones no cubiertas'),('2.1.02',0,iva,iva,'IVA débito')]);_generar_cdc_test_venta(c,vid_pac,fecha,numero_pac)
+  for r,cub,dif,cat,ivap in liquid:
+   spid=None
+   if cub>0.005:
+    c.execute("insert or ignore into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado) values(?,?,?,?,?,?,?,?,?,'PENDIENTE')",(r['fecha'],a['aseguradora_id'],a['paciente_id'],'CARGO',r['id'],cat,r['descripcion'],cub,ivap))
+    sp=c.execute("select id from seguro_pendientes where origen_tipo='CARGO' and origen_id=?",(r['id'],)).fetchone();spid=sp['id'] if sp else None
+   c.execute('''insert or replace into seguro_coberturas(admision_id,cargo_id,total_pyg,cubierto_seguro_pyg,diferencia_paciente_pyg,categoria,iva_pct,venta_paciente_id,seguro_pendiente_id,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?)''',(aid,r['id'],r['total_pyg'],cub,dif,cat,ivap,vid_pac,spid,session.get('user'),now()))
+   c.execute('update cargos_paciente set facturado=1 where id=?',(r['id'],))
+  c.execute("update admisiones set estado='PENDIENTE_FACTURACION',fecha_cierre=?,cerrado_por=? where id=?",(now(),session.get('user'),aid))
+  if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
+  c.commit();c.close();audit('CIERRE_CUENTA_SEGURO_COBERTURA',f'{aid}: seguro={total_seg:.0f}; paciente={total_pac:.0f}; venta_paciente={vid_pac or 0}')
+  msg=f'Cuenta cerrada. Seguro: Gs. {total_seg:,.0f}. Diferencia paciente: Gs. {total_pac:,.0f}.'
+  if numero_pac:msg+=f' Factura del paciente: {numero_pac}.'
+  flash(msg);return redirect('/admisiones')
+ except Exception as e:
+  c.rollback();c.close();flash('No se pudo cerrar/liquidar la cuenta: '+str(e));return redirect(f'/alta/{aid}')
+
 @app.route('/enfermeria',methods=['GET','POST'])
 def hospital_enfermeria():
  c=db()
@@ -4445,36 +4505,87 @@ _IMP_ALIASES={
  'saldo':'saldo','saldo_pendiente':'saldo','saldo_actual':'saldo','saldo_documento':'saldo','pendiente':'saldo','importe_pendiente':'saldo','monto_pendiente':'saldo'
 }
 
+def _imp_decode_text(data):
+    """Intenta decodificar exportaciones de sistemas antiguos, aun si usan .xls como extensión."""
+    for enc in ('utf-8-sig','utf-16','utf-16-le','utf-16-be','cp1252','latin1'):
+        try:
+            txt=data.decode(enc)
+            printable=sum(ch.isprintable() or ch in '\r\n\t' for ch in txt[:5000])
+            if txt and printable/max(1,len(txt[:5000]))>.80:return txt
+        except Exception: pass
+    return None
+
+def _imp_html_rows(txt):
+    from html.parser import HTMLParser
+    class P(HTMLParser):
+        def __init__(self):super().__init__();self.rows=[];self.row=None;self.cell=None
+        def handle_starttag(self,tag,attrs):
+            tag=tag.lower()
+            if tag=='tr':self.row=[]
+            elif tag in ('td','th') and self.row is not None:self.cell=[]
+        def handle_data(self,data):
+            if self.cell is not None:self.cell.append(data)
+        def handle_endtag(self,tag):
+            tag=tag.lower()
+            if tag in ('td','th') and self.cell is not None:
+                self.row.append(''.join(self.cell).strip());self.cell=None
+            elif tag=='tr' and self.row is not None:
+                if any(_imp_norm(x) for x in self.row):self.rows.append(self.row)
+                self.row=None
+    x=P();x.feed(txt);return x.rows
+
+def _imp_xml_rows(data):
+    import xml.etree.ElementTree as ET
+    root=ET.fromstring(data)
+    rows=[]
+    for row in root.iter():
+        if row.tag.split('}')[-1].lower()!='row':continue
+        vals=[]
+        for cell in list(row):
+            if cell.tag.split('}')[-1].lower()!='cell':continue
+            texts=[]
+            for e in cell.iter():
+                if e.text:texts.append(e.text)
+            vals.append(''.join(texts).strip())
+        if vals:rows.append(vals)
+    return rows
+
 def _imp_rows(file):
     name=(file.filename or '').lower();data=file.read();vals=[]
-    if name.endswith('.xlsx'):
-        from openpyxl import load_workbook
-        wb=load_workbook(io.BytesIO(data),data_only=True,read_only=True);ws=wb.active
-        vals=list(ws.iter_rows(values_only=True))
-    elif name.endswith('.xls'):
-        try:
+    sig=data[:16]
+    is_zip=data[:2]==b'PK'; is_ole=data[:8]==bytes.fromhex('D0CF11E0A1B11AE1')
+    text=_imp_decode_text(data)
+    stripped=(text or '').lstrip().lower()
+    try:
+        # Detecta el formato REAL por contenido, no solamente por extensión.
+        if is_zip or name.endswith(('.xlsx','.xlsm')):
+            from openpyxl import load_workbook
+            wb=load_workbook(io.BytesIO(data),data_only=True,read_only=True);ws=wb.active
+            vals=list(ws.iter_rows(values_only=True))
+        elif is_ole:
             import xlrd
-        except ImportError:
-            raise ValueError('El servidor no tiene habilitado XLS. Actualice requirements.txt con xlrd.')
-        try:
             book=xlrd.open_workbook(file_contents=data);sh=book.sheet_by_index(0)
             vals=[sh.row_values(i) for i in range(sh.nrows)]
-        except Exception as ex:
-            raise ValueError('No se pudo leer el archivo XLS: '+str(ex))
-    elif name.endswith('.csv') or name.endswith('.txt'):
-        import csv
-        # Gasparini puede exportar ANSI/Windows-1252 además de UTF-8.
-        try: raw=data.decode('utf-8-sig')
-        except UnicodeDecodeError: raw=data.decode('cp1252',errors='replace')
-        sample=raw[:8192]
-        try: delim=csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
-        except Exception: delim=';'
-        vals=list(csv.reader(io.StringIO(raw),delimiter=delim))
-    else: raise ValueError('Formato no admitido. Use XLS, XLSX, CSV o TXT.')
+        elif stripped.startswith('<?xml') or stripped.startswith('<workbook') or 'urn:schemas-microsoft-com:office:spreadsheet' in stripped[:4000]:
+            vals=_imp_xml_rows(data)
+        elif '<table' in stripped[:10000] or stripped.startswith('<html'):
+            vals=_imp_html_rows(text)
+        elif name.endswith(('.csv','.txt','.tsv','.xls')) and text is not None:
+            import csv
+            sample=text[:8192]
+            try: delim=csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
+            except Exception: delim='\t' if '\t' in sample else ';'
+            vals=list(csv.reader(io.StringIO(text),delimiter=delim))
+        else:
+            raise ValueError('El archivo no corresponde a un XLS/XLSX/CSV/TXT/XML/HTML reconocido. Puede ser un formato binario propietario de Gasparini.')
+    except ImportError as ex:
+        raise ValueError('Falta una librería para leer este formato: '+str(ex))
+    except ValueError: raise
+    except Exception as ex:
+        raise ValueError('No se pudo interpretar el archivo. Formato real no reconocido: '+str(ex))
     if not vals:return []
-    # Busca automáticamente la fila real de encabezados (muchos reportes Gasparini traen títulos previos).
     best_i=0;best_score=-1
-    for i,row in enumerate(vals[:25]):
+    for i,row in enumerate(vals[:40]):
         keys=[_IMP_ALIASES.get(_imp_key(x),_imp_key(x)) for x in row]
         score=sum(1 for k in keys if k in ('documento','ruc','tercero','fecha','importe','saldo','moneda','tipo_cambio'))
         if 'documento' in keys: score+=4
@@ -4483,16 +4594,14 @@ def _imp_rows(file):
     heads=[];seen={}
     for x in rawheads:
         k=_IMP_ALIASES.get(_imp_key(x),_imp_key(x)) or 'columna'
-        seen[k]=seen.get(k,0)+1
-        heads.append(k if seen[k]==1 else f'{k}_{seen[k]}')
+        seen[k]=seen.get(k,0)+1;heads.append(k if seen[k]==1 else f'{k}_{seen[k]}')
     if 'documento' not in heads:
         encontrados=', '.join(_imp_norm(x) for x in rawheads if _imp_norm(x))[:500]
         raise ValueError('No se identificó la columna Documento/Factura/Comprobante. Encabezados detectados: '+encontrados)
     out=[]
     for row in vals[best_i+1:]:
         if not any(_imp_norm(x) for x in row):continue
-        d=dict(zip(heads,list(row)+['']*max(0,len(heads)-len(row))))
-        out.append(d)
+        out.append(dict(zip(heads,list(row)+['']*max(0,len(heads)-len(row)))))
     return out
 
 def _tercero_import(c,ruc,nombre,tipo):
@@ -4556,6 +4665,45 @@ def importar_cuentas(tipo):
   except Exception as ex:flash('No se pudo importar: '+str(ex));return redirect(request.path)
  return render_template('import_accounts.html',tipo=tipo)
 
+def _cuentas_export_data(tipo):
+    c=db()
+    tab='cxc' if tipo=='CXC' else 'cxp'; base='ventas' if tipo=='CXC' else 'compras'; fk='venta_id' if tipo=='CXC' else 'compra_id'
+    rows=c.execute(f"select t.ruc,t.nombre,b.numero,b.fecha,x.moneda,x.tipo_cambio_origen,x.importe,x.saldo,x.estado from {tab} x left join terceros t on t.id=x.tercero_id left join {base} b on b.id=x.{fk} order by x.id").fetchall();c.close()
+    return ['RUC','Tercero','Documento','Fecha','Moneda','Tipo Cambio','Importe','Saldo','Estado'],[tuple(r) for r in rows]
+
+def _cuentas_pdf(tipo,headers,rows):
+    from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4,landscape
+    from reportlab.lib.styles import getSampleStyleSheet
+    b=io.BytesIO();doc=SimpleDocTemplate(b,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=25,bottomMargin=25);st=getSampleStyleSheet()
+    data=[headers]+[[str(v if v is not None else '') for v in r] for r in rows]
+    t=Table(data,repeatRows=1);t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP')]))
+    doc.build([Paragraph('CENTRO MÉDICO SANTA CLARA',st['Title']),Paragraph('Cuentas por Cobrar' if tipo=='CXC' else 'Cuentas por Pagar',st['Heading2']),Spacer(1,8),t]);b.seek(0)
+    return send_file(b,as_attachment=True,download_name=f'{tipo}_Santa_Clara.pdf',mimetype='application/pdf')
+
+@app.get('/finanzas/exportar/<tipo>/<formato>')
+def exportar_cuentas(tipo,formato):
+    tipo=tipo.upper();formato=formato.lower()
+    if tipo not in ('CXC','CXP'):return ('Tipo no válido',404)
+    h,r=_cuentas_export_data(tipo)
+    if formato in ('xlsx','excel'):return _tabular_xlsx(tipo,h,r,f'{tipo}_Santa_Clara.xlsx')
+    if formato=='csv':return _tabular_csv(h,r,f'{tipo}_Santa_Clara.csv',',')
+    if formato=='txt':return _tabular_csv(h,r,f'{tipo}_Santa_Clara.txt',';')
+    if formato=='tsv':return _tabular_csv(h,r,f'{tipo}_Santa_Clara.tsv','\t')
+    if formato=='json':
+        import json
+        raw=json.dumps([dict(zip(h,row)) for row in r],ensure_ascii=False,indent=2,default=str).encode('utf-8');b=io.BytesIO(raw);b.seek(0);return send_file(b,as_attachment=True,download_name=f'{tipo}_Santa_Clara.json',mimetype='application/json')
+    if formato=='xml':
+        import xml.etree.ElementTree as ET
+        root=ET.Element(tipo)
+        for row in r:
+            e=ET.SubElement(root,'registro')
+            for k,v in zip(h,row):ET.SubElement(e,_imp_key(k) or 'campo').text='' if v is None else str(v)
+        raw=ET.tostring(root,encoding='utf-8',xml_declaration=True);b=io.BytesIO(raw);return send_file(b,as_attachment=True,download_name=f'{tipo}_Santa_Clara.xml',mimetype='application/xml')
+    if formato=='pdf':return _cuentas_pdf(tipo,h,r)
+    return ('Formato no admitido',400)
+
 @app.route('/finanzas/plantilla/<tipo>.xlsx')
 def plantilla_cuentas(tipo):
  tipo=tipo.upper()
@@ -4566,3 +4714,167 @@ def plantilla_cuentas(tipo):
  ws.append(['80000000-0','Ejemplo '+('Cliente' if tipo=='CXC' else 'Proveedor'),'001-001-0000001',now()[:10],'PYG',1,1000000,1000000])
  bio=io.BytesIO();wb.save(bio);bio.seek(0)
  return send_file(bio,as_attachment=True,download_name=f'Plantilla_{tipo}_Santa_Clara.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+# ===== V13.9.67 - Importacion detallada de Compras y Ventas =====
+def init_v13967_importacion_detallada():
+ c=db();c.execute('''CREATE TABLE IF NOT EXISTS importacion_transacciones_log(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT,archivo TEXT,documento TEXT,tercero TEXT,accion TEXT,detalle TEXT,usuario TEXT)''');c.commit();c.close()
+init_v13967_importacion_detallada()
+
+# Alias adicionales para archivos Gasparini/Excel detallados.
+_IMP_ALIASES.update({
+ 'codigo':'producto_codigo','cod_producto':'producto_codigo','codigo_producto':'producto_codigo','cod_articulo':'producto_codigo','codigo_articulo':'producto_codigo','articulo_codigo':'producto_codigo',
+ 'producto':'producto_nombre','articulo':'producto_nombre','descripcion_producto':'producto_nombre','descripcion_articulo':'producto_nombre','item':'producto_nombre','descripcion':'producto_nombre',
+ 'cantidad':'cantidad','cant':'cantidad','qty':'cantidad','unidades':'cantidad',
+ 'precio':'precio_unitario','precio_unitario':'precio_unitario','precio_venta':'precio_unitario','valor_unitario':'precio_unitario',
+ 'costo':'costo_unitario','costo_unitario':'costo_unitario','precio_compra':'costo_unitario',
+ 'iva':'iva_pct','iva_pct':'iva_pct','tasa_iva':'iva_pct','porcentaje_iva':'iva_pct',
+ 'condicion':'condicion','condicion_pago':'condicion','condicion_venta':'condicion','tipo_venta':'condicion','tipo_compra':'condicion',
+ 'forma_pago':'forma_pago','forma_cobro':'forma_pago','medio_pago':'forma_pago','medio':'forma_pago',
+ 'referencia':'referencia','nro_operacion':'referencia','operacion':'referencia',
+ 'timbrado':'timbrado','nro_timbrado':'timbrado','numero_timbrado':'timbrado','vencimiento_timbrado':'timbrado_vencimiento',
+ 'codigo_barras':'codigo_barras','barcode':'codigo_barras','categoria':'categoria','clasificacion':'clasificacion'
+})
+
+def _imp_fecha(v):
+ if v is None or v=='': return datetime.date.today().isoformat()
+ if isinstance(v,(datetime.datetime,datetime.date)): return v.date().isoformat() if isinstance(v,datetime.datetime) else v.isoformat()
+ s=str(v).strip()
+ for f in ('%Y-%m-%d','%d/%m/%Y','%d-%m-%Y','%d.%m.%Y','%Y/%m/%d'):
+  try:return datetime.datetime.strptime(s[:10],f).date().isoformat()
+  except Exception:pass
+ return s[:10]
+
+def _imp_tercero_tx(c,r,tipo):
+ return _tercero_import(c,_imp_norm(r.get('ruc')),_imp_norm(r.get('tercero')),tipo)
+
+def _imp_producto_tx(c,r,tipo):
+ cod=_imp_norm(r.get('producto_codigo'));nom=_imp_norm(r.get('producto_nombre'));barra=_imp_norm(r.get('codigo_barras'))
+ if not cod and not nom: raise ValueError('Falta código o nombre del producto/servicio')
+ p=None
+ if cod:p=c.execute('select * from productos where lower(trim(codigo))=lower(trim(?)) limit 1',(cod,)).fetchone()
+ if not p and barra:p=c.execute("select * from productos where trim(coalesce(codigo_barras,''))=trim(?) limit 1",(barra,)).fetchone()
+ if not p and nom:p=c.execute('select * from productos where lower(trim(nombre))=lower(trim(?)) limit 1',(nom,)).fetchone()
+ iva=_imp_num(r.get('iva_pct'))
+ if iva not in (0,5,10):iva=10
+ if p:return p['id']
+ # Servicios importados se crean sin control de stock cuando la clasificación lo indica.
+ clas=(_imp_norm(r.get('clasificacion')) or _imp_norm(r.get('categoria'))).upper();es_serv='SERV' in clas
+ codigo=cod or ('IMP-'+str(c.execute('select coalesce(max(id),0)+1 from productos').fetchone()[0]))
+ cols=[x['name'] for x in c.execute('pragma table_info(productos)').fetchall()]
+ cur=c.execute('insert into productos(codigo,nombre,iva_pct,stock,costo_pyg,precio_pyg) values(?,?,?,?,?,?)',(codigo,nom or codigo,iva,0,_imp_num(r.get('costo_unitario')),_imp_num(r.get('precio_unitario'))))
+ pid=cur.lastrowid
+ if 'codigo_barras' in cols and barra:c.execute('update productos set codigo_barras=? where id=?',(barra,pid))
+ if es_serv:
+  if 'tipo_producto' in cols:c.execute("update productos set tipo_producto='SERVICIO' where id=?",(pid,))
+  if 'clasificacion' in cols:c.execute("update productos set clasificacion='SERVICIO' where id=?",(pid,))
+ return pid
+
+def _tx_rows(file):
+ rows=_imp_rows(file)
+ if not rows:return []
+ # En archivos sin detalle explícito, no inventar productos.
+ return rows
+
+def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
+ rows=_tx_rows(file);c=db();nuevos=actualizados=sin_cambios=errores=0;mensajes=[]
+ groups={}
+ for r in rows:
+  doc=_imp_norm(r.get('documento'));ruc=_imp_norm(r.get('ruc'));ter=_imp_norm(r.get('tercero'))
+  if not doc:
+   errores+=1;mensajes.append('Fila sin Documento/Factura');continue
+  groups.setdefault((doc,ruc or ter),[]).append(r)
+ try:
+  for (doc,_),grp in groups.items():
+   try:
+    r0=grp[0];terid=_imp_tercero_tx(c,r0,'PROVEEDOR' if tipo=='COMPRA' else 'CLIENTE');fecha=_imp_fecha(r0.get('fecha'));mon=(_imp_norm(r0.get('moneda')) or 'PYG').upper();tc=_imp_num(r0.get('tipo_cambio')) or 1
+    condicion=(_imp_norm(r0.get('condicion')) or ('CREDITO' if _imp_num(r0.get('saldo'))>0 else 'CONTADO')).upper();condicion='CREDITO' if 'CRED' in condicion else ('CUOTAS' if 'CUOTA' in condicion else 'CONTADO')
+    forma=_imp_norm(r0.get('forma_pago')) or None;ref=_imp_norm(r0.get('referencia')) or None
+    detalles=[];total=grav=iva=exento=g10=i10=g5=i5=0.0
+    for r in grp:
+     pid=_imp_producto_tx(c,r,tipo);p=c.execute('select * from productos where id=?',(pid,)).fetchone();qty=_imp_num(r.get('cantidad')) or 1
+     unit=_imp_num(r.get('costo_unitario' if tipo=='COMPRA' else 'precio_unitario'))
+     if unit<=0:
+      bruto_fila=_imp_num(r.get('importe'));unit=(bruto_fila/qty if bruto_fila and qty else 0)
+     if qty<=0 or unit<0:raise ValueError('Cantidad/precio inválido en '+doc)
+     pct=_imp_num(r.get('iva_pct'))
+     if pct not in (0,5,10):pct=float(p['iva_pct'] or 0)
+     bruto=qty*unit;base,iv=desglosar_iva_incluido(bruto,pct);total+=bruto;iva+=iv
+     if pct==10:g10+=base;i10+=iv;grav+=base
+     elif pct==5:g5+=base;i5+=iv;grav+=base
+     else:exento+=bruto
+     detalles.append((p,pid,qty,unit,base,pct,bruto))
+    if total<=0:raise ValueError('Total cero en '+doc)
+    tab='compras' if tipo=='COMPRA' else 'ventas';fk='proveedor_id' if tipo=='COMPRA' else 'cliente_id'
+    old=c.execute(f'select * from {tab} where numero=? and {fk}=? order by id limit 1',(doc,terid)).fetchone()
+    if old:
+     oid=old['id']
+     if tipo=='COMPRA' and _compra_tiene_pagos(c,oid):raise ValueError('No se actualizó '+doc+': posee pagos registrados')
+     if tipo=='VENTA':
+      cx=c.execute('select * from cxc where venta_id=?',(oid,)).fetchone()
+      if cx and float(cx['importe'] or 0)-float(cx['saldo'] or 0)>0.0001:raise ValueError('No se actualizó '+doc+': posee cobros registrados')
+     # Retirar efectos reconstruibles antes de actualizar.
+     if tipo=='COMPRA':_quitar_efectos_compra(c,oid,False)
+     else:
+      for it in c.execute('select * from venta_items where venta_id=?',(oid,)).fetchall():
+       p=c.execute('select * from productos where id=?',(it['producto_id'],)).fetchone()
+       if afectar_stock and p and _producto_controla_stock(p):c.execute('update productos set stock=stock+? where id=?',(float(it['cantidad'] or 0),it['producto_id']))
+      c.execute("delete from stock_mov where origen_tipo='VENTA' and origen_id=?",(oid,));c.execute('delete from venta_items where venta_id=?',(oid,));c.execute('delete from venta_cuotas where venta_id=?',(oid,));c.execute('delete from cxc where venta_id=?',(oid,))
+      aids=[x['id'] for x in c.execute("select id from asientos where origen_tipo='VENTA' and origen_id=?",(oid,)).fetchall()]
+      for aid in aids:c.execute('delete from asiento_det where asiento_id=?',(aid,))
+      c.execute("delete from asientos where origen_tipo='VENTA' and origen_id=?",(oid,))
+     xid=oid;actualizados+=1;accion='ACTUALIZADO'
+    else:
+     if tipo=='COMPRA':cur=c.execute('insert into compras(fecha,proveedor_id,numero,moneda,tipo_cambio,total,total_pyg,estado) values(?,?,?,?,?,?,?,?)',(fecha,terid,doc,mon,tc,total,total*tc,'CONFIRMADA'))
+     else:cur=c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,total,total_pyg,estado) values(?,?,?,?,?,?,?,?)',(fecha,terid,doc,mon,tc,total,total*tc,'CONFIRMADA'))
+     xid=cur.lastrowid;nuevos+=1;accion='NUEVO'
+    saldo_importado=_imp_num(r0.get('saldo')) if _imp_norm(r0.get('saldo'))!='' else (total if condicion!='CONTADO' else 0)
+    saldo=max(0,min(total,saldo_importado));entrega=max(0,total-saldo)
+    if tipo=='COMPRA':
+     c.execute('''update compras set fecha=?,proveedor_id=?,numero=?,moneda=?,tipo_cambio=?,gravado=?,iva=?,exento=?,total=?,total_pyg=?,gravado_10=?,iva_10=?,gravado_5=?,iva_5=?,exento_iva=?,condicion_pago=?,fecha_vencimiento=?,entrega_inicial=?,medio_pago_inicial=?,referencia_pago=?,timbrado=?,timbrado_vencimiento=?,estado='CONFIRMADA' where id=?''',(fecha,terid,doc,mon,tc,grav,iva,exento,total,total*tc,g10,i10,g5,i5,exento,condicion,_imp_fecha(r0.get('fecha_vencimiento')) if _imp_norm(r0.get('fecha_vencimiento')) else None,entrega,forma,ref,_imp_norm(r0.get('timbrado')),_imp_norm(r0.get('timbrado_vencimiento')),xid))
+     for p,pid,q,u,base,pct,bruto in detalles:
+      c.execute('insert into compra_items(compra_id,producto_id,cantidad,costo,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?)',(xid,pid,q,u,base,base*tc,pct))
+      if afectar_stock and _producto_controla_stock(p):c.execute('update productos set stock=stock+? where id=?',(q,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',q,(base/q*tc if q else 0),'COMPRA',xid))
+     if saldo>0:c.execute('insert into cxp(compra_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(xid,terid,mon,tc,total,saldo,total*tc))
+     asiento(c,fecha,'Compra importada '+doc,'COMPRA',xid,mon,tc,[('1.1.03',grav*tc+exento*tc,0,grav+exento,'Compra importada'),('1.1.04',iva*tc,0,iva,'IVA crédito'),('2.1.01',0,saldo*tc,saldo,'Proveedor'),('1.1.01',0,entrega*tc,entrega,'Pagado')])
+    else:
+     c.execute('''update ventas set fecha=?,cliente_id=?,numero=?,moneda=?,tipo_cambio=?,gravado=?,iva=?,exento=?,total=?,total_pyg=?,gravado_10=?,iva_10=?,gravado_5=?,iva_5=?,exento_iva=?,condicion_venta=?,forma_cobro=?,referencia_cobro=?,entrega_inicial=?,fecha_vencimiento=?,estado='CONFIRMADA' where id=?''',(fecha,terid,doc,mon,tc,grav,iva,exento,total,total*tc,g10,i10,g5,i5,exento,condicion,forma,ref,entrega,_imp_fecha(r0.get('fecha_vencimiento')) if _imp_norm(r0.get('fecha_vencimiento')) else None,xid))
+     costg=0
+     for p,pid,q,u,base,pct,bruto in detalles:
+      cost=(q*float(p['costo_pyg'] or 0)) if _producto_controla_stock(p) else 0;costg+=cost;c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(xid,pid,q,u,bruto,bruto*tc,cost,pct))
+      if afectar_stock and _producto_controla_stock(p):c.execute('update productos set stock=stock-? where id=?',(q,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'SALIDA',-q,p['costo_pyg'],'VENTA',xid))
+     c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(xid,terid,mon,tc,total,saldo,total*tc,'PAGADO' if saldo<=.0001 else 'PENDIENTE'))
+     asiento(c,fecha,'Venta importada '+doc,'VENTA',xid,mon,tc,[('1.1.02',saldo*tc,0,saldo,'Cliente'),('1.1.01',entrega*tc,0,entrega,'Cobrado'),('4.1.01',0,(grav+exento)*tc,grav+exento,'Venta importada'),('2.1.02',0,iva*tc,iva,'IVA débito')])
+    c.execute('insert into importacion_transacciones_log(fecha,tipo,archivo,documento,tercero,accion,detalle,usuario) values(?,?,?,?,?,?,?,?)',(now(),tipo,file.filename,doc,_imp_norm(r0.get('tercero')),accion,f'{len(detalles)} ítems; total {total}',session.get('user')))
+   except Exception as ex:
+    errores+=1;mensajes.append(str(ex))
+  c.commit();audit('IMPORTACION_'+tipo,f'{file.filename}: nuevos={nuevos}, actualizados={actualizados}, errores={errores}')
+ except Exception:
+  c.rollback();raise
+ finally:c.close()
+ return nuevos,actualizados,sin_cambios,errores,mensajes
+
+@app.route('/intercambio/transacciones/<tipo>',methods=['GET','POST'])
+def intercambio_transacciones(tipo):
+ tipo=tipo.upper()
+ if tipo not in ('COMPRA','VENTA'):return ('Tipo inválido',400)
+ if request.method=='POST':
+  f=request.files.get('archivo')
+  if not f or not f.filename:flash('Seleccione un archivo.');return redirect(request.path)
+  try:
+   n,a,s,e,msg=_importar_transacciones_detalladas(tipo,f,request.form.get('afectar_stock')=='1');flash(f'Importación terminada: {n} nuevos, {a} actualizados, {e} con error.')
+   for m in msg[:12]:flash(m)
+  except Exception as ex:flash('No se pudo importar: '+str(ex))
+  return redirect(request.path)
+ return render_template('transaction_exchange.html',tipo=tipo)
+
+@app.get('/intercambio/transacciones/<tipo>/plantilla.xlsx')
+def intercambio_transacciones_plantilla(tipo):
+ tipo=tipo.upper()
+ if tipo not in ('COMPRA','VENTA'):return ('Tipo inválido',400)
+ from openpyxl import Workbook
+ wb=Workbook();ws=wb.active;ws.title='Detalle'
+ headers=['Documento','Fecha','RUC','Tercero','Moneda','Tipo Cambio','Condicion','Forma Pago','Referencia','Saldo','Producto Codigo','Producto Nombre','Clasificacion','Cantidad',('Costo Unitario' if tipo=='COMPRA' else 'Precio Unitario'),'IVA %','Timbrado','Vencimiento Timbrado','Fecha Vencimiento']
+ ws.append(headers);ws.append(['001-001-0000001',datetime.date.today().isoformat(),'80000000-0','EJEMPLO','PYG',1,'CREDITO','Transferencia','',100000,'COD001','Producto o servicio','SERVICIO' if tipo=='VENTA' else 'PRODUCTO',1,100000,10,'','',''])
+ bio=io.BytesIO();wb.save(bio);bio.seek(0);return send_file(bio,as_attachment=True,download_name=f'plantilla_{tipo.lower()}_detallada.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+ROUTE_MODULE.update({'intercambio_transacciones':'COMPRAS','intercambio_transacciones_plantilla':'COMPRAS'})

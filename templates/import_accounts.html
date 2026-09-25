@@ -1,6 +1,6 @@
 {% extends 'base.html' %}{% block title %}Importar {{'Cuentas por Cobrar' if tipo=='CXC' else 'Cuentas por Pagar'}}{% endblock %}{% block content %}
 <div class="card" style="max-width:900px;margin:20px auto"><h2>Importar / actualizar {{'Cuentas por Cobrar' if tipo=='CXC' else 'Cuentas por Pagar'}}</h2>
-<p>Puede cargar XLS, XLSX, CSV o TXT exportado desde Gasparini. El sistema detecta automáticamente encabezados habituales de Gasparini y busca la cuenta por <b>RUC + número de documento</b>. Si ya existe, actualiza importe, saldo, moneda y tipo de cambio; si no existe, la incorpora.</p>
+<p>Puede cargar XLS, XLSX, XLSM, CSV, TXT, TSV, XML o exportaciones HTML/Excel de Gasparini. El sistema detecta el formato real del archivo aunque la extensión sea .XLS. El sistema detecta automáticamente encabezados habituales de Gasparini y busca la cuenta por <b>RUC + número de documento</b>. Si ya existe, actualiza importe, saldo, moneda y tipo de cambio; si no existe, la incorpora.</p>
 <p><b>No duplica</b> una cuenta que coincida por RUC y documento. Cada cambio queda registrado en auditoría de importación.</p>
 <a class="btn" href="/finanzas/plantilla/{{tipo}}.xlsx">⬇ Descargar plantilla Excel</a>
 <form method="post" enctype="multipart/form-data" style="margin-top:20px"><label>Archivo</label><input type="file" name="archivo" accept=".xls,.xlsx,.csv,.txt" required><button class="btn" type="submit">Importar y actualizar</button> <a class="btn" href="/finanzas">Cancelar</a></form>

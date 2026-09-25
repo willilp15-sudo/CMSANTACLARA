@@ -1,0 +1,11 @@
+{% extends 'base.html' %}{% block title %}Importar {{tipo}}S detalladas{% endblock %}{% block content %}
+<div class="card" style="max-width:1100px;margin:auto"><h2>⬆ Importar / actualizar {{'Compras' if tipo=='COMPRA' else 'Ventas'}} detalladas</h2>
+<p>Importa cabecera + productos/servicios + cliente/proveedor + condición + forma de pago + saldo. Varias filas con el mismo Documento y tercero se agrupan como una sola factura con varios ítems.</p>
+<div class="toolbar"><a class="btn" href="/intercambio/transacciones/{{tipo}}/plantilla.xlsx">⬇ Plantilla Excel detallada</a><a class="btn" href="{{'/compras' if tipo=='COMPRA' else '/ventas/carga'}}">← Volver</a></div>
+<form method="post" enctype="multipart/form-data"><label>Archivo<input type="file" name="archivo" accept=".xls,.xlsx,.xlsm,.csv,.txt,.tsv,.xml,.html,.htm" required></label>
+<label style="display:flex;gap:8px;align-items:center;margin:15px 0"><input type="checkbox" name="afectar_stock" value="1" style="width:auto"> Afectar stock con los movimientos importados</label>
+<p class="muted"><b>Importante:</b> deje desmarcado “Afectar stock” cuando importe históricos y su inventario actual ya esté cargado. Los servicios no controlan stock. Si un documento existente tiene cobros/pagos aplicados, el sistema lo protege y no reemplaza su detalle automáticamente.</p>
+<button type="submit">⬆ Importar y actualizar</button></form>
+<h3>Columnas reconocidas</h3><p>Documento/Factura, Fecha, RUC, Cliente/Proveedor, Moneda, Tipo Cambio, Condición, Forma Pago, Referencia, Saldo, Código Producto, Producto/Descripción, Clasificación, Cantidad, Precio/Costo Unitario, IVA, Timbrado y vencimientos.</p>
+<p>Formatos admitidos: XLS, XLSX, XLSM, CSV, TXT, TSV, XML y Excel/HTML. El sistema intenta detectar el formato real aunque la extensión sea .xls.</p></div>
+{% endblock %}

@@ -442,3 +442,34 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - El importador CxC/CxP reconoce `N° Factura` / `Nº Factura` de Gasparini (normalizado como `n_factura`), además de Fecha Cr y Fecha Venc.
 - Si el archivo de cuentas pendientes no trae columna Saldo, usa Importe como saldo pendiente en vez de marcar la cuenta como pagada.
 - Mantiene compatibilidad XLS, XLSX, CSV y TXT.
+
+## V13.9.65 — Motor de intercambio CxC/CxP y detección real de XLS
+- CxC y CxP: importación/actualización y exportación XLSX, CSV, TXT, TSV, JSON, XML y PDF.
+- El lector ya no confía solo en la extensión `.xls`: detecta XLS binario/OLE, XLSX/ZIP, SpreadsheetML/XML, HTML tabular y texto delimitado.
+- Mantiene actualización por tercero + documento y auditoría existente.
+
+## V13.9.66 — Liquidación de cobertura de seguros
+- Cierre de cuentas aseguradas ítem por ítem.
+- Permite indicar monto cubierto por seguro para medicamentos, descartables y servicios.
+- Calcula automáticamente la diferencia a cargo del paciente.
+- La parte cubierta pasa a Pendientes de Facturación del Seguro conservando categoría e IVA.
+- La diferencia genera factura/CxC del paciente con detalle “diferencia no cubierta por seguro”.
+- Evita que el monto cubierto supere el total del ítem y conserva auditoría de la liquidación.
+
+## V13.9.66 — Liquidación de cobertura de seguros
+- Cierre de cuentas aseguradas ítem por ítem.
+- Permite indicar monto cubierto por seguro para medicamentos, descartables y servicios.
+- Calcula automáticamente la diferencia a cargo del paciente.
+- La parte cubierta pasa a Pendientes de Facturación del Seguro conservando categoría e IVA.
+- La diferencia genera factura/CxC del paciente con detalle “diferencia no cubierta por seguro”.
+- Evita que el monto cubierto supere el total del ítem y conserva auditoría de la liquidación.
+
+## V13.9.67 — Importación detallada de Compras y Ventas
+- Botón Importar / Actualizar detallado dentro de Compras y Ventas.
+- Importa cabecera y múltiples ítems por factura, clientes/proveedores, productos/servicios, condición, forma de pago, referencia, saldo, moneda, IVA y timbrado.
+- Crea clientes/proveedores y productos faltantes cuando puede identificarlos.
+- Agrupa múltiples filas del mismo documento como una factura con detalle.
+- Actualiza documentos existentes sin duplicarlos; protege documentos que ya tienen cobros/pagos aplicados.
+- Opción explícita para afectar o no stock durante migraciones históricas.
+- Plantillas XLSX detalladas para Compras y Ventas.
+- Compatible con XLS/XLSX/XLSM/CSV/TXT/TSV/XML/HTML mediante el lector multiformato existente.
