@@ -450,8 +450,8 @@ def _aplicar_compra_desde_form(c, compra_id, form):
 def compra_ver(compra_id):
     c=db();comp=c.execute('select co.*,t.nombre tercero,t.ruc from compras co left join terceros t on t.id=co.proveedor_id where co.id=?',(compra_id,)).fetchone()
     if not comp:c.close();flash('Compra no encontrada.');return redirect('/compras')
-    items=c.execute('select ci.*,p.codigo,p.nombre from compra_items ci left join productos p on p.id=ci.producto_id where ci.compra_id=? order by ci.id',(compra_id,)).fetchall();cuotas=c.execute('select * from compra_cuotas where compra_id=? order by numero,id',(compra_id,)).fetchall();c.close()
-    return render_template('purchase_detail.html',comp=comp,items=items,cuotas=cuotas)
+    items=c.execute('select ci.*,p.codigo,p.nombre from compra_items ci left join productos p on p.id=ci.producto_id where ci.compra_id=? order by ci.id',(compra_id,)).fetchall();cuotas=c.execute('select * from compra_cuotas where compra_id=? order by numero,id',(compra_id,)).fetchall();ncs=c.execute('select * from notas_credito_compras where compra_id=? order by id desc',(compra_id,)).fetchall();cxp=c.execute("select * from cxp where compra_id=? and coalesce(estado,'') not in ('ANULADA','ANULADO') order by id limit 1",(compra_id,)).fetchone();c.close()
+    return render_template('purchase_detail.html',comp=comp,items=items,cuotas=cuotas,ncs=ncs,cxp=cxp)
 
 @app.route('/compras/<int:compra_id>/editar',methods=['GET','POST'])
 def compra_editar(compra_id):
@@ -711,7 +711,8 @@ def cobrar_venta_credito(cxc_id):
     fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro factura '+r['factura'],pyg,'COBRO',cxc_id,session.get('user')))
    n='REC-'+datetime.datetime.now().strftime('%Y%m%d')+'-'+str(c.execute('select coalesce(max(id),0)+1 from recibos_pago').fetchone()[0]).zfill(6);cur=c.execute('insert into recibos_pago(numero,fecha,cxc_id,venta_id,tercero_id,moneda,tipo_cambio,importe,importe_pyg,saldo_anterior,saldo_restante,medio,referencia,usuario) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(n,now(),cxc_id,r['venta_id'],r['tercero_id'],r['moneda'],tc,imp,pyg,anterior,restante,medio,ref,session.get('user')))
    c.execute('update recibos_pago set cuenta_bancaria_id=?,terminal_pos_id=? where id=?',(cuenta_id,pos_id,cur.lastrowid))
-   asiento(c,fecha,'Cobro '+n,'COBRO_VENTA',cur.lastrowid,r['moneda'],tc,[('1.1.01',pyg,0,imp,'Cobro'),('1.1.02',0,imp*r['tipo_cambio_origen'],imp,'Cancela cliente')]);c.commit();audit('RECIBO_PAGO',n);rid=cur.lastrowid;c.close();return redirect('/recibos/'+str(rid))
+   cta_fin,_=_cuenta_financiera(c,medio,cuenta_id)
+   asiento(c,fecha,'Cobro '+n,'COBRO_VENTA',cur.lastrowid,r['moneda'],tc,[(cta_fin,pyg,0,imp,'Cobro'),('1.1.02',0,imp*r['tipo_cambio_origen'],imp,'Cancela cliente')]);c.commit();audit('RECIBO_PAGO',n);rid=cur.lastrowid;c.close();return redirect('/recibos/'+str(rid))
   except Exception as e:c.rollback();flash(str(e))
  formas=['Efectivo','Banco','Transferencia','POS'];cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();c.close();return render_template('credit_payment.html',r=r,formas=formas,cuentas=cuentas,poses=poses)
 
@@ -783,7 +784,9 @@ def pagos_proveedores():
    if imp<=0 or imp>float(r['saldo'])+0.0001:raise ValueError('El importe debe ser mayor a cero y no superar el saldo pendiente.')
    fecha=request.form['fecha'];mon=r['moneda'] or 'PYG';lado=request.form.get('lado_cotizacion','VENTA')
    tc=1.0 if mon=='PYG' else tc_dnit(c,fecha,mon,lado);pyg=round(imp*tc,2);orig=round(imp*float(r['tipo_cambio_origen'] or 1),2)
-   debe=request.form['cuenta_debe'];haber=request.form['cuenta_haber']
+   debe=request.form['cuenta_debe'];medio=request.form['medio'];cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None
+   if medio!='EFECTIVO' and not cuenta_id:raise ValueError('Seleccione la cuenta bancaria de donde sale el dinero.')
+   haber,_=_cuenta_financiera(c,medio,cuenta_id)
    if debe==haber:raise ValueError('Cuenta Debe y Cuenta Haber deben ser diferentes.')
    for cuenta in (debe,haber):
     if not c.execute('select 1 from plan_cuentas where codigo=? and imputable=1',(cuenta,)).fetchone():raise ValueError('Cuenta contable inválida: '+cuenta)
@@ -798,8 +801,9 @@ def pagos_proveedores():
     values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(fecha,cxpid,r['tercero_id'],r['compra_id'],request.form.get('documento'),request.form['medio'],mon,imp,tc,pyg,debe,haber,aid,session.get('user'),now()))
    pid=cur.lastrowid;c.execute('update asientos set origen_id=? where id=?',(pid,aid))
    c.execute("update cxp set saldo=saldo-?,estado=case when saldo-?<=0.0001 then 'PAGADO' else 'PENDIENTE' end where id=?",(imp,imp,cxpid))
-   c.execute("""insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id)
-    values(?,'EGRESO',?,?,?,?,?,'Pago a proveedor','PAGO_PROVEEDOR',?)""",(fecha,request.form['medio'],mon,tc,imp,pyg,pid))
+   c.execute("""insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id)
+    values(?,'EGRESO',?,?,?,?,?,'Pago a proveedor','PAGO_PROVEEDOR',?,?)""",(fecha,request.form['medio'],mon,tc,imp,pyg,pid,cuenta_id))
+   c.execute('update pagos_proveedores set cuenta_bancaria_id=? where id=?',(cuenta_id,pid))
    c.commit();audit('PAGO_PROVEEDOR',f'Pago {pid} / CxP {cxpid} / {imp} {mon}');flash('Pago a proveedor registrado y contabilizado.')
   except Exception as ex:c.rollback();flash(str(ex))
   c.close();return redirect('/compras/pagos-proveedores')
@@ -810,8 +814,8 @@ def pagos_proveedores():
   like='%'+q+'%';sql+=" and (t.nombre like ? collate nocase or t.ruc like ? or c.numero like ?)";par=[like,like,like]
  sql+=" order by t.nombre,c.fecha,x.id"
  pendientes=c.execute(sql,par).fetchall();cuentas=c.execute('select * from plan_cuentas where imputable=1 order by codigo').fetchall()
- pagos=c.execute("""select p.*,t.nombre proveedor,c.numero factura from pagos_proveedores p join terceros t on t.id=p.proveedor_id left join compras c on c.id=p.compra_id order by p.id desc limit 200""").fetchall()
- c.close();return render_template('supplier_payments.html',pendientes=pendientes,cuentas=cuentas,pagos=pagos,q=q)
+ pagos=c.execute("""select p.*,t.nombre proveedor,c.numero factura from pagos_proveedores p join terceros t on t.id=p.proveedor_id left join compras c on c.id=p.compra_id order by p.id desc limit 200""").fetchall();bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall()
+ c.close();return render_template('supplier_payments.html',pendientes=pendientes,cuentas=cuentas,pagos=pagos,bancos=bancos,q=q)
 
 @app.route('/finanzas')
 def finanzas():
@@ -2087,10 +2091,10 @@ def cuentas_bancarias():
  if request.method=='POST':
   op=request.form.get('op','nuevo')
   if op=='nuevo':
-   c.execute('insert into cuentas_bancarias(banco,numero_cuenta,tipo_cuenta,moneda,titular,alias,acepta_transferencia,acepta_pos,activo) values(?,?,?,?,?,?,?,?,1)',(request.form['banco'],request.form.get('numero_cuenta'),request.form.get('tipo_cuenta'),request.form.get('moneda','PYG'),request.form.get('titular'),request.form.get('alias'),1 if request.form.get('acepta_transferencia') else 0,1 if request.form.get('acepta_pos') else 0))
+   c.execute('insert into cuentas_bancarias(banco,numero_cuenta,tipo_cuenta,moneda,titular,alias,acepta_transferencia,acepta_pos,activo,cuenta_contable) values(?,?,?,?,?,?,?,?,1,?)',(request.form['banco'],request.form.get('numero_cuenta'),request.form.get('tipo_cuenta'),request.form.get('moneda','PYG'),request.form.get('titular'),request.form.get('alias'),1 if request.form.get('acepta_transferencia') else 0,1 if request.form.get('acepta_pos') else 0,request.form.get('cuenta_contable')))
   elif op=='estado':c.execute('update cuentas_bancarias set activo=case when activo=1 then 0 else 1 end where id=?',(int(request.form['id']),))
   c.commit();c.close();audit('CUENTA_BANCARIA',op);return redirect('/bancos/cuentas')
- rows=c.execute('select * from cuentas_bancarias order by activo desc,banco,alias').fetchall();c.close();return render_template('bank_accounts.html',rows=rows)
+ rows=c.execute('select * from cuentas_bancarias order by activo desc,banco,alias').fetchall();pc=c.execute('select codigo,nombre from plan_cuentas where imputable=1 order by codigo').fetchall();c.close();return render_template('bank_accounts.html',rows=rows,pc=pc)
 
 @app.route('/bancos/pos',methods=['GET','POST'])
 def terminales_pos():
@@ -2296,7 +2300,8 @@ def contabilidad_informe(tipo):
   titulo,headers,_=_accounting_report(c,tipo,'0001-01-01','0001-01-01',cuenta or None); rows=[]
  cuentas=c.execute('select codigo,nombre from plan_cuentas order by codigo').fetchall();c.close()
  totales=_report_totals(headers,rows) if buscado else []
- return render_template('accounting_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,cuenta=cuenta,cuentas=cuentas,buscado=buscado,totales=totales,report_value=_report_value)
+ modo='rubricado' if request.args.get('modo')=='rubricado' else 'normal'
+ return render_template('accounting_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,cuenta=cuenta,cuentas=cuentas,buscado=buscado,totales=totales,report_value=_report_value,modo=modo)
 
 def _safe(v): return '' if v is None else str(v)
 
@@ -2317,13 +2322,38 @@ def contabilidad_excel(tipo):
 def contabilidad_pdf(tipo):
  from reportlab.lib import colors
  from reportlab.lib.pagesizes import A4,landscape
- from reportlab.lib.styles import getSampleStyleSheet
+ from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
+ from reportlab.lib.enums import TA_CENTER
  from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
  desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();cuenta=request.args.get('cuenta') or None
- c=db();titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta);c.close();bio=io.BytesIO();doc=SimpleDocTemplate(bio,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=24,bottomMargin=24);styles=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('CENTRO MEDICO SANTA CLARA',styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'Periodo: {desde} al {hasta} · Emitido: {datetime.datetime.now():%d/%m/%Y %H:%M}',styles['Normal']),Spacer(1,10)]
- data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.25,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER')]));story.append(tbl);story.append(Spacer(1,8));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));
+ modo='rubricado' if request.args.get('modo')=='rubricado' else 'normal'
+ c=db();titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta);inst=c.execute('select * from institucion_config where id=1').fetchone();c.close()
+ empresa=(inst['razon_social'] if inst and 'razon_social' in inst.keys() and inst['razon_social'] else (inst['nombre'] if inst else 'CENTRO MEDICO SANTA CLARA'))
+ ruc=(inst['ruc'] if inst and inst['ruc'] else '')
+ if inst and 'dv' in inst.keys() and inst['dv'] and ruc and '-' not in ruc:ruc=f"{ruc}-{inst['dv']}"
+ bio=io.BytesIO();doc=SimpleDocTemplate(bio,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=30,bottomMargin=30);styles=getSampleStyleSheet()
+ story=[]
+ if pdf_logo():story.append(pdf_logo())
+ story += [Paragraph(empresa,styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'RUC: {ruc or "-"} &nbsp;&nbsp; | &nbsp;&nbsp; Periodo: {desde} al {hasta}',styles['Normal'])]
+ if modo=='rubricado':
+  aviso=ParagraphStyle('rubrica',parent=styles['Normal'],alignment=TA_CENTER,fontSize=8,leading=10)
+  story += [Paragraph('<b>FORMATO PARA IMPRESIÓN / ARCHIVO CONTABLE RUBRICADO</b>',aviso),Paragraph('La emisión desde el sistema no sustituye la rúbrica, foliado, sellado, comunicación o autorización que legalmente corresponda.',aviso)]
+ story += [Paragraph(f'Emitido: {datetime.datetime.now():%d/%m/%Y %H:%M}',styles['Normal']),Spacer(1,8)]
+ data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows]
+ tbl=Table(data,repeatRows=1)
+ tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.35 if modo=='rubricado' else 0.25,colors.black if modo=='rubricado' else colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER')]))
+ story.append(tbl);story.append(Spacer(1,8));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']))
  for h,v in _report_totals(headers,rows): story.append(Paragraph(f'<b>{h}:</b> Gs. {_money_local(v,"PYG")}',styles['Normal']))
- doc.build(story);bio.seek(0);return send_file(bio,as_attachment=False,download_name=f'{tipo}_{desde}_{hasta}.pdf',mimetype='application/pdf')
+ def _pie(canvas,doc):
+  canvas.saveState();canvas.setFont('Helvetica',7)
+  if modo=='rubricado':
+   canvas.drawString(20,15,f'{empresa} - RUC {ruc or "-"} - {titulo}')
+   canvas.drawRightString(landscape(A4)[0]-20,15,f'Folio {doc.page}')
+  else: canvas.drawRightString(landscape(A4)[0]-20,15,f'Página {doc.page}')
+  canvas.restoreState()
+ doc.build(story,onFirstPage=_pie,onLaterPages=_pie);bio.seek(0)
+ suf='_RUBRICADO' if modo=='rubricado' else ''
+ return send_file(bio,as_attachment=False,download_name=f'{tipo}{suf}_{desde}_{hasta}.pdf',mimetype='application/pdf')
 
 
 # ===== V13.5.3: Agenda por turnos médicos + llamador administrativo =====
@@ -3464,7 +3494,7 @@ def rrhh_asistencia():
     if request.method=='POST':
         f=request.form;c.execute('''insert into rrhh_asistencias(empleado_id,fecha,hora_entrada,hora_salida,estado,minutos_tardanza,horas_extra,observacion,registrado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?)
         on conflict(empleado_id,fecha) do update set hora_entrada=excluded.hora_entrada,hora_salida=excluded.hora_salida,estado=excluded.estado,minutos_tardanza=excluded.minutos_tardanza,horas_extra=excluded.horas_extra,observacion=excluded.observacion,registrado_por=excluded.registrado_por''',(f['empleado_id'],f['fecha'],f.get('hora_entrada'),f.get('hora_salida'),f.get('estado','PRESENTE'),int(f.get('minutos_tardanza') or 0),float(f.get('horas_extra') or 0),f.get('observacion'),session.get('user'),now()));c.commit();flash('Asistencia guardada.')
-    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();rows=c.execute('''select a.*,e.nombre from rrhh_asistencias a join empleados e on e.id=a.empleado_id where a.fecha between ? and ? order by a.fecha desc,e.nombre''',(desde,hasta)).fetchall();c.close();return render_template('rrhh_attendance.html',emps=emps,rows=rows,desde=desde,hasta=hasta)
+    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();bancos=c.execute("select * from cuentas_bancarias where activo=1 order by banco,alias").fetchall();rows=c.execute('''select a.*,e.nombre from rrhh_asistencias a join empleados e on e.id=a.empleado_id where a.fecha between ? and ? order by a.fecha desc,e.nombre''',(desde,hasta)).fetchall();c.close();return render_template('rrhh_attendance.html',emps=emps,rows=rows,desde=desde,hasta=hasta)
 
 @app.route('/rrhh/novedades',methods=['GET','POST'])
 def rrhh_novedades():
@@ -3472,9 +3502,12 @@ def rrhh_novedades():
     if not _rrhh_perm():return ('Acceso no autorizado',403)
     c=db();periodo=_rrhh_periodo(request.values.get('periodo'))
     if request.method=='POST':
-        f=request.form;tipo=f.get('tipo','OTRO');estado='APROBADO' if tipo in ('ANTICIPO','DESCUENTO','BONIFICACION','PRESTAMO','HORA_EXTRA') else 'PENDIENTE'
-        c.execute('insert into rrhh_novedades(empleado_id,fecha,periodo,tipo,descripcion,monto,cantidad,desde,hasta,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?)',(f['empleado_id'],f.get('fecha') or datetime.date.today().isoformat(),periodo,tipo,f.get('descripcion'),float(f.get('monto') or 0),float(f.get('cantidad') or 0),f.get('desde'),f.get('hasta'),estado,session.get('user'),now()));c.commit();flash('Novedad registrada.');c.close();return redirect('/rrhh/novedades?periodo='+periodo)
-    emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();rows=c.execute('''select n.*,e.nombre from rrhh_novedades n join empleados e on e.id=n.empleado_id where n.periodo=? order by n.fecha desc,n.id desc''',(periodo,)).fetchall();c.close();return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo)
+        f=request.form;tipo=f.get('tipo','OTRO');estado='APROBADO' if tipo in ('ANTICIPO','DESCUENTO','BONIFICACION','PRESTAMO','HORA_EXTRA') else 'PENDIENTE';monto=float(f.get('monto') or 0);fecha=f.get('fecha') or datetime.date.today().isoformat();medio=f.get('medio_pago') or 'EFECTIVO';cuenta_id=int(f.get('cuenta_bancaria_id') or 0) or None
+        cur=c.execute('insert into rrhh_novedades(empleado_id,fecha,periodo,tipo,descripcion,monto,cantidad,desde,hasta,estado,creado_por,creado_en,medio_pago,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(f['empleado_id'],fecha,periodo,tipo,f.get('descripcion'),monto,float(f.get('cantidad') or 0),f.get('desde'),f.get('hasta'),estado,session.get('user'),now(),medio,cuenta_id));nid=cur.lastrowid
+        if tipo in ('ANTICIPO','PRESTAMO') and monto>0:
+         cta_fin,_=_cuenta_financiera(c,medio,cuenta_id);cfg=c.execute('select * from tesoreria_config where id=1').fetchone();cta_ant=cfg['cuenta_anticipo_personal'];asi=asiento(c,fecha,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,'PYG',1,[(cta_ant,monto,0,monto,'Anticipo al funcionario'),(cta_fin,0,monto,monto,'Salida de fondos')]);mov=c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,'EGRESO',medio,'PYG',1,monto,monto,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,cuenta_id)).lastrowid;c.execute('update rrhh_novedades set asiento_id=?,movimiento_financiero_id=? where id=?',(asi,mov,nid))
+        c.commit();flash('Novedad registrada y, cuando corresponde, integrada con Tesorería y Contabilidad.');c.close();return redirect('/rrhh/novedades?periodo='+periodo)
+    emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();rows=c.execute('''select n.*,e.nombre from rrhh_novedades n join empleados e on e.id=n.empleado_id where n.periodo=? order by n.fecha desc,n.id desc''',(periodo,)).fetchall();c.close();return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo,bancos=bancos)
 
 @app.route('/rrhh/liquidaciones')
 def rrhh_liquidaciones():
@@ -3840,30 +3873,113 @@ def anular_factura_venta(venta_id):
     finally:c.close()
     return redirect(f'/ventas/{venta_id}/factura')
 
+# ===== V13.9.54: aplicación real de Notas de Crédito de Compras =====
+def init_v13954_nc_compras_aplicables():
+    c=db()
+    cols={r['name'] for r in c.execute('pragma table_info(notas_credito_compras)').fetchall()}
+    for col,defn in [('aplicado_cxp','REAL NOT NULL DEFAULT 0'),('saldo_credito','REAL NOT NULL DEFAULT 0'),('estado_aplicacion',"TEXT NOT NULL DEFAULT 'PENDIENTE'"),('asiento_id','INTEGER'),('stock_ajustado','INTEGER NOT NULL DEFAULT 1')]:
+        if col not in cols:c.execute(f'alter table notas_credito_compras add column {col} {defn}')
+    # NC históricas: ya habían descontado stock. Se habilita su aplicación financiera sin repetir inventario.
+    c.execute("update notas_credito_compras set saldo_credito=case when coalesce(saldo_credito,0)=0 and coalesce(aplicado_cxp,0)=0 then coalesce(total,0) else saldo_credito end where coalesce(estado_aplicacion,'PENDIENTE')='PENDIENTE'")
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.54-nc-compras-aplicables',?)",(now(),))
+    c.commit();c.close()
+init_v13954_nc_compras_aplicables()
+
+def _nc_compra_totales(c,nid):
+    rows=c.execute('select * from nota_credito_compra_items where nota_id=?',(nid,)).fetchall()
+    bruto=base=iva=exento=0.0
+    for x in rows:
+        t=float(x['total'] or 0); pct=float(x['iva_pct'] or 0); b,i=desglosar_iva_incluido(t,pct)
+        bruto+=t
+        if pct>0:base+=b;iva+=i
+        else:exento+=t
+    return bruto,base,iva,exento
+
+def _contabilizar_nc_compra(c,nid):
+    n=c.execute('select n.*,co.moneda,co.tipo_cambio,co.numero compra_numero from notas_credito_compras n join compras co on co.id=n.compra_id where n.id=?',(nid,)).fetchone()
+    if not n:return None
+    if n['asiento_id']:return n['asiento_id']
+    bruto,base,iva,exento=_nc_compra_totales(c,nid);tc=float(n['tipo_cambio'] or 1)
+    # Reversión del comprobante de compra: Proveedores al Debe; Inventario e IVA Crédito al Haber.
+    lineas=[('2.1.01',bruto*tc,0,bruto,'Nota de crédito proveedor '+str(n['numero']))]
+    if base>0:lineas.append(('1.1.03',0,base*tc,base,'Reversión inventario por NC'))
+    if exento>0:lineas.append(('1.1.03',0,exento*tc,exento,'Reversión inventario exento por NC'))
+    if iva>0:lineas.append(('1.1.04',0,iva*tc,iva,'Reversión IVA crédito por NC'))
+    aid=asiento(c,n['fecha'],'Nota de Crédito proveedor '+str(n['numero']),'NC_COMPRA',nid,n['moneda'],tc,lineas)
+    c.execute('update notas_credito_compras set asiento_id=? where id=?',(aid,nid));return aid
+
+def _aplicar_nc_a_cxp(c,nid,importe=None):
+    n=c.execute('select n.*,co.moneda,co.tipo_cambio from notas_credito_compras n join compras co on co.id=n.compra_id where n.id=?',(nid,)).fetchone()
+    if not n:raise ValueError('Nota de Crédito no encontrada.')
+    disponible=max(0,float(n['saldo_credito'] or 0))
+    if importe is None:importe=disponible
+    importe=max(0,min(float(importe or 0),disponible))
+    if importe<=0:return 0.0
+    x=c.execute("select * from cxp where compra_id=? and coalesce(estado,'') not in ('ANULADA','ANULADO') order by id limit 1",(n['compra_id'],)).fetchone()
+    if not x:raise ValueError('Esta compra no tiene saldo en Cuentas por Pagar. El importe queda como crédito disponible del proveedor.')
+    saldo=max(0,float(x['saldo'] or 0));aplicar=min(importe,saldo)
+    if aplicar<=0:raise ValueError('La compra ya no tiene saldo pendiente. La Nota de Crédito queda como crédito disponible.')
+    nuevo=saldo-aplicar;c.execute("update cxp set saldo=?,estado=? where id=?",(nuevo,'PAGADO' if nuevo<=0.005 else 'PENDIENTE',x['id']))
+    # Reduce cuotas pendientes sin alterar importes ya pagados, comenzando por las últimas.
+    resto=aplicar
+    for q in c.execute('select * from compra_cuotas where compra_id=? order by numero desc,id desc',(n['compra_id'],)).fetchall():
+        if resto<=0:break
+        pendiente=max(0,float(q['importe'] or 0)-float(q['pagado'] or 0))
+        d=min(resto,pendiente)
+        if d>0:
+            nuevo_imp=float(q['importe'] or 0)-d
+            c.execute("update compra_cuotas set importe=?,estado=? where id=?",(nuevo_imp,'PAGADA' if nuevo_imp<=float(q['pagado'] or 0)+0.005 else 'PENDIENTE',q['id']));resto-=d
+    aplicado=float(n['aplicado_cxp'] or 0)+aplicar;disp=disponible-aplicar
+    estado='APLICADA' if disp<=0.005 else 'PARCIAL'
+    c.execute('update notas_credito_compras set aplicado_cxp=?,saldo_credito=?,estado_aplicacion=? where id=?',(aplicado,disp,estado,nid))
+    return aplicar
+
 @app.route('/compras/<int:compra_id>/nota-credito',methods=['GET','POST'])
 def nota_credito_compra(compra_id):
     c=db();co=c.execute("select co.*,t.nombre proveedor,t.ruc from compras co left join terceros t on t.id=co.proveedor_id where co.id=?",(compra_id,)).fetchone()
     if not co:c.close();return ('Compra no encontrada',404)
     items=c.execute("select ci.*,p.nombre,p.codigo from compra_items ci left join productos p on p.id=ci.producto_id where ci.compra_id=? order by ci.id",(compra_id,)).fetchall()
+    usados={r['compra_item_id']:float(r['q'] or 0) for r in c.execute('select i.compra_item_id,sum(i.cantidad) q from nota_credito_compra_items i join notas_credito_compras n on n.id=i.nota_id where n.compra_id=? group by i.compra_item_id',(compra_id,)).fetchall()}
+    cxp=c.execute("select * from cxp where compra_id=? and coalesce(estado,'') not in ('ANULADA','ANULADO') order by id limit 1",(compra_id,)).fetchone()
     if request.method=='POST':
       try:
-       numero=(request.form.get('numero') or '').strip();tim=(request.form.get('timbrado') or '').strip();motivo=(request.form.get('motivo') or '').strip()
+       numero=(request.form.get('numero') or '').strip();tim=(request.form.get('timbrado') or '').strip();motivo=(request.form.get('motivo') or '').strip();fecha=request.form.get('fecha') or datetime.date.today().isoformat()
        if not numero or not motivo:raise ValueError('Número de Nota de Crédito y motivo son obligatorios.')
+       if c.execute('select 1 from notas_credito_compras where numero=? and compra_id=?',(numero,compra_id)).fetchone():raise ValueError('Esta Nota de Crédito ya fue registrada para la compra.')
        sel=[];total=0
        for it in items:
-        q=float(request.form.get(f'qty_{it["id"]}') or 0)
-        if q<0 or q>float(it['cantidad'] or 0):raise ValueError('Cantidad inválida.')
+        q=float(request.form.get(f'qty_{it["id"]}') or 0);restante=max(0,float(it['cantidad'] or 0)-usados.get(it['id'],0))
+        if q<0 or q>restante+0.000001:raise ValueError(f'Cantidad inválida para {it["nombre"] or "producto"}. Disponible para acreditar: {restante:g}.')
         if q>0:
-         # compra_items.total guarda base; para reversión operativa usamos costo unitario cargado.
          t=q*float(it['costo'] or 0);total+=t;sel.append((it,q,t))
        if not sel:raise ValueError('Seleccione al menos un producto.')
-       cur=c.execute("insert into notas_credito_compras(compra_id,fecha,numero,timbrado,motivo,total,creado_en,usuario) values(?,?,?,?,?,?,?,?)",(compra_id,request.form.get('fecha') or datetime.date.today().isoformat(),numero,tim,motivo,total,now(),session.get('user')));nid=cur.lastrowid
+       cur=c.execute("insert into notas_credito_compras(compra_id,fecha,numero,timbrado,motivo,total,aplicado_cxp,saldo_credito,estado_aplicacion,stock_ajustado,creado_en,usuario) values(?,?,?,?,?,?,0,?,'PENDIENTE',1,?,?)",(compra_id,fecha,numero,tim,motivo,total,total,now(),session.get('user')));nid=cur.lastrowid
        for it,q,t in sel:
         c.execute("insert into nota_credito_compra_items(nota_id,compra_item_id,producto_id,descripcion,cantidad,costo,total,iva_pct) values(?,?,?,?,?,?,?,?)",(nid,it['id'],it['producto_id'],it['nombre'] or 'Ítem',q,it['costo'],t,it['iva_pct']))
-        c.execute('update productos set stock=stock-? where id=?',(q,it['producto_id']));c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'NC_COMPRA',?)",(request.form.get('fecha') or datetime.date.today().isoformat(),it['producto_id'],'SALIDA',-q,float(it['costo'] or 0)*float(co['tipo_cambio'] or 1),nid))
-       c.commit();flash('Nota de Crédito de compra registrada y stock ajustado. Se generó el PDF listo para imprimir.');c.close();return redirect(f'/notas-credito/compras/{nid}/pdf')
-      except Exception as e:c.rollback();flash(str(e))
-    c.close();return render_template('credit_note_purchase.html',co=co,items=items)
+        c.execute('update productos set stock=stock-? where id=?',(q,it['producto_id']));c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'NC_COMPRA',?)",(fecha,it['producto_id'],'SALIDA',-q,float(it['costo'] or 0)*float(co['tipo_cambio'] or 1),nid))
+       _contabilizar_nc_compra(c,nid)
+       aplicado=0
+       if request.form.get('aplicar_cxp')=='1':
+        try:aplicado=_aplicar_nc_a_cxp(c,nid,total)
+        except ValueError as e:
+         # La NC sigue válida y queda como crédito si no existe saldo a pagar.
+         flash(str(e))
+       c.commit();audit('NC_COMPRA',f'NC {nid} compra {compra_id}; aplicada CxP {aplicado}')
+       flash(f'Nota de Crédito registrada. Aplicado a CxP: {aplicado:,.0f}. Saldo de crédito disponible: {max(0,total-aplicado):,.0f}.')
+       c.close();return redirect(f'/compras/{compra_id}/ver')
+      except Exception as e:c.rollback();flash('No se pudo registrar/aplicar la Nota de Crédito: '+str(e))
+    c.close();return render_template('credit_note_purchase.html',co=co,items=items,usados=usados,cxp=cxp)
+
+@app.post('/notas-credito/compras/<int:nid>/aplicar')
+def nota_credito_compra_aplicar(nid):
+    c=db();n=c.execute('select * from notas_credito_compras where id=?',(nid,)).fetchone()
+    if not n:c.close();flash('Nota de Crédito no encontrada.');return redirect('/notas-credito')
+    try:
+        _contabilizar_nc_compra(c,nid)
+        solicitado=float(request.form.get('importe') or n['saldo_credito'] or 0);ap=_aplicar_nc_a_cxp(c,nid,solicitado);c.commit();audit('APLICAR_NC_COMPRA',f'NC {nid}; importe {ap}');flash(f'Nota de Crédito aplicada correctamente por {ap:,.0f}.')
+    except Exception as e:c.rollback();flash('No se pudo aplicar la Nota de Crédito: '+str(e))
+    finally:c.close()
+    return redirect(request.form.get('volver') or '/notas-credito')
 
 def _pdf_money(v):
     try:return f"{float(v or 0):,.0f}".replace(',', '.')
@@ -3972,4 +4088,51 @@ def diagnostico_sistema():
     c.close()
     return render_template('system_diagnostics.html',checks=checks,duplicados=dup)
 
-ROUTE_MODULE.update({'notas_credito_centro':'FACTURACION','sifen_reintentar_nc':'FACTURACION','diagnostico_sistema':'CONFIGURACION','nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION','nota_credito_venta_pdf':'FACTURACION','nota_credito_compra_pdf':'COMPRAS'})
+ROUTE_MODULE.update({'notas_credito_centro':'FACTURACION','sifen_reintentar_nc':'FACTURACION','diagnostico_sistema':'CONFIGURACION','nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION','nota_credito_venta_pdf':'FACTURACION','nota_credito_compra_pdf':'COMPRAS','nota_credito_compra_aplicar':'COMPRAS'})
+
+# ===== V13.9.53: Tesorería integrada, anticipos y contabilización por cuenta financiera =====
+def init_v13953_tesoreria_integrada():
+    c=db()
+    def addcol(tabla,col,defn):
+        cols=[r['name'] for r in c.execute(f'pragma table_info({tabla})').fetchall()]
+        if col not in cols:c.execute(f'alter table {tabla} add column {col} {defn}')
+    addcol('cuentas_bancarias','cuenta_contable','TEXT')
+    for tabla,col,defn in [('rrhh_novedades','cuenta_bancaria_id','INTEGER'),('rrhh_novedades','medio_pago','TEXT'),('rrhh_novedades','asiento_id','INTEGER'),('rrhh_novedades','movimiento_financiero_id','INTEGER'),('pagos_proveedores','cuenta_bancaria_id','INTEGER')]:addcol(tabla,col,defn)
+    c.execute("""CREATE TABLE IF NOT EXISTS anticipos_terceros(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,tipo TEXT NOT NULL,tercero_id INTEGER NOT NULL,moneda TEXT DEFAULT 'PYG',tipo_cambio REAL DEFAULT 1,importe REAL NOT NULL,importe_pyg REAL NOT NULL,medio TEXT NOT NULL,cuenta_bancaria_id INTEGER,referencia TEXT,concepto TEXT,cuenta_anticipo TEXT NOT NULL,cuenta_financiera TEXT NOT NULL,asiento_id INTEGER,movimiento_financiero_id INTEGER,saldo REAL NOT NULL,estado TEXT DEFAULT 'DISPONIBLE',creado_por TEXT,creado_en TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS tesoreria_config(id INTEGER PRIMARY KEY CHECK(id=1),cuenta_caja TEXT DEFAULT '1.1.01',cuenta_clientes TEXT DEFAULT '1.1.02',cuenta_proveedores TEXT DEFAULT '2.1.01',cuenta_anticipo_clientes TEXT DEFAULT '2.1.07',cuenta_anticipo_proveedores TEXT DEFAULT '1.1.06',cuenta_anticipo_personal TEXT DEFAULT '1.1.05')""")
+    c.execute('insert or ignore into tesoreria_config(id) values(1)')
+    for x in [('1.1.06','Anticipos a Proveedores','ACTIVO'),('2.1.07','Anticipos de Clientes','PASIVO')]:c.execute('insert or ignore into plan_cuentas(codigo,nombre,tipo) values(?,?,?)',x)
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.53-tesoreria-integrada',?)",(now(),));c.commit();c.close()
+init_v13953_tesoreria_integrada()
+
+def _cuenta_financiera(c,medio,cuenta_id=None):
+    if str(medio or '').upper()=='EFECTIVO':
+        x=c.execute('select cuenta_caja from tesoreria_config where id=1').fetchone();return (x['cuenta_caja'] if x else '1.1.01'),None
+    if not cuenta_id:raise ValueError('Debe seleccionar la cuenta bancaria de origen/destino.')
+    b=c.execute('select * from cuentas_bancarias where id=? and activo=1',(int(cuenta_id),)).fetchone()
+    if not b:raise ValueError('Cuenta bancaria no encontrada o inactiva.')
+    if not b['cuenta_contable']:raise ValueError('La cuenta bancaria no tiene una cuenta contable vinculada. Configure Finanzas → Cuentas Bancarias.')
+    return b['cuenta_contable'],b
+
+@app.route('/finanzas/anticipos',methods=['GET','POST'])
+def anticipos_financieros():
+    c=db()
+    if request.method=='POST':
+        try:
+            f=request.form;tipo=f.get('tipo');tid=int(f['tercero_id']);imp=float(f.get('importe') or 0)
+            if tipo not in ('CLIENTE','PROVEEDOR') or imp<=0:raise ValueError('Tipo o importe de anticipo inválido.')
+            t=c.execute('select * from terceros where id=?',(tid,)).fetchone()
+            if not t:raise ValueError('Cliente/proveedor no encontrado.')
+            fecha=f.get('fecha') or datetime.date.today().isoformat();mon=f.get('moneda') or 'PYG';tc=tc_fecha(c,fecha,mon,f.get('tipo_cambio'));pyg=round(imp*tc,2);medio=f.get('medio') or 'EFECTIVO';cuenta_id=int(f.get('cuenta_bancaria_id') or 0) or None
+            cta_fin,_=_cuenta_financiera(c,medio,cuenta_id);cfg=c.execute('select * from tesoreria_config where id=1').fetchone();cta_ant=cfg['cuenta_anticipo_clientes'] if tipo=='CLIENTE' else cfg['cuenta_anticipo_proveedores']
+            if tipo=='CLIENTE':lineas=[(cta_fin,pyg,0,imp,'Ingreso de anticipo'),(cta_ant,0,pyg,imp,'Anticipo recibido de cliente')];movtipo='INGRESO'
+            else:lineas=[(cta_ant,pyg,0,imp,'Anticipo entregado a proveedor'),(cta_fin,0,pyg,imp,'Salida de anticipo')];movtipo='EGRESO'
+            cur=c.execute('insert into anticipos_terceros(fecha,tipo,tercero_id,moneda,tipo_cambio,importe,importe_pyg,medio,cuenta_bancaria_id,referencia,concepto,cuenta_anticipo,cuenta_financiera,saldo,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tipo,tid,mon,tc,imp,pyg,medio,cuenta_id,f.get('referencia'),f.get('concepto'),cta_ant,cta_fin,imp,session.get('user'),now()));aid=cur.lastrowid
+            asi=asiento(c,fecha,f'Anticipo {tipo.lower()} - {t["nombre"]}',f'ANTICIPO_{tipo}',aid,mon,tc,lineas)
+            m=c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,movtipo,medio,mon,tc,imp,pyg,f'Anticipo {tipo.lower()} - {t["nombre"]}',f'ANTICIPO_{tipo}',aid,cuenta_id)).lastrowid
+            c.execute('update anticipos_terceros set asiento_id=?,movimiento_financiero_id=? where id=?',(asi,m,aid));c.commit();audit('ANTICIPO_'+tipo,f'{aid} / {t["nombre"]} / {imp} {mon}');flash('Anticipo registrado, movimiento financiero y asiento contable generados.')
+        except Exception as ex:c.rollback();flash(str(ex))
+        c.close();return redirect('/finanzas/anticipos')
+    ters=c.execute("select * from terceros where tipo in ('CLIENTE','PROVEEDOR','AMBOS') order by nombre").fetchall();bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();rows=c.execute('select a.*,t.nombre tercero,b.banco,b.alias from anticipos_terceros a join terceros t on t.id=a.tercero_id left join cuentas_bancarias b on b.id=a.cuenta_bancaria_id order by a.id desc limit 200').fetchall();c.close();return render_template('treasury_advances.html',ters=ters,bancos=bancos,rows=rows)
+
+ROUTE_MODULE.update({'anticipos_financieros':'FINANZAS'})
