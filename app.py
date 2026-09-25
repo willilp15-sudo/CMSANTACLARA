@@ -3,6 +3,53 @@ import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets
 from werkzeug.security import generate_password_hash, check_password_hash
 from pathlib import Path
 app=Flask(__name__)
+
+# ===== V13.9.37: formato monetario Paraguay + totales universales =====
+def _num_local(value, decimals=0):
+    try:
+        n=float(value or 0)
+        txt=f"{n:,.{int(decimals)}f}"
+        return txt.replace(',', '#').replace('.', ',').replace('#', '.')
+    except Exception:
+        return str(value if value is not None else '')
+
+def _money_local(value, currency='PYG'):
+    cur=(currency or 'PYG').upper()
+    return _num_local(value, 0 if cur in ('PYG','GS','G$','GUARANI','GUARANIES') else 2)
+
+def _is_money_header(header):
+    h=(header or '').lower()
+    keys=('total','importe','saldo','debe','haber','facturado','honorario','margen','cuenta pyg','costo','precio','iva','gravado','exento','entrada','salida','movimiento','gs.','pyg')
+    return any(k in h for k in keys) and not any(k in h for k in ('fecha','cantidad','consultas','registros'))
+
+def _report_totals(headers, rows):
+    out=[]
+    for i,h in enumerate(headers):
+        if not _is_money_header(h): continue
+        total=0.0; found=False
+        for r in rows:
+            try:
+                v=r[i]
+                if isinstance(v,(int,float)):
+                    total += float(v or 0); found=True
+            except Exception: pass
+        if found: out.append((h,total))
+    return out
+
+def _report_value(value, header=''):
+    if isinstance(value,(int,float)):
+        if _is_money_header(header): return _money_local(value,'PYG')
+        return _num_local(value, 2 if isinstance(value,float) and not float(value).is_integer() else 0)
+    return '' if value is None else str(value)
+@app.template_filter('pyg')
+def _jinja_pyg(v): return _money_local(v,'PYG')
+@app.template_filter('num_local')
+def _jinja_num_local(v): return _num_local(v,2)
+@app.template_filter('money_local')
+def _jinja_money_local(v): return _money_local(v,'PYG')
+
+
+
 app.secret_key=os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 app.config.update(SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax',SESSION_COOKIE_SECURE=bool(os.environ.get('RENDER')),PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=8),MAX_CONTENT_LENGTH=16*1024*1024)
 
@@ -965,7 +1012,7 @@ def exportar_consultas_pdf():
  from flask import send_file
  from io import BytesIO
  c=db(); desde,hasta,rows,resumen=_filtros_consultas(c); c.close(); out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=24,rightMargin=24,topMargin=24,bottomMargin=24); st=getSampleStyleSheet(); story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Informe de Consultas',st['Title']),Paragraph(f'Período: {desde} al {hasta}',st['Normal']),Spacer(1,10)]
- data=[['Fecha','Paciente','Médico','Especialidad','Precio Gs.','Honorario Gs.','Margen Gs.']]+[[r['fecha'],r['paciente'],r['medico'],r['especialidad'],f"{r['precio_pyg']:,.0f}",f"{r['honorario_pyg']:,.0f}",f"{r['margen_pyg']:,.0f}"] for r in rows]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.25,colors.grey),('FONTSIZE',(0,0),(-1,-1),8),('VALIGN',(0,0),(-1,-1),'TOP')])); story.append(t); doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'consultas_{desde}_{hasta}.pdf',mimetype='application/pdf')
+ data=[['Fecha','Paciente','Médico','Especialidad','Precio Gs.','Honorario Gs.','Margen Gs.']]+[[r['fecha'],r['paciente'],r['medico'],r['especialidad'],_money_local(r['precio_pyg'],'PYG'),_money_local(r['honorario_pyg'],'PYG'),_money_local(r['margen_pyg'],'PYG')] for r in rows]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.25,colors.grey),('FONTSIZE',(0,0),(-1,-1),8),('VALIGN',(0,0),(-1,-1),'TOP')])); story.append(t); doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'consultas_{desde}_{hasta}.pdf',mimetype='application/pdf')
 
 @app.get('/liquidacion-medica/<int:i>.pdf')
 def liquidacion_medica_pdf(i):
@@ -977,7 +1024,7 @@ def liquidacion_medica_pdf(i):
  from io import BytesIO
  c=db(); l=c.execute('''select l.*,m.nombre medico,m.especialidad from liquidaciones_medicas l join medicos m on m.id=l.medico_id where l.id=?''',(i,)).fetchone(); qs=c.execute('''select q.*,p.nombre paciente,e.nombre especialidad from consultas q join pacientes p on p.id=q.paciente_id join especialidades e on e.id=q.especialidad_id where q.liquidacion_id=? order by q.hora,q.id''',(i,)).fetchall(); c.close()
  if not l: return 'Liquidación no encontrada',404
- out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4); st=getSampleStyleSheet(); story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Liquidación Médica',st['Title']),Paragraph(f"Médico: {l['medico']} | Fecha: {l['fecha']}",st['Normal']),Spacer(1,10)]; data=[['Paciente','Especialidad','Precio Gs.','Honorario Gs.']]+[[q['paciente'],q['especialidad'],f"{q['precio_pyg']:,.0f}",f"{q['honorario_pyg']:,.0f}"] for q in qs]+[['','','TOTAL',f"{l['total_honorario_pyg']:,.0f}"]]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.3,colors.grey),('ALIGN',(2,1),(-1,-1),'RIGHT')])); story.append(t); doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'liquidacion_medica_{i}.pdf',mimetype='application/pdf')
+ out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4); st=getSampleStyleSheet(); story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Liquidación Médica',st['Title']),Paragraph(f"Médico: {l['medico']} | Fecha: {l['fecha']}",st['Normal']),Spacer(1,10)]; data=[['Paciente','Especialidad','Precio Gs.','Honorario Gs.']]+[[q['paciente'],q['especialidad'],_money_local(q['precio_pyg'],'PYG'),_money_local(q['honorario_pyg'],'PYG')] for q in qs]+[['','','TOTAL',_money_local(l['total_honorario_pyg'],'PYG')]]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.3,colors.grey),('ALIGN',(2,1),(-1,-1),'RIGHT')])); story.append(t); doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'liquidacion_medica_{i}.pdf',mimetype='application/pdf')
 
 
 # ===== V11: arquitectura modular, roles y farmacia interna =====
@@ -1995,7 +2042,9 @@ def informe_pdf(tipo):
  from reportlab.lib.units import mm
  from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
  buf=io.BytesIO();doc=SimpleDocTemplate(buf,pagesize=landscape(A4),rightMargin=10*mm,leftMargin=10*mm,topMargin=10*mm,bottomMargin=10*mm);styles=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('CENTRO MÉDICO SANTA CLARA',styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'Período: {desde} al {hasta} · Generado: {now().replace("T"," ")}',styles['Normal']),Spacer(1,5*mm)]
- data=[headers]+[[str(v if v is not None else '') for v in r] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),0.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]));story.append(tbl);story.append(Spacer(1,4*mm));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));doc.build(story);buf.seek(0);return send_file(buf,mimetype='application/pdf',as_attachment=True,download_name=f'{tipo}_{desde}_{hasta}.pdf')
+ data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),0.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]));story.append(tbl);story.append(Spacer(1,4*mm));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));
+ for h,v in _report_totals(headers,rows): story.append(Paragraph(f'<b>{h}:</b> Gs. {_money_local(v,"PYG")}',styles['Normal']))
+ doc.build(story);buf.seek(0);return send_file(buf,mimetype='application/pdf',as_attachment=True,download_name=f'{tipo}_{desde}_{hasta}.pdf')
 
 # ===== V13.9.2: búsqueda bajo demanda de productos =====
 @app.get('/api/productos/buscar')
@@ -2073,7 +2122,8 @@ def informe_especifico(tipo):
  else:
   titulo,headers,_=_report_data(c,tipo,'0001-01-01','0001-01-01'); rows=[]
  c.close()
- return render_template('specific_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,buscado=buscado)
+ totales=_report_totals(headers,rows) if buscado else []
+ return render_template('specific_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,buscado=buscado,totales=totales,report_value=_report_value)
 
 
 # ===== V13.4.8 CONTABILIDAD PARAGUAY - INFORMES / PDF / EXCEL / IMPRESION =====
@@ -2169,7 +2219,8 @@ def contabilidad_informe(tipo):
  else:
   titulo,headers,_=_accounting_report(c,tipo,'0001-01-01','0001-01-01',cuenta or None); rows=[]
  cuentas=c.execute('select codigo,nombre from plan_cuentas order by codigo').fetchall();c.close()
- return render_template('accounting_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,cuenta=cuenta,cuentas=cuentas,buscado=buscado)
+ totales=_report_totals(headers,rows) if buscado else []
+ return render_template('accounting_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,cuenta=cuenta,cuentas=cuentas,buscado=buscado,totales=totales,report_value=_report_value)
 
 def _safe(v): return '' if v is None else str(v)
 
@@ -2194,7 +2245,9 @@ def contabilidad_pdf(tipo):
  from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
  desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();cuenta=request.args.get('cuenta') or None
  c=db();titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta);c.close();bio=io.BytesIO();doc=SimpleDocTemplate(bio,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=24,bottomMargin=24);styles=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('CENTRO MEDICO SANTA CLARA',styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'Periodo: {desde} al {hasta} · Emitido: {datetime.datetime.now():%d/%m/%Y %H:%M}',styles['Normal']),Spacer(1,10)]
- data=[headers]+[[_safe(v) for v in r] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.25,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER')]));story.append(tbl);story.append(Spacer(1,8));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));doc.build(story);bio.seek(0);return send_file(bio,as_attachment=False,download_name=f'{tipo}_{desde}_{hasta}.pdf',mimetype='application/pdf')
+ data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.25,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER')]));story.append(tbl);story.append(Spacer(1,8));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));
+ for h,v in _report_totals(headers,rows): story.append(Paragraph(f'<b>{h}:</b> Gs. {_money_local(v,"PYG")}',styles['Normal']))
+ doc.build(story);bio.seek(0);return send_file(bio,as_attachment=False,download_name=f'{tipo}_{desde}_{hasta}.pdf',mimetype='application/pdf')
 
 
 # ===== V13.5.3: Agenda por turnos médicos + llamador administrativo =====
@@ -2557,6 +2610,7 @@ def _kude_header(story,inst,tipo,numero,subtitulo='Representación gráfica del 
     from reportlab.lib import colors
     from reportlab.lib.units import mm
     from reportlab.platypus import Table,TableStyle,Paragraph,Image,Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
     st=getSampleStyleSheet(); e=_kude_empresa(inst); logo=logo_path_actual()
     iz=[]
     if os.path.exists(logo): iz.append(Image(logo,width=38*mm,height=18*mm))
@@ -2568,6 +2622,7 @@ def _kude_footer(story,inst,cdc=None,consulta_url=None,es_dte=False):
     from reportlab.lib import colors
     from reportlab.lib.units import mm
     from reportlab.platypus import Table,TableStyle,Paragraph,Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
     st=getSampleStyleSheet(); e=_kude_empresa(inst); qr=_kude_qr_flowable(consulta_url or cdc)
     if es_dte and cdc:
         txt=f"<b>Consulte este Documento Electrónico con el CDC:</b><br/>{cdc}<br/><b>ESTE DOCUMENTO ES UNA REPRESENTACIÓN GRÁFICA DE UN DOCUMENTO ELECTRÓNICO (XML)</b>"
