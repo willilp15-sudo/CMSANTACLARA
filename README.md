@@ -7,3 +7,6 @@
 - Mantiene el reconocimiento específico de Compras Detalladas Gasparini sin encabezados.
 - Probado contra el archivo real `compras detallada.csv`: Windows-1252, delimitador coma, 1.678 filas y aproximadamente 90/91 campos por registro.
 - No modifica la base persistente ni elimina datos existentes.
+
+
+V13.9.78: Preparación segura SIFEN Producción; activación bloqueada hasta transmisor XMLDSig/SOAP completo.

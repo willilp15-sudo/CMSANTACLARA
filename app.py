@@ -3592,7 +3592,41 @@ def _punto_id_caja_actual(c,origen_area=None,forzar_recepcion=False):
 
 init_v13977_puntos_por_caja()
 
+# ===== V13.9.78: Preparación segura TEST / PRODUCCIÓN SIFEN =====
 SIFEN_TEST_BASE='https://sifen-test.set.gov.py'
+SIFEN_PROD_BASE='https://sifen.set.gov.py'
+SIFEN_XML_VERSION='150'
+
+def init_v13978_sifen_produccion():
+    c=db(); cols={r['name'] for r in c.execute('pragma table_info(sifen_config)').fetchall()}
+    for col,ddl in [('timbrado_desde','TEXT'),('xml_version',"TEXT DEFAULT '150'"),('produccion_habilitada','INTEGER DEFAULT 0'),('produccion_activada_en','TEXT')]:
+        if col not in cols:c.execute(f'alter table sifen_config add column {col} {ddl}')
+    c.execute("update sifen_config set xml_version='150' where xml_version is null or trim(xml_version)=''")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.78-sifen-produccion-segura',?)",(now(),))
+    c.commit();c.close()
+
+def _sifen_base(cfg):
+    return SIFEN_PROD_BASE if str(cfg['ambiente'] or '').upper()=='PRODUCCION' else SIFEN_TEST_BASE
+
+def _sifen_diagnostico(c,cfg):
+    import os
+    puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 order by establecimiento,punto_expedicion").fetchall()
+    checks=[]
+    def add(nombre,ok,detalle):checks.append({'nombre':nombre,'ok':bool(ok),'detalle':detalle})
+    add('RUC y DV',bool(_solo_digitos(cfg['ruc']) and _solo_digitos(cfg['dv'])),'Emisor configurado' if _solo_digitos(cfg['ruc']) else 'Falta RUC/DV')
+    add('Timbrado electrónico',bool(_solo_digitos(cfg['timbrado'])),'Timbrado '+str(cfg['timbrado'] or '') if cfg['timbrado'] else 'Falta timbrado')
+    add('Inicio de vigencia',bool(cfg['timbrado_desde']),str(cfg['timbrado_desde'] or 'Falta fecha de inicio'))
+    add('XML SIFEN',str(cfg['xml_version'] or '')=='150','Versión '+str(cfg['xml_version'] or ''))
+    add('CSC / IdCSC',bool((cfg['csc_id'] or '').strip() and (cfg['csc'] or '').strip()),'Configurados' if (cfg['csc_id'] and cfg['csc']) else 'Falta CSC o IdCSC')
+    certok=bool(cfg['cert_path'] and cfg['key_path'] and os.path.exists(cfg['cert_path']) and os.path.exists(cfg['key_path']))
+    add('Certificado digital',certok,'Instalado en almacenamiento persistente' if certok else 'No instalado o archivo no disponible')
+    aut=[p for p in puntos if int(p['autorizado_dnit'] or 0)]
+    add('Puntos autorizados',bool(aut),', '.join(str(p['establecimiento'])+'-'+str(p['punto_expedicion']) for p in aut) if aut else 'No hay puntos marcados como autorizados')
+    # El ERP aún no incluye el transmisor XMLDSig/SOAP completo; nunca declarar listo a Producción sin él.
+    add('Transmisor XMLDSig + SOAP',False,'Pendiente de implementación/validación integral contra XSD V150 y Web Services SIFEN')
+    return checks
+
+init_v13978_sifen_produccion()
 def _sifen_dir():
     p=os.path.join(DATA_DIR,'sifen');os.makedirs(p,exist_ok=True)
     try: os.chmod(p,0o700)
@@ -3657,10 +3691,19 @@ def configuracion_sifen():
         elif accion=='punto_predeterminado':
             pid=int(request.form.get('p_id') or 0);c.execute('update sifen_puntos_expedicion set predeterminado=0');c.execute('update sifen_puntos_expedicion set predeterminado=1,activo=1 where id=?',(pid,));c.commit();c.close();return redirect('/configuracion/sifen')
         if accion=='guardar':
-            # Seguridad: esta versión habilita únicamente TEST. Producción requiere activación deliberada posterior.
             vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
-            c.execute("update sifen_config set ambiente='TEST',ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,actualizado_en=? where id=1",(*vals,now()))
-            c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN TEST actualizada');flash('Configuración SIFEN TEST guardada.')
+            tim_desde=request.form.get('timbrado_desde','').strip()
+            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',actualizado_en=? where id=1",(*vals,tim_desde,now()))
+            c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN actualizada');flash('Configuración SIFEN guardada. El ambiente no cambia automáticamente.')
+        elif accion=='ambiente_test':
+            c.execute("update sifen_config set ambiente='TEST',produccion_habilitada=0,actualizado_en=? where id=1",(now(),));c.commit();_sifen_log('AMBIENTE','OK','Ambiente cambiado a TEST');flash('SIFEN quedó en ambiente TEST.')
+        elif accion=='ambiente_produccion':
+            cfgx=c.execute('select * from sifen_config where id=1').fetchone();checks=_sifen_diagnostico(c,cfgx)
+            faltan=[x['nombre'] for x in checks if not x['ok']]
+            if faltan:
+                flash('Producción NO activada. Diagnóstico pendiente: '+', '.join(faltan)+'.')
+            else:
+                c.execute("update sifen_config set ambiente='PRODUCCION',produccion_habilitada=1,produccion_activada_en=?,actualizado_en=? where id=1",(now(),now()));c.commit();_sifen_log('AMBIENTE','OK','PRODUCCION activada tras diagnóstico');flash('Ambiente PRODUCCIÓN activado.')
         elif accion=='certificado':
             archivo=request.files.get('certificado');password=request.form.get('password','')
             if not archivo or not archivo.filename: flash('Seleccione un certificado .p12 o .pfx.')
@@ -3679,16 +3722,16 @@ def configuracion_sifen():
             try:
                 import requests
                 if not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']): raise ValueError('Primero instale el certificado .p12/.pfx.')
-                url=SIFEN_TEST_BASE+'/de/ws/consultas/consulta.wsdl?wsdl'
+                url=_sifen_base(cfg)+'/de/ws/consultas/consulta.wsdl?wsdl'
                 resp=requests.get(url,cert=(cfg['cert_path'],cfg['key_path']),timeout=20)
                 ok=200 <= resp.status_code < 400; estado='OK' if ok else 'ERROR';detalle=f'HTTP {resp.status_code} - {url}'
                 c.execute('update sifen_config set ultimo_test=?,ultimo_estado=?,ultimo_detalle=? where id=1',(now(),estado,detalle));c.commit();_sifen_log('CONEXION_MTLS',estado,detalle)
-                flash(('Conexión SIFEN TEST realizada correctamente.' if ok else 'SIFEN respondió con error: ')+detalle)
+                flash(('Conexión SIFEN '+str(cfg['ambiente'] or 'TEST')+' realizada correctamente.' if ok else 'SIFEN respondió con error: ')+detalle)
             except Exception as e:
                 detalle=str(e);c.execute("update sifen_config set ultimo_test=?,ultimo_estado='ERROR',ultimo_detalle=? where id=1",(now(),detalle));c.commit();_sifen_log('CONEXION_MTLS','ERROR',detalle);flash('Prueba de conexión fallida: '+detalle)
         c.close();return redirect('/configuracion/sifen')
-    cfg=c.execute('select * from sifen_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();c.close()
-    return render_template('sifen_config.html',cfg=cfg,logs=logs,puntos=puntos,test_base=SIFEN_TEST_BASE)
+    cfg=c.execute('select * from sifen_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();diagnostico=_sifen_diagnostico(c,cfg);base_actual=_sifen_base(cfg);c.close()
+    return render_template('sifen_config.html',cfg=cfg,logs=logs,puntos=puntos,test_base=SIFEN_TEST_BASE,prod_base=SIFEN_PROD_BASE,base_actual=base_actual,diagnostico=diagnostico)
 
 ROUTE_MODULE.update({'configuracion_sifen':'CONFIG_SANATORIO'})
 
