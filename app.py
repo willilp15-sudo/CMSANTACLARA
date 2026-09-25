@@ -788,46 +788,79 @@ def cuentas_pendientes_proveedores():
 @app.route('/compras/pagos-proveedores',methods=['GET','POST'])
 def pagos_proveedores():
  c=db()
+ # V13.9.69: un pago puede aplicarse a varias facturas del mismo proveedor y moneda.
+ c.execute("""CREATE TABLE IF NOT EXISTS pagos_proveedores_lotes(id INTEGER PRIMARY KEY,fecha TEXT,proveedor_id INTEGER,documento TEXT,medio TEXT,moneda TEXT,tipo_cambio REAL,importe REAL,importe_pyg REAL,cuenta_bancaria_id INTEGER,cuenta_debe TEXT,cuenta_haber TEXT,asiento_id INTEGER,creado_por TEXT,creado_en TEXT)""")
+ c.execute("""CREATE TABLE IF NOT EXISTS pagos_proveedores_det(id INTEGER PRIMARY KEY,lote_id INTEGER,cxp_id INTEGER,compra_id INTEGER,factura TEXT,importe_aplicado REAL,saldo_anterior REAL,saldo_restante REAL)""")
+ c.commit()
  if request.method=='POST':
   try:
-   cxpid=int(request.form['cxp_id']);r=c.execute("""select x.*,t.nombre proveedor from cxp x join terceros t on t.id=x.tercero_id where x.id=?""",(cxpid,)).fetchone()
-   if not r or float(r['saldo'] or 0)<=0:raise ValueError('La cuenta seleccionada no tiene saldo pendiente.')
-   imp=float(request.form['importe']); 
-   if imp<=0 or imp>float(r['saldo'])+0.0001:raise ValueError('El importe debe ser mayor a cero y no superar el saldo pendiente.')
-   fecha=request.form['fecha'];mon=r['moneda'] or 'PYG';lado=request.form.get('lado_cotizacion','VENTA')
-   tc=1.0 if mon=='PYG' else tc_dnit(c,fecha,mon,lado);pyg=round(imp*tc,2);orig=round(imp*float(r['tipo_cambio_origen'] or 1),2)
-   debe=request.form['cuenta_debe'];medio=request.form['medio'];cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None
-   if medio!='EFECTIVO' and not cuenta_id:raise ValueError('Seleccione la cuenta bancaria de donde sale el dinero.')
-   haber,_=_cuenta_financiera(c,medio,cuenta_id)
-   if debe==haber:raise ValueError('Cuenta Debe y Cuenta Haber deben ser diferentes.')
-   for cuenta in (debe,haber):
-    if not c.execute('select 1 from plan_cuentas where codigo=? and imputable=1',(cuenta,)).fetchone():raise ValueError('Cuenta contable inválida: '+cuenta)
-   lines=[(debe,orig,0,imp,'Cancelación cuenta proveedor'),(haber,0,pyg,imp,'Pago a proveedor')]
+   proveedor_id=int(request.form['proveedor_id']); ids=[int(x) for x in request.form.getlist('cxp_ids')]
+   if not ids: raise ValueError('Seleccione al menos una factura pendiente.')
+   qs=','.join('?'*len(ids)); rows=c.execute(f"select x.*,coalesce(cp.numero,'-') factura,t.nombre proveedor from cxp x join terceros t on t.id=x.tercero_id left join compras cp on cp.id=x.compra_id where x.id in ({qs}) and x.tercero_id=? and x.saldo>0.0001",ids+[proveedor_id]).fetchall()
+   if len(rows)!=len(ids): raise ValueError('Una o más cuentas no pertenecen al proveedor seleccionado o ya no tienen saldo.')
+   monedas={r['moneda'] or 'PYG' for r in rows}
+   if len(monedas)!=1: raise ValueError('Para un mismo pago seleccione facturas de una sola moneda.')
+   mon=next(iter(monedas)); aplicaciones=[]
+   for r in rows:
+    imp=float(request.form.get('aplica_'+str(r['id'])) or 0)
+    if imp<0 or imp>float(r['saldo'])+0.0001: raise ValueError('Aplicación inválida para factura '+str(r['factura']))
+    if imp>0: aplicaciones.append((r,imp))
+   if not aplicaciones: raise ValueError('Indique un importe a aplicar en al menos una factura.')
+   total=sum(x[1] for x in aplicaciones); fecha=request.form['fecha']; lado=request.form.get('lado_cotizacion','VENTA'); tc=1.0 if mon=='PYG' else tc_dnit(c,fecha,mon,lado); pyg=round(total*tc,2)
+   medio=request.form['medio']; cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None
+   if medio!='EFECTIVO' and not cuenta_id: raise ValueError('Seleccione la cuenta bancaria de donde sale el dinero.')
+   haber,_=_cuenta_financiera(c,medio,cuenta_id); debe=request.form.get('cuenta_debe') or '2.1.01'
+   if debe==haber: raise ValueError('Cuenta Debe y Cuenta Haber deben ser diferentes.')
+   orig=sum(imp*float(r['tipo_cambio_origen'] or 1) for r,imp in aplicaciones)
+   lines=[(debe,orig,0,total,'Cancelación de '+str(len(aplicaciones))+' factura(s) proveedor'),(haber,0,pyg,total,'Pago a proveedor')]
    dif=pyg-orig
-   if abs(dif)>0.01:
-    # Conserva el criterio contable existente del ERP para pagos en moneda extranjera.
-    if dif>0:lines.append(('5.2.01',dif,0,0,'Pérdida por diferencia de cambio'))
-    else:lines.append(('4.2.01',0,-dif,0,'Ganancia por diferencia de cambio'))
-   aid=asiento(c,fecha,'Pago a proveedor '+r['proveedor'],'PAGO_PROVEEDOR',0,mon,tc,lines)
-   cur=c.execute("""insert into pagos_proveedores(fecha,cxp_id,proveedor_id,compra_id,documento,medio,moneda,importe,tipo_cambio,importe_pyg,cuenta_debe,cuenta_haber,asiento_id,creado_por,creado_en)
-    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(fecha,cxpid,r['tercero_id'],r['compra_id'],request.form.get('documento'),request.form['medio'],mon,imp,tc,pyg,debe,haber,aid,session.get('user'),now()))
-   pid=cur.lastrowid;c.execute('update asientos set origen_id=? where id=?',(pid,aid))
-   c.execute("update cxp set saldo=saldo-?,estado=case when saldo-?<=0.0001 then 'PAGADO' else 'PENDIENTE' end where id=?",(imp,imp,cxpid))
-   c.execute("""insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id)
-    values(?,'EGRESO',?,?,?,?,?,'Pago a proveedor','PAGO_PROVEEDOR',?,?)""",(fecha,request.form['medio'],mon,tc,imp,pyg,pid,cuenta_id))
-   c.execute('update pagos_proveedores set cuenta_bancaria_id=? where id=?',(cuenta_id,pid))
-   c.commit();audit('PAGO_PROVEEDOR',f'Pago {pid} / CxP {cxpid} / {imp} {mon}');flash('Pago a proveedor registrado y contabilizado.')
+   if abs(dif)>0.01: lines.append(('5.2.01',dif,0,0,'Pérdida por diferencia de cambio') if dif>0 else ('4.2.01',0,-dif,0,'Ganancia por diferencia de cambio'))
+   cur=c.execute("insert into pagos_proveedores_lotes(fecha,proveedor_id,documento,medio,moneda,tipo_cambio,importe,importe_pyg,cuenta_bancaria_id,cuenta_debe,cuenta_haber,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,proveedor_id,request.form.get('documento',''),medio,mon,tc,total,pyg,cuenta_id,debe,haber,session.get('user'),now())); lote=cur.lastrowid
+   aid=asiento(c,fecha,'Pago múltiple a proveedor','PAGO_PROVEEDOR_MULTIPLE',lote,mon,tc,lines);c.execute('update pagos_proveedores_lotes set asiento_id=? where id=?',(aid,lote))
+   for r,imp in aplicaciones:
+    ant=float(r['saldo']);rest=max(0,ant-imp);c.execute("update cxp set saldo=?,estado=? where id=?",(rest,'PAGADO' if rest<=0.0001 else 'PENDIENTE',r['id']));c.execute("insert into pagos_proveedores_det(lote_id,cxp_id,compra_id,factura,importe_aplicado,saldo_anterior,saldo_restante) values(?,?,?,?,?,?,?)",(lote,r['id'],r['compra_id'],r['factura'],imp,ant,rest))
+   c.execute("insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,'EGRESO',?,?,?,?,?,'Pago múltiple a proveedor','PAGO_PROVEEDOR_MULTIPLE',?,?)",(fecha,medio,mon,tc,total,pyg,lote,cuenta_id));c.commit();audit('PAGO_PROVEEDOR_MULTIPLE',f'Lote {lote} / {len(aplicaciones)} facturas / {total} {mon}');flash(f'Pago registrado y aplicado a {len(aplicaciones)} factura(s).')
+  except Exception as ex: c.rollback();flash(str(ex))
+  c.close();return redirect('/compras/pagos-proveedores?proveedor_id='+request.form.get('proveedor_id',''))
+ proveedor_id=int(request.args.get('proveedor_id') or 0); proveedores=c.execute("select distinct t.id,t.nombre,t.ruc from cxp x join terceros t on t.id=x.tercero_id where x.saldo>0.0001 order by t.nombre").fetchall(); pendientes=[]
+ if proveedor_id: pendientes=c.execute("select x.*,coalesce(cp.numero,'-') factura,cp.fecha fecha_compra,t.nombre proveedor from cxp x join terceros t on t.id=x.tercero_id left join compras cp on cp.id=x.compra_id where x.tercero_id=? and x.saldo>0.0001 order by cp.fecha,x.id",(proveedor_id,)).fetchall()
+ cuentas=c.execute('select * from plan_cuentas where imputable=1 order by codigo').fetchall();bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();hist=c.execute("select l.*,t.nombre proveedor,(select count(*) from pagos_proveedores_det d where d.lote_id=l.id) documentos from pagos_proveedores_lotes l join terceros t on t.id=l.proveedor_id order by l.id desc limit 100").fetchall();c.close();return render_template('supplier_payments.html',pendientes=pendientes,proveedores=proveedores,proveedor_id=proveedor_id,cuentas=cuentas,bancos=bancos,pagos=hist)
+
+@app.route('/ventas/cobros-clientes',methods=['GET','POST'])
+def cobros_clientes_multiples():
+ c=db();c.execute("""CREATE TABLE IF NOT EXISTS cobros_clientes_lotes(id INTEGER PRIMARY KEY,fecha TEXT,cliente_id INTEGER,referencia TEXT,medio TEXT,moneda TEXT,tipo_cambio REAL,importe REAL,importe_pyg REAL,cuenta_bancaria_id INTEGER,terminal_pos_id INTEGER,asiento_id INTEGER,creado_por TEXT,creado_en TEXT)""");c.execute("""CREATE TABLE IF NOT EXISTS cobros_clientes_det(id INTEGER PRIMARY KEY,lote_id INTEGER,cxc_id INTEGER,venta_id INTEGER,factura TEXT,importe_aplicado REAL,saldo_anterior REAL,saldo_restante REAL)""");c.commit()
+ if request.method=='POST':
+  try:
+   cliente_id=int(request.form['cliente_id']);ids=[int(x) for x in request.form.getlist('cxc_ids')]
+   if not ids: raise ValueError('Seleccione al menos una factura pendiente.')
+   qs=','.join('?'*len(ids));rows=c.execute(f"select x.*,coalesce(v.numero,'-') factura,t.nombre cliente from cxc x join terceros t on t.id=x.tercero_id left join ventas v on v.id=x.venta_id where x.id in ({qs}) and x.tercero_id=? and x.saldo>0.0001",ids+[cliente_id]).fetchall()
+   if len(rows)!=len(ids): raise ValueError('Una o más cuentas no pertenecen al cliente seleccionado o ya no tienen saldo.')
+   monedas={r['moneda'] or 'PYG' for r in rows}
+   if len(monedas)!=1: raise ValueError('Para un mismo cobro seleccione facturas de una sola moneda.')
+   mon=next(iter(monedas)); aplicaciones=[]
+   for r in rows:
+    imp=float(request.form.get('aplica_'+str(r['id'])) or 0)
+    if imp<0 or imp>float(r['saldo'])+0.0001: raise ValueError('Aplicación inválida para factura '+str(r['factura']))
+    if imp>0: aplicaciones.append((r,imp))
+   if not aplicaciones: raise ValueError('Indique un importe a aplicar en al menos una factura.')
+   total=sum(x[1] for x in aplicaciones);fecha=request.form['fecha'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));pyg=round(total*tc,2);medio=request.form['medio'];cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None;pos_id=int(request.form.get('terminal_pos_id') or 0) or None
+   if medio in ('Banco','Transferencia','POS') and not cuenta_id: raise ValueError('Seleccione la cuenta bancaria receptora.')
+   if medio=='POS' and not pos_id: raise ValueError('Seleccione la terminal POS.')
+   if medio=='Efectivo' and not caja_abierta(c): raise ValueError('Debe abrir Recepción y Caja para cobrar en efectivo.')
+   cta_fin,_=_cuenta_financiera(c,medio,cuenta_id);orig=sum(imp*float(r['tipo_cambio_origen'] or 1) for r,imp in aplicaciones);lines=[(cta_fin,pyg,0,total,'Cobro de '+str(len(aplicaciones))+' factura(s)'),('1.1.02',0,orig,total,'Cancela clientes')];dif=pyg-orig
+   if abs(dif)>0.01: lines.append(('4.2.01',0,dif,0,'Ganancia cambio') if dif>0 else ('5.2.01',-dif,0,0,'Pérdida cambio'))
+   cur=c.execute("insert into cobros_clientes_lotes(fecha,cliente_id,referencia,medio,moneda,tipo_cambio,importe,importe_pyg,cuenta_bancaria_id,terminal_pos_id,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,cliente_id,request.form.get('referencia',''),medio,mon,tc,total,pyg,cuenta_id,pos_id,session.get('user'),now()));lote=cur.lastrowid;aid=asiento(c,fecha,'Cobro múltiple de cliente','COBRO_CLIENTE_MULTIPLE',lote,mon,tc,lines);c.execute('update cobros_clientes_lotes set asiento_id=? where id=?',(aid,lote))
+   for r,imp in aplicaciones:
+    ant=float(r['saldo']);rest=max(0,ant-imp);c.execute("update cxc set saldo=?,estado=? where id=?",(rest,'PAGADO' if rest<=0.0001 else 'PENDIENTE',r['id']));c.execute("insert into cobros_clientes_det(lote_id,cxc_id,venta_id,factura,importe_aplicado,saldo_anterior,saldo_restante) values(?,?,?,?,?,?,?)",(lote,r['id'],r['venta_id'],r['factura'],imp,ant,rest))
+   c.execute("insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id,terminal_pos_id) values(?,'INGRESO',?,?,?,?,?,'Cobro múltiple de cliente','COBRO_CLIENTE_MULTIPLE',?,?,?)",(fecha,medio,mon,tc,total,pyg,lote,cuenta_id,pos_id))
+   if medio=='Efectivo':
+    ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro múltiple de cliente',pyg,'COBRO_CLIENTE_MULTIPLE',lote,session.get('user')))
+   c.commit();audit('COBRO_CLIENTE_MULTIPLE',f'Lote {lote} / {len(aplicaciones)} facturas / {total} {mon}');flash(f'Cobro registrado y aplicado a {len(aplicaciones)} factura(s).')
   except Exception as ex:c.rollback();flash(str(ex))
-  c.close();return redirect('/compras/pagos-proveedores')
- q=(request.args.get('q') or '').strip();sql="""select x.*,t.nombre proveedor,t.ruc,c.numero factura,c.fecha fecha_compra
- from cxp x join terceros t on t.id=x.tercero_id left join compras c on c.id=x.compra_id where x.saldo>0.0001"""
- par=[]
- if q:
-  like='%'+q+'%';sql+=" and (t.nombre like ? collate nocase or t.ruc like ? or c.numero like ?)";par=[like,like,like]
- sql+=" order by t.nombre,c.fecha,x.id"
- pendientes=c.execute(sql,par).fetchall();cuentas=c.execute('select * from plan_cuentas where imputable=1 order by codigo').fetchall()
- pagos=c.execute("""select p.*,t.nombre proveedor,c.numero factura from pagos_proveedores p join terceros t on t.id=p.proveedor_id left join compras c on c.id=p.compra_id order by p.id desc limit 200""").fetchall();bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall()
- c.close();return render_template('supplier_payments.html',pendientes=pendientes,cuentas=cuentas,pagos=pagos,bancos=bancos,q=q)
+  c.close();return redirect('/ventas/cobros-clientes?cliente_id='+request.form.get('cliente_id',''))
+ cliente_id=int(request.args.get('cliente_id') or 0);clientes=c.execute("select distinct t.id,t.nombre,t.ruc from cxc x join terceros t on t.id=x.tercero_id where x.saldo>0.0001 order by t.nombre").fetchall();pendientes=[]
+ if cliente_id: pendientes=c.execute("select x.*,coalesce(v.numero,'-') factura,v.fecha fecha_venta,t.nombre cliente from cxc x join terceros t on t.id=x.tercero_id left join ventas v on v.id=x.venta_id where x.tercero_id=? and x.saldo>0.0001 order by v.fecha,x.id",(cliente_id,)).fetchall()
+ bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();hist=c.execute("select l.*,t.nombre cliente,(select count(*) from cobros_clientes_det d where d.lote_id=l.id) documentos from cobros_clientes_lotes l join terceros t on t.id=l.cliente_id order by l.id desc limit 100").fetchall();c.close();return render_template('customer_collections.html',pendientes=pendientes,clientes=clientes,cliente_id=cliente_id,bancos=bancos,poses=poses,cobros=hist)
 
 @app.route('/finanzas')
 def finanzas():
@@ -4550,6 +4583,58 @@ def _imp_xml_rows(data):
         if vals:rows.append(vals)
     return rows
 
+
+def _imp_legacy_biff_rows(data):
+    """Lector tolerante para hojas BIFF antiguas/fragmentarias sin cabecera OLE/BOF.
+    Algunos sistemas administrativos exportan .XLS como un flujo de registros BIFF crudo.
+    Solo acepta el archivo si logra reconstruir una tabla coherente; en caso contrario devuelve [].
+    """
+    import struct, math
+    cells={}; pos=0; records=0
+    # IDs comunes BIFF2/3/4/5 para NUMBER, LABEL, RK, BOOLERR y BLANK.
+    while pos+4 <= len(data) and records < 200000:
+        rid, ln = struct.unpack_from('<HH', data, pos)
+        if ln > 65535 or pos+4+ln > len(data):
+            # tolerancia: buscar el siguiente registro plausible
+            pos += 1; continue
+        payload=data[pos+4:pos+4+ln]; records+=1; pos += 4+ln
+        try:
+            if rid in (0x0003,0x0203,0x0403) and len(payload)>=14: # NUMBER
+                r,c=struct.unpack_from('<HH',payload,0); v=struct.unpack_from('<d',payload,6)[0]
+                if math.isfinite(v): cells[(r,c)]=v
+            elif rid in (0x0004,0x0204,0x0404) and len(payload)>=8: # LABEL
+                r,c=struct.unpack_from('<HH',payload,0)
+                # BIFF2/3 label length may be 1 or 2 bytes after XF.
+                candidates=[]
+                if len(payload)>=8:
+                    n=payload[7]; candidates.append(payload[8:8+n])
+                if len(payload)>=9:
+                    n2=struct.unpack_from('<H',payload,7)[0]; candidates.append(payload[9:9+n2])
+                raw=max(candidates,key=len) if candidates else b''
+                if raw:
+                    for enc in ('cp1252','latin1','utf-8'):
+                        try: v=raw.decode(enc).strip('\x00 '); break
+                        except Exception: v=''
+                    if v: cells[(r,c)]=v
+            elif rid in (0x027E,0x007E) and len(payload)>=10: # RK
+                r,c=struct.unpack_from('<HH',payload,0); rk=struct.unpack_from('<I',payload,6)[0]
+                if rk & 2: v=float(struct.unpack('<i',struct.pack('<I',rk))[0] >> 2)
+                else: v=struct.unpack('<d', struct.pack('<Q', (rk & 0xFFFFFFFC) << 32))[0]
+                if rk & 1: v/=100.0
+                if math.isfinite(v): cells[(r,c)]=v
+            elif rid in (0x0005,0x0205) and len(payload)>=9: # BOOLERR
+                r,c=struct.unpack_from('<HH',payload,0); cells[(r,c)]=payload[7]
+        except Exception:
+            continue
+    if len(cells)<3:return []
+    maxr=max(r for r,c in cells); maxc=max(c for r,c in cells)
+    if maxr>200000 or maxc>500:return []
+    rows=[]
+    for r in range(maxr+1):
+        row=[cells.get((r,c),'') for c in range(maxc+1)]
+        if any(str(x).strip() for x in row): rows.append(row)
+    return rows
+
 def _imp_rows(file):
     name=(file.filename or '').lower();data=file.read();vals=[]
     sig=data[:16]
@@ -4577,7 +4662,12 @@ def _imp_rows(file):
             except Exception: delim='\t' if '\t' in sample else ';'
             vals=list(csv.reader(io.StringIO(text),delimiter=delim))
         else:
-            raise ValueError('El archivo no corresponde a un XLS/XLSX/CSV/TXT/XML/HTML reconocido. Puede ser un formato binario propietario de Gasparini.')
+            # Último intento: .XLS legado exportado como flujo BIFF crudo, sin contenedor OLE.
+            # Esto cubre exportaciones antiguas que xlrd rechaza con "Expected BOF record".
+            vals=_imp_legacy_biff_rows(data)
+            if not vals:
+                firma=data[:16].hex(' ').upper()
+                raise ValueError('Formato no reconocido. El sistema intentó XLS clásico, XLSX/XLSM, CSV/TXT/TSV, XML/HTML y XLS-BIFF legado. Firma inicial: '+firma+'. Adjunte este archivo original para incorporar su variante exacta sin alterar los datos.')
     except ImportError as ex:
         raise ValueError('Falta una librería para leer este formato: '+str(ex))
     except ValueError: raise
