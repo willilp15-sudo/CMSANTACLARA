@@ -1349,7 +1349,14 @@ def init_modular():
 
 def user_has(modulo,accion='VER'):
  if not session.get('user'): return False
- c=db();r=c.execute('''select 1 from usuarios u join usuario_roles ur on ur.usuario_id=u.id join permisos_rol p on p.rol_id=ur.rol_id
+ # V13.9.74: el usuario técnico principal 'admin' es SUPERADMIN.
+ # Si está activo, tiene acceso total a todas las rutas, módulos y acciones,
+ # incluso módulos nuevos que todavía no tengan una fila en permisos_rol.
+ c=db()
+ u=c.execute('select id,usuario,activo from usuarios where usuario=? limit 1',(session['user'],)).fetchone()
+ if u and u['activo'] and str(u['usuario']).strip().lower()=='admin':
+  c.close();return True
+ r=c.execute('''select 1 from usuarios u join usuario_roles ur on ur.usuario_id=u.id join permisos_rol p on p.rol_id=ur.rol_id
  where u.usuario=? and u.activo=1 and p.modulo=? and p.accion=? and p.permitido=1 limit 1''',(session['user'],modulo,accion)).fetchone();c.close();return bool(r)
 
 @app.context_processor
@@ -4532,7 +4539,7 @@ def diagnostico_sistema():
     c.close()
     return render_template('system_diagnostics.html',checks=checks,duplicados=dup)
 
-ROUTE_MODULE.update({'notas_credito_centro':'FACTURACION','sifen_reintentar_nc':'FACTURACION','diagnostico_sistema':'CONFIGURACION','nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION','nota_credito_venta_pdf':'FACTURACION','nota_credito_compra_pdf':'COMPRAS','nota_credito_compra_aplicar':'COMPRAS'})
+ROUTE_MODULE.update({'notas_credito_centro':'FACTURACION','sifen_reintentar_nc':'FACTURACION','diagnostico_sistema':'CONFIG_SANATORIO','nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION','nota_credito_venta_pdf':'FACTURACION','nota_credito_compra_pdf':'COMPRAS','nota_credito_compra_aplicar':'COMPRAS'})
 
 # ===== V13.9.53: Tesorería integrada, anticipos y contabilización por cuenta financiera =====
 def init_v13953_tesoreria_integrada():
