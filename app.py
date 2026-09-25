@@ -4843,6 +4843,71 @@ def _imp_legacy_biff_rows(data):
         if any(str(x).strip() for x in row): rows.append(row)
     return rows
 
+def _imp_csv_field_limit():
+    """Eleva de forma segura el límite de campos CSV para exportaciones extensas de Gasparini."""
+    import csv, sys
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            return limit
+        except OverflowError:
+            limit //= 10
+
+def _imp_gasparini_compras_sin_cabecera(vals):
+    """Reconoce el CSV detallado de Compras Gasparini sin fila de encabezados.
+    Mapea únicamente campos verificables del archivo; no inventa forma de pago.
+    """
+    import re
+    if not vals or len(vals[0]) < 80:
+        return []
+    muestra=vals[:min(25,len(vals))]
+    def factura(row):
+        for v in reversed(row[-8:]):
+            t=str(v or '').strip()
+            if re.fullmatch(r'\d{3}-\d{3}-\d{6,8}',t): return t
+        return ''
+    ok=sum(1 for r in muestra if len(r)>=80 and factura(r) and len(r)>21 and str(r[2]).strip() and str(r[5]).strip() and str(r[13]).strip())
+    if ok < max(2, len(muestra)//2):
+        return []
+    out=[]
+    for r in vals:
+        if len(r)<22: continue
+        doc=factura(r)
+        if not doc: continue
+        # RUC + DV: en esta exportación aparecen cerca del final; buscar el par más plausible.
+        ruc=''
+        for i in range(max(0,len(r)-30),len(r)-1):
+            a=str(r[i] or '').strip(); b=str(r[i+1] or '').strip()
+            if re.fullmatch(r'\d{6,9}',a) and re.fullmatch(r'\d',b):
+                ruc=a+'-'+b
+        desc_iva=' '.join(str(x or '') for x in r[-20:]).lower()
+        iva=5 if '5%' in desc_iva else (10 if '10%' in desc_iva else 0)
+        clas=str(r[54] or '').strip() if len(r)>54 else ''
+        out.append({
+            'documento':doc,
+            'fecha':str(r[2] or '').strip(),
+            'ruc':ruc,
+            'tercero':str(r[5] or '').strip(),
+            'moneda':str(r[21] or '').strip() or 'Gs',
+            'tipo_cambio':'1',
+            'condicion':'CREDITO',
+            'forma_pago':'',
+            'referencia':'',
+            # Sin información de pago/cobro en este archivo: se importa pendiente completo
+            # y luego CxP puede actualizarse con el archivo específico de cuentas pendientes.
+            'saldo':'',
+            'producto_codigo':str(r[36] or '').strip() if len(r)>36 else '',
+            'producto_nombre':str(r[13] or '').strip(),
+            'clasificacion':clas,
+            'cantidad':str(r[6] or '').strip(),
+            'costo_unitario':str(r[8] or '').strip(),
+            'importe':str(r[10] or '').strip(),
+            'iva_pct':str(iva),
+            '_gasparini_detallado':'1',
+        })
+    return out
+
 def _imp_rows(file):
     name=(file.filename or '').lower();data=file.read();vals=[]
     sig=data[:16]
@@ -4865,6 +4930,7 @@ def _imp_rows(file):
             vals=_imp_html_rows(text)
         elif name.endswith(('.csv','.txt','.tsv','.xls')) and text is not None:
             import csv
+            _imp_csv_field_limit()
             sample=text[:8192]
             try: delim=csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
             except Exception: delim='\t' if '\t' in sample else ';'
@@ -4882,6 +4948,9 @@ def _imp_rows(file):
     except Exception as ex:
         raise ValueError('No se pudo interpretar el archivo. Formato real no reconocido: '+str(ex))
     if not vals:return []
+    gas_rows=_imp_gasparini_compras_sin_cabecera(vals)
+    if gas_rows:
+        return gas_rows
     best_i=0;best_score=-1
     for i,row in enumerate(vals[:40]):
         keys=[_IMP_ALIASES.get(_imp_key(x),_imp_key(x)) for x in row]
@@ -5084,7 +5153,7 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
  try:
   for (doc,_),grp in groups.items():
    try:
-    r0=grp[0];terid=_imp_tercero_tx(c,r0,'PROVEEDOR' if tipo=='COMPRA' else 'CLIENTE');fecha=_imp_fecha(r0.get('fecha'));mon=(_imp_norm(r0.get('moneda')) or 'PYG').upper();tc=_imp_num(r0.get('tipo_cambio')) or 1
+    r0=grp[0];terid=_imp_tercero_tx(c,r0,'PROVEEDOR' if tipo=='COMPRA' else 'CLIENTE');fecha=_imp_fecha(r0.get('fecha'));mon=(_imp_norm(r0.get('moneda')) or 'PYG').upper();mon='PYG' if mon in ('GS','G$','GUARANI','GUARANIES') else mon;tc=_imp_num(r0.get('tipo_cambio')) or 1
     condicion=(_imp_norm(r0.get('condicion')) or ('CREDITO' if _imp_num(r0.get('saldo'))>0 else 'CONTADO')).upper();condicion='CREDITO' if 'CRED' in condicion else ('CUOTAS' if 'CUOTA' in condicion else 'CONTADO')
     forma=_imp_norm(r0.get('forma_pago')) or None;ref=_imp_norm(r0.get('referencia')) or None
     detalles=[];total=grav=iva=exento=g10=i10=g5=i5=0.0
@@ -5125,7 +5194,7 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
      if tipo=='COMPRA':cur=c.execute('insert into compras(fecha,proveedor_id,numero,moneda,tipo_cambio,total,total_pyg,estado) values(?,?,?,?,?,?,?,?)',(fecha,terid,doc,mon,tc,total,total*tc,'CONFIRMADA'))
      else:cur=c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,total,total_pyg,estado) values(?,?,?,?,?,?,?,?)',(fecha,terid,doc,mon,tc,total,total*tc,'CONFIRMADA'))
      xid=cur.lastrowid;nuevos+=1;accion='NUEVO'
-    saldo_importado=_imp_num(r0.get('saldo')) if _imp_norm(r0.get('saldo'))!='' else (total if condicion!='CONTADO' else 0)
+    saldo_importado=_imp_num(r0.get('saldo')) if _imp_norm(r0.get('saldo'))!='' else (total if (condicion!='CONTADO' or r0.get('_gasparini_detallado')=='1') else 0)
     saldo=max(0,min(total,saldo_importado));entrega=max(0,total-saldo)
     if tipo=='COMPRA':
      c.execute('''update compras set fecha=?,proveedor_id=?,numero=?,moneda=?,tipo_cambio=?,gravado=?,iva=?,exento=?,total=?,total_pyg=?,gravado_10=?,iva_10=?,gravado_5=?,iva_5=?,exento_iva=?,condicion_pago=?,fecha_vencimiento=?,entrega_inicial=?,medio_pago_inicial=?,referencia_pago=?,timbrado=?,timbrado_vencimiento=?,estado='CONFIRMADA' where id=?''',(fecha,terid,doc,mon,tc,grav,iva,exento,total,total*tc,g10,i10,g5,i5,exento,condicion,_imp_fecha(r0.get('fecha_vencimiento')) if _imp_norm(r0.get('fecha_vencimiento')) else None,entrega,forma,ref,_imp_norm(r0.get('timbrado')),_imp_norm(r0.get('timbrado_vencimiento')),xid))

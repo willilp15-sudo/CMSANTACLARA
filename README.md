@@ -479,3 +479,6 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - Se agrega cliente Windows independiente en `llamador_windows/` para pantalla/voz en sala de espera.
 - Histórico diario de llamadas por paciente, médico, consultorio, estado y dispositivo.
 - Autenticación del dispositivo mediante `LLAMADOR_TOKEN` configurado en Render y en el cliente.
+
+## V13.9.75
+Corrección del importador Gasparini para Compras detalladas CSV sin encabezados y campos extensos. El layout real entregado fue validado contra el archivo de muestra `compras detallada.csv`.
