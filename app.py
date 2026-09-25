@@ -4177,6 +4177,18 @@ def contabilidad_importar(tipo):
 
 ROUTE_MODULE.update({'contabilidad_intercambio':'CONTABILIDAD','contabilidad_plantilla':'CONTABILIDAD','plan_contable_excel':'CONTABILIDAD','plan_contable_csv':'CONTABILIDAD','contabilidad_importar':'CONTABILIDAD'})
 
+# ===== V13.9.72: Monitor SIFEN avanzado y corrección controlada =====
+def init_v13972_monitor_sifen():
+    c=db()
+    for tab in ('notas_credito_ventas','notas_debito_ventas'):
+        try:
+            cols={r['name'] for r in c.execute('pragma table_info('+tab+')').fetchall()}
+            for col,defn in [('sifen_codigo_error','TEXT'),('sifen_mensaje_error','TEXT'),('sifen_ultimo_intento','TEXT'),('sifen_intentos','INTEGER DEFAULT 0')]:
+                if col not in cols:c.execute(f'alter table {tab} add column {col} {defn}')
+        except Exception: pass
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.72-monitor-sifen-avanzado',?)",(now(),));c.commit();c.close()
+init_v13972_monitor_sifen()
+
 # ===== V13.9.47: Control fiscal, NC ventas/compras y monitor SIFEN =====
 def init_v13947_control_fiscal():
     c=db()
@@ -4425,18 +4437,61 @@ def nota_credito_compra_pdf(nid):
 
 @app.get('/sifen/monitor')
 def sifen_monitor():
-    c=db();estado=(request.args.get('estado') or '').strip().upper();q=(request.args.get('q') or '').strip();where=["coalesce(v.estado_sifen,'NO_ENVIADO') not in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN')"];args=[]
-    if estado:where.append("upper(coalesce(v.estado_sifen,'NO_ENVIADO'))=?");args.append(estado)
-    if q:where.append("(v.numero like ? or coalesce(v.cdc,'') like ? or coalesce(t.nombre,'') like ?)");args += ['%'+q+'%']*3
-    rows=c.execute("select v.*,t.nombre cliente from ventas v left join terceros t on t.id=v.cliente_id where "+' and '.join(where)+" order by v.id desc limit 500",args).fetchall()
-    ncs=c.execute("select n.*,v.numero factura,t.nombre cliente from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where coalesce(n.estado_sifen,'NO_ENVIADA') not in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA') order by n.id desc limit 200").fetchall();c.close();return render_template('sifen_monitor.html',rows=rows,ncs=ncs,estado=estado,q=q)
+    c=db(); estado=(request.args.get('estado') or '').strip().upper(); q=(request.args.get('q') or '').strip(); tipo=(request.args.get('tipo') or '').strip().upper(); fecha=(request.args.get('fecha') or '').strip()
+    docs=[]
+    def add_doc(r,tipo_doc,tipo_codigo,edit_url,view_url,retry_url):
+        d=dict(r); d.update(tipo_doc=tipo_doc,tipo_codigo=tipo_codigo,edit_url=edit_url,view_url=view_url,retry_url=retry_url); docs.append(d)
+    wr=[];args=[]
+    if estado: wr.append("upper(coalesce(v.estado_sifen,'NO_ENVIADO'))=?");args.append(estado)
+    if fecha: wr.append("substr(coalesce(v.fecha,''),1,10)=?");args.append(fecha)
+    if q: wr.append("(v.numero like ? or coalesce(v.cdc,'') like ? or coalesce(t.nombre,'') like ? or coalesce(v.sifen_mensaje_error,'') like ?)");args += ['%'+q+'%']*4
+    if tipo in ('','FE'):
+        sql="select v.id,v.numero,v.fecha,v.cdc,v.estado_sifen,v.sifen_intentos,v.sifen_ultimo_intento,v.sifen_codigo_error,v.sifen_mensaje_error,t.nombre cliente,'' lote from ventas v left join terceros t on t.id=v.cliente_id"
+        if wr: sql+=' where '+' and '.join(wr)
+        for r in c.execute(sql+' order by v.id desc limit 500',args).fetchall(): add_doc(r,'Factura electrónica','01',f'/sifen/monitor/FE/{r["id"]}/corregir',f'/ventas/{r["id"]}/factura',f'/sifen/monitor/venta/{r["id"]}/reintentar')
+    for tab,label,code,key,pdf,retry in [('notas_credito_ventas','Nota de Crédito','05','NCE','/notas-credito/ventas/{}/pdf','/sifen/monitor/nc/{}/reintentar'),('notas_debito_ventas','Nota de Débito','06','NDE','/notas-debito/ventas/{}/pdf','/sifen/monitor/nd/{}/reintentar')]:
+        if tipo not in ('',key): continue
+        cols={x['name'] for x in c.execute('pragma table_info('+tab+')').fetchall()}
+        ec="coalesce(n.sifen_codigo_error,'')" if 'sifen_codigo_error' in cols else "''"; em="coalesce(n.sifen_mensaje_error,'')" if 'sifen_mensaje_error' in cols else "''"; si="coalesce(n.sifen_intentos,0)" if 'sifen_intentos' in cols else '0'; ul="coalesce(n.sifen_ultimo_intento,'')" if 'sifen_ultimo_intento' in cols else "''"
+        sql=f"select n.id,n.numero,n.fecha,n.cdc,n.estado_sifen,{si} sifen_intentos,{ul} sifen_ultimo_intento,{ec} sifen_codigo_error,{em} sifen_mensaje_error,t.nombre cliente,'' lote from {tab} n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where 1=1"; a=[]
+        if estado: sql+=" and upper(coalesce(n.estado_sifen,'NO_ENVIADO'))=?";a.append(estado)
+        if fecha: sql+=" and substr(coalesce(n.fecha,''),1,10)=?";a.append(fecha)
+        if q: sql+=f" and (n.numero like ? or coalesce(n.cdc,'') like ? or coalesce(t.nombre,'') like ? or {em} like ?)";a += ['%'+q+'%']*4
+        for r in c.execute(sql+' order by n.id desc limit 300',a).fetchall(): add_doc(r,label,code,f'/sifen/monitor/{key}/{r["id"]}/corregir',pdf.format(r['id']),retry.format(r['id']))
+    docs.sort(key=lambda x:(str(x.get('fecha') or ''),int(x.get('id') or 0)),reverse=True); c.close()
+    return render_template('sifen_monitor.html',docs=docs,estado=estado,q=q,tipo=tipo,fecha=fecha)
 
-@app.post('/sifen/monitor/venta/<int:venta_id>/reintentar')
-def sifen_reintentar_venta(venta_id):
-    c=db();v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
-    if not v:c.close();return ('No encontrada',404)
-    # Esta versión no declara envío exitoso sin respuesta real del WS.
-    c.execute("update ventas set sifen_intentos=coalesce(sifen_intentos,0)+1,sifen_ultimo_intento=?,estado_sifen=case when estado_sifen='RECHAZADO' then 'PENDIENTE_REENVIO' else coalesce(estado_sifen,'NO_ENVIADO') end where id=?",(now(),venta_id));c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'REENVIO','PENDIENTE',f'Factura {v["numero"]}: solicitud de reenvío registrada; requiere transmisor XML/WS SIFEN activo'));c.commit();c.close();flash('Reintento registrado en el monitor. No se marcará como aprobado sin respuesta real de SIFEN.');return redirect('/sifen/monitor')
+@app.route('/sifen/monitor/<tipo>/<int:doc_id>/corregir',methods=['GET','POST'])
+def sifen_corregir_documento(tipo,doc_id):
+    tipo=tipo.upper(); tablas={'FE':'ventas','NCE':'notas_credito_ventas','NDE':'notas_debito_ventas'}
+    if tipo not in tablas:return ('Tipo no válido',400)
+    c=db(); tab=tablas[tipo]
+    if tipo=='FE': doc=c.execute("select v.*,t.nombre cliente,t.ruc cliente_ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(doc_id,)).fetchone()
+    else: doc=c.execute(f"select n.*,v.cliente_id,t.nombre cliente,t.ruc cliente_ruc from {tab} n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where n.id=?",(doc_id,)).fetchone()
+    if not doc:c.close();return ('Documento no encontrado',404)
+    if request.method=='POST':
+        try:
+            # Datos del receptor sí pueden corregirse localmente. Número/CDC/totales no se alteran desde este monitor.
+            cliente_id=doc['cliente_id']; nombre=(request.form.get('cliente') or '').strip(); ruc=(request.form.get('ruc') or '').strip()
+            if cliente_id and (nombre or ruc): c.execute('update terceros set nombre=coalesce(nullif(?,\'\'),nombre),ruc=coalesce(nullif(?,\'\'),ruc) where id=?',(nombre,ruc,cliente_id))
+            cols={x['name'] for x in c.execute('pragma table_info('+tab+')').fetchall()}
+            sets=[];vals=[]
+            for fld in ('sifen_codigo_error','sifen_mensaje_error'):
+                if fld in cols: sets.append(fld+'=?');vals.append('')
+            if 'estado_sifen' in cols: sets.append("estado_sifen='PENDIENTE_REENVIO'")
+            if sets: c.execute('update '+tab+' set '+','.join(sets)+' where id=?',vals+[doc_id])
+            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),tipo+'_CORRECCION','PENDIENTE_REENVIO',f'{tipo} {doc["numero"]}: corrección local de receptor por {session.get("user") or "usuario"}; CDC/número/importe preservados'))
+            c.commit(); flash('Corrección guardada. El documento quedó PENDIENTE_REENVIO. Debe regenerarse/firmarse/transmitirse con el transmisor SIFEN real antes de considerarlo aceptado.'); c.close(); return redirect('/sifen/monitor')
+        except Exception as e:c.rollback();flash(str(e))
+    c.close(); return render_template('sifen_correct_document.html',doc=doc,tipo=tipo)
+
+@app.post('/sifen/monitor/nd/<int:nid>/reintentar')
+def sifen_reintentar_nd(nid):
+    c=db();n=c.execute('select * from notas_debito_ventas where id=?',(nid,)).fetchone()
+    if not n:c.close();return ('Nota de Débito no encontrada',404)
+    c.execute("update notas_debito_ventas set estado_sifen='PENDIENTE_REENVIO',sifen_intentos=coalesce(sifen_intentos,0)+1,sifen_ultimo_intento=? where id=?",(now(),nid))
+    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'NDE_REENVIO','PENDIENTE_REENVIO',f'NDE {n["numero"]}: reenvío solicitado; pendiente de transmisor XML/firma/WS SIFEN'))
+    c.commit();c.close();flash('Nota de Débito colocada en PENDIENTE_REENVIO.');return redirect('/sifen/monitor')
 
 
 # ===== V13.9.52: Centro de Notas de Crédito + diagnóstico SIFEN =====
@@ -5114,3 +5169,5 @@ def intercambio_transacciones_plantilla(tipo):
  bio=io.BytesIO();wb.save(bio);bio.seek(0);return send_file(bio,as_attachment=True,download_name=f'plantilla_{tipo.lower()}_detallada.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 ROUTE_MODULE.update({'intercambio_transacciones':'COMPRAS','intercambio_transacciones_plantilla':'COMPRAS'})
+
+ROUTE_MODULE.update({'sifen_corregir_documento':'FACTURACION','sifen_reintentar_nd':'FACTURACION'})
