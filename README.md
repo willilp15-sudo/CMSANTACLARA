@@ -418,3 +418,17 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - Cuentas por Cobrar: conserva botón Importar / actualizar CxC.
 - Cuentas por Pagar: botón Importar / actualizar CxP visible también en la pantalla específica de cuentas pendientes por proveedor.
 - La importación existente actualiza cuentas identificadas y mantiene auditoría de cambios.
+
+
+## V13.9.62 — Importador Gasparini XLS y detección flexible
+- CxC/CxP admite XLS (Excel 97-2003), XLSX, CSV y TXT.
+- Detecta automáticamente la fila de encabezados aunque el reporte tenga títulos previos.
+- Reconoce variantes de Documento, Factura, Comprobante, RUC, Cliente/Proveedor, Importe y Saldo.
+- CSV admite UTF-8 y Windows-1252.
+- Si no encuentra Documento, informa los encabezados detectados en vez de marcar cientos de filas individualmente.
+
+
+## V13.9.63 — Corrección alta de aseguradoras
+- Corrige error HTTP 500 al agregar una aseguradora.
+- Causa: sentencia INSERT de terceros tenía cinco marcadores para cuatro valores después del tipo CLIENTE.
+- Conserva edición de aseguradoras, visaciones y relaciones históricas.

@@ -890,7 +890,7 @@ def config_sanatorio():
    c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,int(request.form['medico_id'])))
    audit('EDITAR_MEDICO',request.form['medico_id'])
   elif k=='aseguradora':
-   cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,?,?)",(request.form['ruc'],request.form['nombre'],request.form.get('telefono'),request.form['moneda']))
+   cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,?)",(request.form['ruc'],request.form['nombre'],request.form.get('telefono'),request.form['moneda']))
    aid=c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda,nombre_comercial,telefono,email,direccion,contacto,datos_facturacion,convenio,observaciones,activo) values(?,?,?,?,?,?,?,?,?,?,?,?,1)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda'],request.form.get('nombre_comercial'),request.form.get('telefono'),request.form.get('email'),request.form.get('direccion'),request.form.get('contacto'),request.form.get('datos_facturacion'),request.form.get('convenio'),request.form.get('observaciones'))).lastrowid
    audit_change(c,'CREAR','ASEGURADORAS',aid,{},dict(request.form))
   elif k=='actualizar_aseguradora':
@@ -3877,7 +3877,7 @@ def plan_contable_csv():
 def contabilidad_importar(tipo):
     if tipo not in ('plan','diario'): return ('Tipo de importación no admitido',404)
     f=request.files.get('archivo')
-    if not f or not f.filename: flash('Seleccione un archivo XLSX, CSV o TXT.'); return redirect('/contabilidad/intercambio')
+    if not f or not f.filename: flash('Seleccione un archivo XLS, XLSX, CSV o TXT.'); return redirect('/contabilidad/intercambio')
     confirmar=request.form.get('confirmar')=='1'; c=None
     try:
         tabla=_leer_tabla_subida(f)
@@ -4357,33 +4357,91 @@ if __name__=='__main__':
 # ===== V13.9.58 - Importacion / actualizacion CxC y CxP =====
 def _imp_norm(v):
     return str(v or '').strip()
+
+def _imp_key(v):
+    """Normaliza encabezados de Gasparini/Excel sin depender de tildes o puntuación."""
+    import re, unicodedata
+    s=unicodedata.normalize('NFKD', _imp_norm(v)).encode('ascii','ignore').decode('ascii').lower()
+    s=s.replace('nº','nro').replace('n°','nro').replace('numero','numero')
+    s=re.sub(r'[^a-z0-9]+','_',s).strip('_')
+    return s
+
 def _imp_num(v):
     if v is None or v=='': return 0.0
     if isinstance(v,(int,float)): return float(v)
-    s=str(v).strip().replace('Gs.','').replace('₲','').replace(' ','')
+    s=str(v).strip().replace('Gs.','').replace('Gs','').replace('₲','').replace(' ','')
     if ',' in s and '.' in s:
-        s=s.replace('.','').replace(',','.')
+        # Paraguay: 1.234.567,89
+        if s.rfind(',') > s.rfind('.'):
+            s=s.replace('.','').replace(',','.')
+        else:
+            s=s.replace(',','')
     elif ',' in s: s=s.replace(',','.')
+    elif s.count('.')>1: s=s.replace('.','')
     return float(s or 0)
+
+_IMP_ALIASES={
+ 'ruc':'ruc','ruc_ci':'ruc','rucci':'ruc','ci_ruc':'ruc','documento_tercero':'ruc','cliente_ruc':'ruc','proveedor_ruc':'ruc','nro_ruc':'ruc',
+ 'razon_social':'tercero','razon_social_nombre':'tercero','cliente':'tercero','proveedor':'tercero','nombre':'tercero','denominacion':'tercero','tercero':'tercero',
+ 'documento':'documento','factura':'documento','numero':'documento','nro':'documento','nro_factura':'documento','numero_factura':'documento','factura_nro':'documento',
+ 'nro_documento':'documento','numero_documento':'documento','documento_nro':'documento','nro_comprobante':'documento','numero_comprobante':'documento',
+ 'comprobante':'documento','comprobante_nro':'documento','nro_doc':'documento','num_doc':'documento','doc_nro':'documento','nro_cuenta':'documento',
+ 'fecha':'fecha','fecha_documento':'fecha','fecha_factura':'fecha','fecha_emision':'fecha','emision':'fecha',
+ 'moneda':'moneda','cod_moneda':'moneda','codigo_moneda':'moneda',
+ 'tc':'tipo_cambio','tipo_cambio':'tipo_cambio','tipo_cambio_origen':'tipo_cambio','cotizacion':'tipo_cambio','cambio':'tipo_cambio',
+ 'importe':'importe','monto':'importe','total':'importe','importe_total':'importe','monto_total':'importe','valor_total':'importe','deuda_original':'importe',
+ 'saldo':'saldo','saldo_pendiente':'saldo','saldo_actual':'saldo','saldo_documento':'saldo','pendiente':'saldo','importe_pendiente':'saldo','monto_pendiente':'saldo'
+}
+
 def _imp_rows(file):
-    name=(file.filename or '').lower()
-    data=file.read()
+    name=(file.filename or '').lower();data=file.read();vals=[]
     if name.endswith('.xlsx'):
         from openpyxl import load_workbook
         wb=load_workbook(io.BytesIO(data),data_only=True,read_only=True);ws=wb.active
         vals=list(ws.iter_rows(values_only=True))
+    elif name.endswith('.xls'):
+        try:
+            import xlrd
+        except ImportError:
+            raise ValueError('El servidor no tiene habilitado XLS. Actualice requirements.txt con xlrd.')
+        try:
+            book=xlrd.open_workbook(file_contents=data);sh=book.sheet_by_index(0)
+            vals=[sh.row_values(i) for i in range(sh.nrows)]
+        except Exception as ex:
+            raise ValueError('No se pudo leer el archivo XLS: '+str(ex))
     elif name.endswith('.csv') or name.endswith('.txt'):
         import csv
-        raw=data.decode('utf-8-sig',errors='replace'); sample=raw[:4096]
+        # Gasparini puede exportar ANSI/Windows-1252 además de UTF-8.
+        try: raw=data.decode('utf-8-sig')
+        except UnicodeDecodeError: raw=data.decode('cp1252',errors='replace')
+        sample=raw[:8192]
         try: delim=csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
         except Exception: delim=';'
         vals=list(csv.reader(io.StringIO(raw),delimiter=delim))
-    else: raise ValueError('Formato no admitido. Use XLSX, CSV o TXT.')
+    else: raise ValueError('Formato no admitido. Use XLS, XLSX, CSV o TXT.')
     if not vals:return []
-    heads=[_imp_norm(x).lower().replace(' ','_').replace('º','').replace('°','') for x in vals[0]]
-    aliases={'ruc_ci':'ruc','documento_tercero':'ruc','cliente_ruc':'ruc','proveedor_ruc':'ruc','razon_social':'tercero','cliente':'tercero','proveedor':'tercero','nombre':'tercero','factura':'documento','numero':'documento','nro_factura':'documento','nro_documento':'documento','tc':'tipo_cambio','tipo_cambio_origen':'tipo_cambio','monto':'importe','total':'importe','saldo_pendiente':'saldo'}
-    heads=[aliases.get(h,h) for h in heads]
-    return [dict(zip(heads,row)) for row in vals[1:] if any(_imp_norm(x) for x in row)]
+    # Busca automáticamente la fila real de encabezados (muchos reportes Gasparini traen títulos previos).
+    best_i=0;best_score=-1
+    for i,row in enumerate(vals[:25]):
+        keys=[_IMP_ALIASES.get(_imp_key(x),_imp_key(x)) for x in row]
+        score=sum(1 for k in keys if k in ('documento','ruc','tercero','fecha','importe','saldo','moneda','tipo_cambio'))
+        if 'documento' in keys: score+=4
+        if score>best_score:best_i,best_score=i,score
+    rawheads=vals[best_i]
+    heads=[];seen={}
+    for x in rawheads:
+        k=_IMP_ALIASES.get(_imp_key(x),_imp_key(x)) or 'columna'
+        seen[k]=seen.get(k,0)+1
+        heads.append(k if seen[k]==1 else f'{k}_{seen[k]}')
+    if 'documento' not in heads:
+        encontrados=', '.join(_imp_norm(x) for x in rawheads if _imp_norm(x))[:500]
+        raise ValueError('No se identificó la columna Documento/Factura/Comprobante. Encabezados detectados: '+encontrados)
+    out=[]
+    for row in vals[best_i+1:]:
+        if not any(_imp_norm(x) for x in row):continue
+        d=dict(zip(heads,list(row)+['']*max(0,len(heads)-len(row))))
+        out.append(d)
+    return out
 
 def _tercero_import(c,ruc,nombre,tipo):
     ruc=_imp_norm(ruc);nombre=_imp_norm(nombre) or ruc or 'SIN NOMBRE'
@@ -4439,7 +4497,7 @@ def importar_cuentas(tipo):
  if tipo not in ('CXC','CXP'):return redirect('/finanzas')
  if request.method=='POST':
   f=request.files.get('archivo')
-  if not f or not f.filename:flash('Seleccione un archivo XLSX, CSV o TXT.');return redirect(request.path)
+  if not f or not f.filename:flash('Seleccione un archivo XLS, XLSX, CSV o TXT.');return redirect(request.path)
   try:
    a,n,e,d=_importar_cuentas(tipo,f);flash(f'Importación terminada: {a} cuentas actualizadas, {n} nuevas, {e} con error.' + ((' Primeros errores: '+' | '.join(d[:3])) if d else ''))
    return redirect('/finanzas')
