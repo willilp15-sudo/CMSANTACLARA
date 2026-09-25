@@ -3016,6 +3016,12 @@ def _factura_venta_data(venta_id):
                    left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
     items=c.execute('''select vi.*,p.codigo,coalesce(p.nombre,vi.descripcion,'Servicio') nombre from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id''',(venta_id,)).fetchall()
     inst=c.execute('select * from institucion_config where id=1').fetchone()
+    if v and not v['cdc']:
+        try:
+            cdc=_generar_cdc_test_venta(c,v['id'],v['fecha'],v['numero'])
+            if cdc:c.commit();v=c.execute('''select v.*,t.nombre cliente,t.ruc,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from ventas v left join terceros t on t.id=v.cliente_id left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
+        except Exception as ex:
+            _sifen_log('CDC_TEST','ERROR',f'Factura {venta_id}: {ex}')
     c.close();return v,items,inst
 
 @app.get('/ventas/<int:venta_id>/factura')
@@ -3638,8 +3644,8 @@ def _generar_cdc_test_venta(c,venta_id,fecha,numero):
     import secrets
     cfg=c.execute('select * from sifen_config where id=1').fetchone()
     if not cfg or str(cfg['ambiente'] or '').upper()!='TEST': return None
-    if not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']):
-        raise ValueError('El certificado SIFEN TEST no está instalado en el servidor.')
+    # El CDC se construye antes de la firma/transmisión. No depende de que el certificado
+    # esté instalado; el certificado será obligatorio al firmar/transmitir el XML DE.
     ruc=_solo_digitos(cfg['ruc']); dv=_solo_digitos(cfg['dv']); venta=c.execute('select sifen_punto_id,establecimiento,punto_expedicion from ventas where id=?',(venta_id,)).fetchone(); pto=_punto_facturacion(c,venta['sifen_punto_id'] if venta else None); est=_solo_digitos((venta['establecimiento'] if venta else None) or pto['establecimiento']); pexp=_solo_digitos((venta['punto_expedicion'] if venta else None) or pto['punto_expedicion'])
     tip=_solo_digitos(cfg['tipo_contribuyente'] or '2')
     if not (ruc and dv and est and pexp and tip): raise ValueError('Complete RUC, DV, establecimiento, punto de expedición y tipo de contribuyente en Configuración SIFEN.')
@@ -3657,6 +3663,98 @@ def _generar_cdc_test_venta(c,venta_id,fecha,numero):
     c.execute("update ventas set cdc=?,estado_sifen='TEST_GENERADO',codigo_seguridad_sifen=?,cdc_ambiente='TEST' where id=?",(cdc,codseg,venta_id))
     c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'CDC_TEST','GENERADO',f'Venta {venta_id} · CDC {cdc} · NO ENVIADO / NO APROBADO'))
     return cdc
+
+
+def _generar_cdc_test_complementario(c,tipo_doc,fecha,numero,punto_id,registro_tipo,registro_id):
+    """Genera CDC local TEST para NCE(05) o NDE(06). No transmite a DNIT."""
+    import secrets
+    tipo_doc=str(tipo_doc).zfill(2)
+    if tipo_doc not in ('05','06'): raise ValueError('Tipo de documento complementario inválido para CDC TEST.')
+    cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    if not cfg or str(cfg['ambiente'] or '').upper()!='TEST': return None
+    pto=_punto_facturacion(c,punto_id)
+    ruc=_solo_digitos(cfg['ruc']); dv=_solo_digitos(cfg['dv']); est=_solo_digitos(pto['establecimiento']); pexp=_solo_digitos(pto['punto_expedicion']); tip=_solo_digitos(cfg['tipo_contribuyente'] or '2')
+    if not (ruc and dv and est and pexp and tip): raise ValueError('Complete RUC, DV, establecimiento, punto de expedición y tipo de contribuyente en Configuración SIFEN.')
+    if len(ruc)>8: raise ValueError('El RUC emisor del CDC no puede superar 8 dígitos.')
+    ruc=ruc.zfill(8); est=est.zfill(3); pexp=pexp.zfill(3)
+    nd=_solo_digitos(numero)[-7:].zfill(7); fec=_solo_digitos(fecha)[:8]
+    if len(fec)!=8: raise ValueError('La fecha de emisión no permite formar AAAAMMDD.')
+    codseg=f'{secrets.randbelow(1_000_000_000):09d}'
+    base=tipo_doc+ruc+dv[:1]+est+pexp+nd+tip[:1]+fec+'1'+codseg
+    if len(base)!=43: raise ValueError(f'Longitud base CDC inválida ({len(base)}).')
+    cdc=base+_mod11_cdc(base)
+    tabla='notas_credito_ventas' if registro_tipo=='NCE' else 'notas_debito_ventas'
+    c.execute(f"update {tabla} set cdc=?,estado_sifen='TEST_GENERADO',codigo_seguridad_sifen=?,cdc_ambiente='TEST' where id=?",(cdc,codseg,registro_id))
+    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),registro_tipo+'_CDC_TEST','GENERADO',f'{registro_tipo} {numero} · CDC {cdc} · NO ENVIADO / NO APROBADO'))
+    return cdc
+
+
+# ===== V13.9.71: CDC TEST corregido para FE/NCE/NDE =====
+def init_v13971_cdc_test_documentos():
+    c=db()
+    nccols={r['name'] for r in c.execute('pragma table_info(notas_credito_ventas)').fetchall()}
+    for col,defn in [('codigo_seguridad_sifen','TEXT'),('cdc_ambiente','TEXT')]:
+        if col not in nccols:c.execute(f'alter table notas_credito_ventas add column {col} {defn}')
+    c.execute("""CREATE TABLE IF NOT EXISTS notas_debito_ventas(
+      id INTEGER PRIMARY KEY,venta_id INTEGER NOT NULL,fecha TEXT NOT NULL,numero TEXT NOT NULL,
+      motivo TEXT NOT NULL,total REAL NOT NULL DEFAULT 0,estado TEXT NOT NULL DEFAULT 'EMITIDA',
+      estado_sifen TEXT NOT NULL DEFAULT 'NO_ENVIADA',cdc TEXT,codigo_seguridad_sifen TEXT,cdc_ambiente TEXT,
+      protocolo_sifen TEXT,respuesta_sifen TEXT,creado_en TEXT,usuario TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS nota_debito_venta_items(
+      id INTEGER PRIMARY KEY,nota_id INTEGER NOT NULL,producto_id INTEGER,descripcion TEXT,
+      cantidad REAL NOT NULL DEFAULT 0,precio REAL NOT NULL DEFAULT 0,total REAL NOT NULL DEFAULT 0,iva_pct REAL DEFAULT 10)""")
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.71-cdc-test-fe-nce-nde',?)",(now(),))
+    c.commit();c.close()
+init_v13971_cdc_test_documentos()
+
+def _nd_numero(c,punto_id=None):
+    p=_punto_facturacion(c,punto_id)
+    if not p or not int(p['nota_debito_electronica'] or 0): raise ValueError('El punto de expedición no está habilitado para Nota de Débito Electrónica.')
+    c.execute("CREATE TABLE IF NOT EXISTS sifen_correlativos(tipo TEXT,punto_id INTEGER,proximo INTEGER DEFAULT 1,PRIMARY KEY(tipo,punto_id))")
+    c.execute("insert or ignore into sifen_correlativos(tipo,punto_id,proximo) values('NDE',?,1)",(p['id'],))
+    n=int(c.execute("select proximo from sifen_correlativos where tipo='NDE' and punto_id=?",(p['id'],)).fetchone()[0])
+    if n>9999999:raise ValueError('Se agotó la numeración de Nota de Débito para este punto.')
+    c.execute("update sifen_correlativos set proximo=? where tipo='NDE' and punto_id=?",(n+1,p['id']))
+    return f"{str(p['establecimiento']).zfill(3)}-{str(p['punto_expedicion']).zfill(3)}-{str(n).zfill(7)}",p
+
+@app.route('/ventas/<int:venta_id>/nota-debito',methods=['GET','POST'])
+def nota_debito_venta(venta_id):
+    c=db();v=c.execute("select v.*,t.nombre cliente,t.ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(venta_id,)).fetchone()
+    if not v:c.close();return ('Venta no encontrada',404)
+    if request.method=='POST':
+      try:
+       motivo=(request.form.get('motivo') or '').strip(); descripcion=(request.form.get('descripcion') or '').strip()
+       cantidad=float(request.form.get('cantidad') or 1); precio=float(request.form.get('precio') or 0); iva_pct=float(request.form.get('iva_pct') or 10)
+       if not motivo:raise ValueError('Indique el motivo de la Nota de Débito.')
+       if not descripcion:raise ValueError('Indique el concepto del débito.')
+       if cantidad<=0 or precio<=0:raise ValueError('Cantidad y precio deben ser mayores a cero.')
+       total=cantidad*precio;numero,p=_nd_numero(c,v['sifen_punto_id']);fecha=datetime.date.today().isoformat()
+       cur=c.execute("insert into notas_debito_ventas(venta_id,fecha,numero,motivo,total,estado,estado_sifen,creado_en,usuario) values(?,?,?,?,?,'EMITIDA','PENDIENTE_ENVIO',?,?)",(venta_id,fecha,numero,motivo,total,now(),session.get('user')));nid=cur.lastrowid
+       c.execute("insert into nota_debito_venta_items(nota_id,descripcion,cantidad,precio,total,iva_pct) values(?,?,?,?,?,?)",(nid,descripcion,cantidad,precio,total,iva_pct))
+       cdc=_generar_cdc_test_complementario(c,'06',fecha,numero,p['id'],'NDE',nid)
+       c.commit();flash('Nota de Débito emitida con CDC DE PRUEBA: '+str(cdc) if cdc else 'Nota de Débito emitida. SIFEN no está en ambiente TEST.');c.close();return redirect(f'/notas-debito/ventas/{nid}/pdf')
+      except Exception as e:c.rollback();flash(str(e))
+    puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and nota_debito_electronica=1 order by predeterminado desc,id").fetchall();c.close();return render_template('debit_note_sale.html',v=v,puntos=puntos)
+
+@app.get('/notas-debito/ventas/<int:nid>/pdf')
+def nota_debito_venta_pdf(nid):
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph,Spacer,Table,TableStyle
+    c=db();n=c.execute("select n.*,v.numero factura,v.cdc factura_cdc,t.nombre cliente,t.ruc from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where n.id=?",(nid,)).fetchone()
+    if not n:c.close();return ('Nota de Débito no encontrada',404)
+    items=c.execute("select * from nota_debito_venta_items where nota_id=? order by id",(nid,)).fetchall();inst=c.execute('select * from institucion_config where id=1').fetchone();c.close()
+    st=getSampleStyleSheet();small=ParagraphStyle('NDItem',parent=st['Normal'],fontSize=7,leading=9);story=[]
+    _kude_header(story,inst,'NOTA DE DÉBITO',n['numero'],'Documento de prueba SIFEN')
+    info=[[Paragraph('<b>Cliente:</b> '+str(n['cliente'] or '-'),st['Normal']),Paragraph('<b>RUC/CI:</b> '+str(n['ruc'] or '-'),st['Normal'])],[Paragraph('<b>Fecha:</b> '+str(n['fecha']),st['Normal']),Paragraph('<b>Factura relacionada:</b> '+str(n['factura'] or '-'),st['Normal'])],[Paragraph('<b>Motivo:</b> '+str(n['motivo'] or '-'),st['Normal']),Paragraph('<b>Estado SIFEN:</b> '+str(n['estado_sifen'] or '-'),st['Normal'])]]
+    t=Table(info,colWidths=[93*mm,93*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.7,colors.black),('INNERGRID',(0,0),(-1,-1),.25,colors.grey),('PADDING',(0,0),(-1,-1),5)]));story += [t,Spacer(1,3*mm)]
+    data=[['Descripción','Cantidad','Precio','IVA','Total']]+[[Paragraph(str(x['descripcion'] or ''),small),str(x['cantidad']),_pdf_money(x['precio']),str(x['iva_pct'])+'%',_pdf_money(x['total'])] for x in items]
+    t=Table(data,colWidths=[90*mm,22*mm,27*mm,18*mm,29*mm],repeatRows=1);t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.4,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7)]));story += [t,Spacer(1,3*mm),Paragraph('<b>TOTAL NOTA DE DÉBITO: Gs. '+_pdf_money(n['total'])+'</b>',st['Heading3'])]
+    _kude_footer(story,inst,n['cdc'],None,False)
+    return _pdf_doc_response(story,'ND-'+str(n['numero'])+'.pdf')
+
+ROUTE_MODULE.update({'nota_debito_venta':'FACTURACION','nota_debito_venta_pdf':'FACTURACION'})
 
 # ===== V13.9.45: Recursos Humanos Integral =====
 def init_v13945_rrhh():
@@ -4136,8 +4234,9 @@ def nota_credito_venta(venta_id):
        if not seleccion:raise ValueError('Seleccione al menos un ítem/cantidad a acreditar.')
        numero,p=_nc_numero(c,v['sifen_punto_id']);cur=c.execute("insert into notas_credito_ventas(venta_id,fecha,numero,motivo,total,estado,estado_sifen,creado_en,usuario) values(?,?,?,?,?,'EMITIDA','PENDIENTE_ENVIO',?,?)",(venta_id,datetime.date.today().isoformat(),numero,motivo,total,now(),session.get('user')));nid=cur.lastrowid
        for it,q,t in seleccion:c.execute("insert into nota_credito_venta_items(nota_id,venta_item_id,producto_id,descripcion,cantidad,precio,total,iva_pct) values(?,?,?,?,?,?,?,?)",(nid,it['id'],it['producto_id'],it['nombre'] or 'Ítem',q,it['precio'],t,it['iva_pct']))
-       c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'NCE','PENDIENTE_ENVIO',f'NC {numero} asociada a factura {v["numero"]}; pendiente de XML/firma/transmisión SIFEN'))
-       c.commit();flash('Nota de Crédito registrada. Se generó el PDF listo para imprimir y quedó PENDIENTE DE ENVÍO en SIFEN.');c.close();return redirect(f'/notas-credito/ventas/{nid}/pdf')
+       cdc=_generar_cdc_test_complementario(c,'05',datetime.date.today().isoformat(),numero,p['id'],'NCE',nid)
+       c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'NCE','TEST_GENERADO' if cdc else 'PENDIENTE_ENVIO',f'NC {numero} asociada a factura {v["numero"]}; CDC TEST '+str(cdc) if cdc else f'NC {numero} pendiente de integración SIFEN'))
+       c.commit();flash(('Nota de Crédito emitida con CDC DE PRUEBA: '+cdc) if cdc else 'Nota de Crédito registrada. SIFEN no está en ambiente TEST.');c.close();return redirect(f'/notas-credito/ventas/{nid}/pdf')
       except Exception as e:c.rollback();flash(str(e))
     puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and nota_credito_electronica=1 order by predeterminado desc,id").fetchall();c.close();return render_template('credit_note_sale.html',v=v,items=items,puntos=puntos)
 
