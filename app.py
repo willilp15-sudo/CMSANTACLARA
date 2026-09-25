@@ -257,7 +257,7 @@ def tc_fecha(c,fecha,moneda,tc_form):
 
 @app.before_request
 def auth():
- if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion') and 'user' not in session:return redirect('/login')
+ if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping') and 'user' not in session:return redirect('/login')
 @app.route('/login',methods=['GET','POST'])
 def login():
  if request.method=='POST':
@@ -1365,7 +1365,7 @@ ROUTE_MODULE.update({'editar_admision':'ADMISION','eliminar_admision':'ADMISION'
 @app.before_request
 def modular_guard():
  # Rutas públicas / autenticación.
- publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion'}
+ publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping'}
  if request.endpoint in publicos:return
  if not session.get('user'):return redirect('/login')
  if request.endpoint=='cambiar_mi_clave':return
@@ -1992,7 +1992,10 @@ def llamar_paciente(gid):
  if not r:c.close();return jsonify(ok=False,error='Agenda no encontrada'),404
  numero=(r['consultorio_numero'] or '').strip()
  if not numero:c.close();return jsonify(ok=False,error='Este médico no tiene número de consultorio configurado.'),400
- texto=f"Paciente {r['paciente']}, favor pasar al consultorio número {numero}";c.execute('insert into llamados_pacientes(agenda_id,fecha_hora,medico_id,texto,usuario) values(?,?,?,?,?)',(gid,now(),r['medico_id'],texto,session['user']));c.execute("update agenda set estado='LLAMADO' where id=?",(gid,));c.commit();c.close();return jsonify(ok=True,texto=texto)
+ texto=f"Paciente {r['paciente']}, favor pasar al consultorio número {numero}"
+ # V13.9.70: la PC del médico solo encola; el dispositivo independiente reproduce la llamada.
+ c.execute("insert into llamados_pacientes(agenda_id,fecha_hora,medico_id,texto,usuario,estado,dispositivo,reproducido_en) values(?,?,?,?,?,'PENDIENTE',NULL,NULL)",(gid,now(),r['medico_id'],texto,session['user']))
+ c.execute("update agenda set estado='LLAMADO' where id=?",(gid,));c.commit();c.close();return jsonify(ok=True,mensaje='Llamada enviada al dispositivo llamador.')
 
 @app.route('/historia-clinica/<int:pid>',methods=['GET','POST'])
 def historia_clinica_v12(pid):
@@ -4494,6 +4497,50 @@ def seguro_pendiente_visacion(spid):
     meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();c.close();return render_template('insurance_authorization_form.html',sp=sp,meds=meds)
 
 ROUTE_MODULE.update({'seguro_visaciones':'FACTURACION','seguro_visacion_archivo':'FACTURACION','seguro_pendiente_visacion':'FACTURACION'})
+
+
+# ===== V13.9.70 - Llamador independiente + histórico =====
+def init_v13970_llamador():
+ c=db()
+ cols=[x['name'] for x in c.execute('pragma table_info(llamados_pacientes)').fetchall()]
+ for name,typ in [('estado',"TEXT DEFAULT 'PENDIENTE'"),('dispositivo','TEXT'),('reproducido_en','TEXT'),('confirmado_en','TEXT')]:
+  if name not in cols:c.execute(f'alter table llamados_pacientes add column {name} {typ}')
+ c.execute("update llamados_pacientes set estado='REPRODUCIDO' where estado is null")
+ c.execute("create table if not exists llamador_dispositivos(id integer primary key autoincrement,nombre text unique not null,sector text,ultimo_ping text,activo integer default 1,creado_en text)")
+ c.commit();c.close()
+init_v13970_llamador()
+
+def _llamador_token_ok():
+ esperado=(os.environ.get('LLAMADOR_TOKEN') or '').strip();recibido=(request.headers.get('X-Llamador-Token') or request.args.get('token') or '').strip()
+ return bool(esperado) and secrets.compare_digest(esperado,recibido)
+
+@app.get('/api/llamador/ping')
+def llamador_api_ping():
+ if not _llamador_token_ok():return jsonify(ok=False,error='Token de llamador inválido'),401
+ nombre=(request.args.get('dispositivo') or 'LLAMADOR-PRINCIPAL').strip()[:80];sector=(request.args.get('sector') or 'Sala de espera').strip()[:80]
+ c=db();c.execute("insert into llamador_dispositivos(nombre,sector,ultimo_ping,activo,creado_en) values(?,?,?,1,?) on conflict(nombre) do update set sector=excluded.sector,ultimo_ping=excluded.ultimo_ping,activo=1",(nombre,sector,now(),now()));c.commit();c.close();return jsonify(ok=True)
+
+@app.get('/api/llamador/pendientes')
+def llamador_api_pendientes():
+ if not _llamador_token_ok():return jsonify(ok=False,error='Token de llamador inválido'),401
+ dispositivo=(request.args.get('dispositivo') or 'LLAMADOR-PRINCIPAL').strip()[:80]
+ c=db();r=c.execute("""select l.id,l.fecha_hora,l.texto,p.nombre paciente,m.nombre medico,m.consultorio_numero from llamados_pacientes l join agenda g on g.id=l.agenda_id join pacientes p on p.id=g.paciente_id join medicos m on m.id=l.medico_id where coalesce(l.estado,'PENDIENTE')='PENDIENTE' order by l.id limit 1""").fetchone()
+ if r:c.execute("update llamados_pacientes set estado='ENTREGADO',dispositivo=? where id=? and coalesce(estado,'PENDIENTE')='PENDIENTE'",(dispositivo,r['id']));c.commit()
+ c.close();return jsonify(ok=True,llamada=dict(r) if r else None)
+
+@app.post('/api/llamador/<int:lid>/confirmar')
+def llamador_api_confirmar(lid):
+ if not _llamador_token_ok():return jsonify(ok=False,error='Token de llamador inválido'),401
+ data=request.get_json(silent=True) or {};disp=str(data.get('dispositivo') or 'LLAMADOR-PRINCIPAL')[:80]
+ c=db();c.execute("update llamados_pacientes set estado='REPRODUCIDO',dispositivo=?,reproducido_en=?,confirmado_en=? where id=?",(disp,now(),now(),lid));c.commit();c.close();return jsonify(ok=True)
+
+@app.get('/llamador/historico')
+def llamador_historico():
+ fecha=request.args.get('fecha') or datetime.date.today().isoformat();medico_id=request.args.get('medico_id',type=int);c=db();pars=[fecha+'%'];where='l.fecha_hora like ?'
+ if medico_id:where+=' and l.medico_id=?';pars.append(medico_id)
+ rows=c.execute("""select l.*,p.nombre paciente,m.nombre medico,m.consultorio_numero from llamados_pacientes l join agenda g on g.id=l.agenda_id join pacientes p on p.id=g.paciente_id join medicos m on m.id=l.medico_id where """+where+' order by l.id desc',pars).fetchall();meds=c.execute('select id,nombre from medicos where activo=1 order by nombre').fetchall();c.close();return render_template('llamador_historico.html',rows=rows,fecha=fecha,meds=meds,medico_id=medico_id)
+
+ROUTE_MODULE.update({'llamador_historico':'CONSULTORIO'})
 
 
 if __name__=='__main__':

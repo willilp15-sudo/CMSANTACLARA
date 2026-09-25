@@ -473,3 +473,9 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - Opción explícita para afectar o no stock durante migraciones históricas.
 - Plantillas XLSX detalladas para Compras y Ventas.
 - Compatible con XLS/XLSX/XLSM/CSV/TXT/TSV/XML/HTML mediante el lector multiformato existente.
+
+## V13.9.70 - Llamador como dispositivo independiente
+- El equipo del médico solo envía la llamada al servidor; ya no usa Web Speech API local.
+- Se agrega cliente Windows independiente en `llamador_windows/` para pantalla/voz en sala de espera.
+- Histórico diario de llamadas por paciente, médico, consultorio, estado y dispositivo.
+- Autenticación del dispositivo mediante `LLAMADOR_TOKEN` configurado en Render y en el cliente.
