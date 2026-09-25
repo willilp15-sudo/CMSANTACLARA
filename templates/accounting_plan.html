@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% block title %}Plan de Cuentas{% endblock %}{% block content %}
-<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2>Plan de Cuentas – Paraguay</h2><p class="muted">Seleccione una cuenta para modificarla o cree una nueva. Los movimientos contables existentes se conservan.</p></div><a class="btn secondary" href="/contabilidad">← Volver</a></div>
+<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2>Plan de Cuentas – Paraguay</h2><p class="muted">Seleccione una cuenta para modificarla o cree una nueva. Los movimientos contables existentes se conservan.</p></div><div><a class="btn" href="/contabilidad/plan/excel">📊 Excel</a> <a class="btn" href="/contabilidad/plan/csv">📋 CSV</a> <a class="btn" href="/contabilidad/intercambio">⬆ Importar</a> <a class="btn secondary" href="/contabilidad">← Volver</a></div></div>
 <form method="get" class="card"><div class="grid"><label>Buscar cuenta<input name="q" value="{{q or ''}}" placeholder="Código o nombre"></label></div><button class="btn">🔍 Buscar</button> <a class="btn secondary" href="/contabilidad/plan">➕ Nueva cuenta</a></form>
 <form method="post" class="card" id="formCuenta">
 <input type="hidden" name="codigo_original" value="{{selected.codigo if selected else ''}}">

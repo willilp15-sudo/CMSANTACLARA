@@ -354,3 +354,6 @@ V13.6.5.1 FIX Configuración Empresa
 - Corregido definitivamente el orden de inicializacion ROUTE_MODULE.
 
 V13.9.40: edición completa de médicos (datos personales, profesionales, contacto, honorarios, consultorio y estado), conservando historial.
+
+## V13.9.50 - Importación / Exportación Contable
+Se incorporó el centro operativo de intercambio contable con plantillas, validación previa e importación confirmada de Plan de Cuentas y Libro Diario, además de exportación tabular en los informes contables.

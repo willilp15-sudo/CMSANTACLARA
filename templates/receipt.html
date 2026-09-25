@@ -8,5 +8,5 @@
   <table class="receipt-table summary"><tr><th colspan="2">Resumen por Moneda</th></tr><tr><td>{{r.moneda}}</td><td class="num">{{'{:,.0f}'.format(r.importe)}}</td></tr></table>
   <div class="receipt-sign"><div>_______________________________<br>Entregué conforme</div><div>_______________________________<br>Recibí conforme</div></div>
 </div>
-<div class="actions no-print"><button onclick="window.print()">🖨 Imprimir recibo</button><a class="btn" target="_blank" href="/recibos/{{r.id}}/pdf">📄 PDF</a><a class="btn secondary" href="/recibos">← Historial de recibos</a></div>
+<div class="actions no-print"><button onclick="window.print()">🖨 Imprimir recibo</button><a class="btn" target="_blank" href="/recibos/{{r.id}}/pdf">📄 PDF listo para imprimir</a><a class="btn secondary" href="/recibos">← Historial de recibos</a></div>
 {% endblock %}
