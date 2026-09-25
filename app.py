@@ -2545,7 +2545,7 @@ def _factura_venta_data(venta_id):
                    from ventas v left join terceros t on t.id=v.cliente_id
                    left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id
                    left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
-    items=c.execute('''select vi.*,p.codigo,p.nombre from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id''',(venta_id,)).fetchall()
+    items=c.execute('''select vi.*,p.codigo,coalesce(p.nombre,vi.descripcion,'Servicio') nombre from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id''',(venta_id,)).fetchall()
     inst=c.execute('select * from institucion_config where id=1').fetchone()
     c.close();return v,items,inst
 
@@ -2815,3 +2815,141 @@ init_v1391()
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
+
+# ===== V13.9.30: Caja central - localizar preventa/remision/cuenta completa =====
+def init_v13930_caja_central():
+ c=db()
+ try:
+  cols=[r[1] for r in c.execute('pragma table_info(venta_items)').fetchall()]
+  if 'descripcion' not in cols:c.execute('alter table venta_items add column descripcion TEXT')
+  c.execute("create table if not exists remisiones_internas(id integer primary key,numero text unique,fecha text not null,paciente_id integer not null,admision_id integer,estado text default 'PENDIENTE',observacion text,creado_por text,creado_en text)")
+  c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.30-caja-central',?)",(now(),));c.commit()
+ finally:c.close()
+init_v13930_caja_central()
+
+@app.get('/ventas/caja-central')
+def caja_central_facturacion():
+ q=(request.args.get('q') or '').strip();c=db();cuentas=[]
+ if q:
+  like='%'+q+'%';digits=''.join(ch for ch in q if ch.isdigit())
+  sql="""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where (p.nombre like ? or coalesce(p.documento,'') like ? or coalesce(r.numero,'') like ? or cast(a.id as text)=?) and exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100"""
+  cuentas=c.execute(sql,(like,like,like,digits or '-1')).fetchall()
+ c.close();return render_template('cash_account_locator.html',q=q,cuentas=cuentas)
+
+@app.get('/ventas/caja-central/<int:aid>')
+def caja_central_detalle(aid):
+ c=db();a=c.execute('select a.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id from admisiones a join pacientes p on p.id=a.paciente_id where a.id=?',(aid,)).fetchone()
+ if not a:c.close();flash('Cuenta no encontrada.');return redirect('/ventas/caja-central')
+ items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall();total=sum(float(x['total_pyg'] or 0) for x in items);rem=c.execute("select * from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
+ if not rem:
+  numero='REM-'+str(aid);c.execute('insert or ignore into remisiones_internas(numero,fecha,paciente_id,admision_id,creado_por,creado_en) values(?,?,?,?,?,?)',(numero,a['fecha'],a['paciente_id'],aid,session.get('user'),now()));c.commit();rem=c.execute('select * from remisiones_internas where numero=?',(numero,)).fetchone()
+ c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem)
+
+@app.post('/ventas/caja-central/<int:aid>/facturar')
+def caja_central_facturar(aid):
+ c=db()
+ try:
+  a=c.execute('select a.*,p.tercero_id,p.nombre paciente from admisiones a join pacientes p on p.id=a.paciente_id where a.id=?',(aid,)).fetchone()
+  if not a or not a['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
+  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
+  if not items:raise ValueError('La cuenta no tiene cargos pendientes para facturar.')
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero=(request.form.get('numero') or '').strip();medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
+  if not numero:raise ValueError('Ingrese el numero de factura.')
+  if c.execute('select 1 from ventas where numero=?',(numero,)).fetchone():raise ValueError('Ya existe una venta/factura con ese numero.')
+  total=sum(float(x['total_pyg'] or 0) for x in items)
+  if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de facturar una cuenta en efectivo.')
+  vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,a['tercero_id'],numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
+  for x in items:c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),0,0,x['descripcion']))
+  c.execute('update cargos_paciente set facturado=1 where admision_id=? and coalesce(facturado,0)=0',(aid,));c.execute("update remisiones_internas set estado='FACTURADA' where admision_id=? and estado='PENDIENTE'",(aid,));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,a['tercero_id'],'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
+  if medio=='Efectivo':
+   ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro cuenta completa '+a['paciente'],total,'VENTA',vid,session.get('user')))
+  asiento(c,fecha,'Factura caja cuenta '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,total,total,'Servicios')]);c.commit();audit('FACTURAR_CUENTA_CAJA',f'{aid}:{vid}');flash('Cuenta completa facturada correctamente. Factura '+numero);return redirect(f'/ventas/{vid}/factura')
+ except Exception as e:c.rollback();flash('No se pudo facturar la cuenta: '+str(e));return redirect(f'/ventas/caja-central/{aid}')
+ finally:c.close()
+
+ROUTE_MODULE.update({'caja_central_facturacion':'CAJA','caja_central_detalle':'CAJA','caja_central_facturar':'FACTURACION'})
+
+# ===== V13.9.31: Arqueo de Caja Diario con PDF =====
+def init_v13931_arqueo():
+ c=db()
+ try:
+  c.execute('''CREATE TABLE IF NOT EXISTS arqueos_caja_diarios(
+   id INTEGER PRIMARY KEY, apertura_id INTEGER UNIQUE, fecha TEXT, responsable TEXT,
+   m50 REAL DEFAULT 0,m100 REAL DEFAULT 0,m500 REAL DEFAULT 0,m1000 REAL DEFAULT 0,
+   b2000 REAL DEFAULT 0,b5000 REAL DEFAULT 0,b10000 REAL DEFAULT 0,b20000 REAL DEFAULT 0,b50000 REAL DEFAULT 0,b100000 REAL DEFAULT 0,
+   cheques REAL DEFAULT 0,otros REAL DEFAULT 0,
+   venta_facturas REAL DEFAULT 0,venta_boletas REAL DEFAULT 0,venta_nc REAL DEFAULT 0,venta_nd REAL DEFAULT 0,
+   compra_facturas REAL DEFAULT 0,compra_boletas REAL DEFAULT 0,compra_nc REAL DEFAULT 0,compra_nd REAL DEFAULT 0,
+   entregado_admin REAL DEFAULT 0,saldo_siguiente REAL DEFAULT 0,observaciones TEXT,
+   efectivo REAL DEFAULT 0,equiv_efectivo REAL DEFAULT 0,documentos REAL DEFAULT 0,resultado_esperado REAL DEFAULT 0,total REAL DEFAULT 0,diferencia REAL DEFAULT 0,
+   estado TEXT DEFAULT 'BORRADOR',creado_en TEXT,actualizado_en TEXT)''')
+  c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.31-arqueo-diario-pdf',?)",(now(),));c.commit()
+ finally:c.close()
+init_v13931_arqueo()
+
+def _arqueo_calc(form, saldo_inicial):
+ vals={}
+ campos=['m50','m100','m500','m1000','b2000','b5000','b10000','b20000','b50000','b100000','cheques','otros','venta_facturas','venta_boletas','venta_nc','venta_nd','compra_facturas','compra_boletas','compra_nc','compra_nd','entregado_admin','saldo_siguiente']
+ for k in campos:
+  try: vals[k]=max(0,float(form.get(k) or 0))
+  except: vals[k]=0
+ efectivo=vals['m50']*50+vals['m100']*100+vals['m500']*500+vals['m1000']*1000+vals['b2000']*2000+vals['b5000']*5000+vals['b10000']*10000+vals['b20000']*20000+vals['b50000']*50000+vals['b100000']*100000
+ equiv=vals['cheques']+vals['otros']
+ ventas=vals['venta_facturas']+vals['venta_boletas']-vals['venta_nc']+vals['venta_nd']
+ compras=vals['compra_facturas']+vals['compra_boletas']-vals['compra_nc']+vals['compra_nd']
+ documentos=ventas-compras
+ esperado=float(saldo_inicial or 0)+documentos
+ total=efectivo+equiv
+ vals.update(efectivo=efectivo,equiv_efectivo=equiv,documentos=documentos,resultado_esperado=esperado,total=total,diferencia=total-esperado)
+ return vals
+
+@app.route('/ventas/arqueo/<int:apertura_id>',methods=['GET','POST'])
+def arqueo_caja_diario(apertura_id):
+ c=db();ap=c.execute('select a.*,cx.nombre caja from aperturas_caja a join cajas cx on cx.id=a.caja_id where a.id=?',(apertura_id,)).fetchone()
+ if not ap:c.close();flash('Apertura de caja no encontrada.');return redirect('/ventas/recepcion-caja')
+ if ap['usuario']!=session.get('user') and not user_has('CAJA','VER'):c.close();return ('Acceso no autorizado',403)
+ ar=c.execute('select * from arqueos_caja_diarios where apertura_id=?',(apertura_id,)).fetchone()
+ if request.method=='POST':
+  v=_arqueo_calc(request.form,ap['saldo_inicial']); estado='FINALIZADO' if request.form.get('accion')=='finalizar' else 'BORRADOR';obs=(request.form.get('observaciones') or '').strip()
+  cols=['m50','m100','m500','m1000','b2000','b5000','b10000','b20000','b50000','b100000','cheques','otros','venta_facturas','venta_boletas','venta_nc','venta_nd','compra_facturas','compra_boletas','compra_nc','compra_nd','entregado_admin','saldo_siguiente','efectivo','equiv_efectivo','documentos','resultado_esperado','total','diferencia']
+  if ar:
+   sets=','.join(k+'=?' for k in cols)+',observaciones=?,estado=?,actualizado_en=?';c.execute('update arqueos_caja_diarios set '+sets+' where apertura_id=?',[v[k] for k in cols]+[obs,estado,now(),apertura_id])
+  else:
+   names='apertura_id,fecha,responsable,'+','.join(cols)+',observaciones,estado,creado_en,actualizado_en';qs=','.join('?' for _ in names.split(','));c.execute('insert into arqueos_caja_diarios('+names+') values('+qs+')',[apertura_id,datetime.date.today().isoformat(),ap['usuario']]+[v[k] for k in cols]+[obs,estado,now(),now()])
+  if estado=='FINALIZADO':
+   c.execute("update aperturas_caja set fecha_cierre=coalesce(fecha_cierre,?),total_sistema=?,total_declarado=?,diferencia=?,estado='CERRADA' where id=?",(now(),v['resultado_esperado'],v['total'],v['diferencia'],apertura_id))
+  c.commit();flash('Arqueo '+('finalizado' if estado=='FINALIZADO' else 'guardado')+' correctamente.');c.close();return redirect('/ventas/arqueo/'+str(apertura_id))
+ # sugerir ventas/compras del turno solo la primera vez
+ suger={}
+ if not ar:
+  fi=ap['fecha_apertura'][:10]
+  suger['venta_facturas']=c.execute('select coalesce(sum(total_pyg),0) from ventas where fecha>=?',(fi,)).fetchone()[0] or 0
+  suger['compra_facturas']=c.execute('select coalesce(sum(total_pyg),0) from compras where fecha>=?',(fi,)).fetchone()[0] or 0
+ c.close();return render_template('cash_count_daily.html',ap=ap,ar=ar,suger=suger)
+
+@app.get('/ventas/arqueo/<int:apertura_id>/pdf')
+def arqueo_caja_pdf(apertura_id):
+ from reportlab.lib.pagesizes import A4
+ from reportlab.lib import colors
+ from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
+ from reportlab.lib.units import mm
+ from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+ c=db();ap=c.execute('select a.*,cx.nombre caja from aperturas_caja a join cajas cx on cx.id=a.caja_id where a.id=?',(apertura_id,)).fetchone();ar=c.execute('select * from arqueos_caja_diarios where apertura_id=?',(apertura_id,)).fetchone();c.close()
+ if not ap or not ar:return ('Arqueo no encontrado',404)
+ def gs(x):return 'Gs. {:,.0f}'.format(float(x or 0)).replace(',','.')
+ blue=colors.HexColor('#06285f'); pale=colors.HexColor('#d9e8f5'); cream=colors.HexColor('#fff4cc'); st=getSampleStyleSheet();buf=io.BytesIO();doc=SimpleDocTemplate(buf,pagesize=A4,leftMargin=10*mm,rightMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm)
+ title=Table([['FORMATO DE ARQUEO DE CAJA DIARIO']],colWidths=[190*mm]);title.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),blue),('TEXTCOLOR',(0,0),(-1,-1),colors.white),('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,0),(-1,-1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),12),('BOTTOMPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),6)]))
+ story=([pdf_logo(55,38)] if pdf_logo(55,38) else [])+[title,Spacer(1,4*mm)]
+ info=Table([['FECHA:',ar['fecha'],'ARQUEO N°:',str(ar['id'])],['RESPONSABLE DE CAJA',ar['responsable'],'CAJA:',ap['caja']]],colWidths=[38*mm,62*mm,28*mm,62*mm]);info.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.5,colors.grey),('BACKGROUND',(1,0),(1,-1),cream),('BACKGROUND',(3,0),(3,-1),cream),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTNAME',(2,0),(2,-1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8)]));story += [info,Spacer(1,4*mm),Paragraph('1.- SALDO INICIAL: <b>'+gs(ap['saldo_inicial'])+'</b>',st['Normal']),Spacer(1,2*mm),Paragraph('2.- EFECTIVO: <b>'+gs(ar['efectivo'])+'</b>',st['Normal'])]
+ def den_table(title,rows):
+  data=[[title,'',''],['Valor','Cantidad','Total']]+[[gs(v),str(int(ar[k] or 0)),gs((ar[k] or 0)*v)] for k,v in rows];t=Table(data,colWidths=[30*mm,25*mm,35*mm]);t.setStyle(TableStyle([('SPAN',(0,0),(-1,0)),('BACKGROUND',(0,0),(-1,0),blue),('TEXTCOLOR',(0,0),(-1,0),colors.white),('ALIGN',(0,0),(-1,-1),'CENTER'),('BACKGROUND',(0,1),(-1,1),pale),('GRID',(0,0),(-1,-1),.4,colors.grey),('FONTSIZE',(0,0),(-1,-1),7),('FONTNAME',(0,0),(-1,1),'Helvetica-Bold')]));return t
+ story += [Spacer(1,2*mm),Table([[den_table('DETALLE DE ARQUEO MONEDAS',[('m50',50),('m100',100),('m500',500),('m1000',1000)]),den_table('DETALLE DE ARQUEO BILLETES',[('b2000',2000),('b5000',5000),('b10000',10000),('b20000',20000),('b50000',50000),('b100000',100000)])]],colWidths=[92*mm,92*mm]),Spacer(1,3*mm),Paragraph('3.- EQUIVALENTE DE EFECTIVO: <b>'+gs(ar['equiv_efectivo'])+'</b> &nbsp;&nbsp; Cheques: '+gs(ar['cheques'])+' &nbsp;&nbsp; Otros: '+gs(ar['otros']),st['Normal']),Spacer(1,3*mm),Paragraph('4.- DOCUMENTOS: <b>'+gs(ar['documentos'])+'</b>',st['Normal'])]
+ def docs(title,prefix):
+  data=[[title,''],['Facturas',gs(ar[prefix+'_facturas'])],['Boletas de Venta',gs(ar[prefix+'_boletas'])],['Nota de Crédito',gs(ar[prefix+'_nc'])],['Nota de Débito',gs(ar[prefix+'_nd'])]];t=Table(data,colWidths=[55*mm,35*mm]);t.setStyle(TableStyle([('SPAN',(0,0),(-1,0)),('BACKGROUND',(0,0),(-1,0),blue),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.4,colors.grey),('BACKGROUND',(1,1),(1,-1),cream),('FONTSIZE',(0,0),(-1,-1),7),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold')]));return t
+ story += [Spacer(1,2*mm),Table([[docs('VENTAS - INGRESOS','venta'),docs('COMPRAS - EGRESOS','compra')]],colWidths=[92*mm,92*mm]),Spacer(1,4*mm)]
+ resumen=[['RESUMEN',''],['SALDO INICIAL',gs(ap['saldo_inicial'])],['DOCUMENTOS',gs(ar['documentos'])],['RESULTADO ESPERADO',gs(ar['resultado_esperado'])],['EFECTIVO',gs(ar['efectivo'])],['EQUIVALENTE DE EFECTIVO',gs(ar['equiv_efectivo'])],['TOTAL',gs(ar['total'])],['DIFERENCIA',gs(ar['diferencia'])],['FALTANTE',gs(abs(ar['diferencia'])) if ar['diferencia']<0 else gs(0)],['SOBRANTE',gs(ar['diferencia']) if ar['diferencia']>0 else gs(0)]];rt=Table(resumen,colWidths=[55*mm,35*mm]);rt.setStyle(TableStyle([('SPAN',(0,0),(-1,0)),('BACKGROUND',(0,0),(-1,0),blue),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7)]))
+ obs='<b>OBSERVACIONES:</b><br/>'+((ar['observaciones'] or '').replace('\n','<br/>'))+'<br/><br/>ENTREGADO A ADMINISTRACIÓN '+gs(ar['entregado_admin'])+'<br/>SALDO PARA CAJA DEL SIGUIENTE '+gs(ar['saldo_siguiente']);ot=Table([[Paragraph(obs,st['Normal'])]],colWidths=[90*mm],rowHeights=[48*mm]);ot.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.5,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP')]))
+ story += [Table([[rt,ot]],colWidths=[92*mm,92*mm]),Spacer(1,4*mm),Paragraph('Se finaliza el presente arqueo de caja con un total de Guaraníes <b>'+monto_letras(ar['total'])+'</b>, pasando a firmar en señal de conformidad.',st['Normal']),Spacer(1,10*mm),Table([['_______________________________','_______________________________'],['Encargado de Caja','Supervisor Administrativo']],colWidths=[90*mm,90*mm],style=[('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,1),(-1,1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8)])]
+ doc.build(story);buf.seek(0);return send_file(buf,as_attachment=True,download_name='arqueo_caja_%s.pdf'%ar['id'],mimetype='application/pdf')
+
+ROUTE_MODULE.update({'arqueo_caja_diario':'CAJA','arqueo_caja_pdf':'CAJA'})

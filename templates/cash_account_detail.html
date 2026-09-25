@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% block content %}
+<div class="card" style="max-width:1450px;margin:18px auto;padding:22px">
+<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><div><h2>💳 Cuenta completa del paciente</h2><b>{{a.paciente}}</b> · {{a.documento or 'Sin documento'}} · {{a.tipo}} #{{a.id}} · Remisión {{rem.numero}}</div><a class="btn secondary" href="/ventas/caja-central">← Nueva búsqueda</a></div>
+<div style="overflow:auto;margin-top:18px"><table><thead><tr><th>#</th><th>Descripción</th><th>Tipo</th><th>Cantidad</th><th>Precio</th><th>Total</th></tr></thead><tbody>{% for x in items %}<tr><td>{{loop.index}}</td><td>{{x.descripcion}}</td><td>{{x.tipo}}</td><td>{{x.cantidad}}</td><td>Gs {{'{:,.0f}'.format(x.precio or 0)}}</td><td>Gs {{'{:,.0f}'.format(x.total_pyg or 0)}}</td></tr>{% else %}<tr><td colspan="6">Sin cargos pendientes.</td></tr>{% endfor %}</tbody></table></div>
+<div style="text-align:right;font-size:24px;font-weight:700;margin:18px 0">TOTAL A FACTURAR: Gs {{'{:,.0f}'.format(total)}}</div>
+{% if items %}<form method="post" action="/ventas/caja-central/{{a.id}}/facturar" class="card" style="padding:16px"><h3>Facturar directamente en Caja</h3><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px"><label>Fecha<input type="date" name="fecha" required></label><label>N.º factura<input name="numero" required placeholder="001-001-0000001"></label><label>Forma de cobro<select name="forma_cobro"><option>Efectivo</option><option>Transferencia</option><option>Banco</option><option>POS</option></select></label></div><button class="btn" style="margin-top:14px;width:100%" type="submit">🧾 Facturar cuenta completa</button></form>{% endif %}
+</div>
+<script>document.querySelector('input[name=fecha]')?.setAttribute('value',new Date().toISOString().slice(0,10));</script>
+{% endblock %}
