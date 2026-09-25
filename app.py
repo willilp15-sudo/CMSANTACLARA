@@ -629,7 +629,7 @@ def ventas():
     else:exento+=line_total
     detalle.append((p,pid,qty,price,line_total,base,line_iva,iva_pct,cost_line))
    tid=int(request.form['proveedor_id']);totg=total*tc;ivag=iva*tc
-   numero_factura,punto_factura=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'))
+   punto_id_operativo=_punto_id_caja_actual(c,'RECEPCION');numero_factura,punto_factura=_siguiente_numero_factura(c,punto_id_operativo)
    if condicion=='CUOTAS' and entrega>total:raise ValueError('La entrega inicial no puede superar el total de la venta')
    cuotas_venta=[]
    if condicion=='CUOTAS':
@@ -638,7 +638,7 @@ def ventas():
     suma=round(sum(float(x.get('importe') or 0) for x in cuotas_venta),2)
     if abs(suma-saldo_fin)>0.01:raise ValueError(f'La suma de cuotas ({suma:,.2f}) debe ser igual al saldo financiado ({saldo_fin:,.2f})')
    cur=c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,referencia_cobro,entrega_inicial,fecha_vencimiento) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tid,numero_factura,mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,medio or None,ref or None,entrega,venc));vid=cur.lastrowid
-   c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
+   ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'RECEPCION',vid))
    c.execute('update ventas set cuenta_bancaria_id=?,terminal_pos_id=? where id=?',(cuenta_id,pos_id,vid))
    for p,pid,qty,price,line_total,base,line_iva,iva_pct,cost_line in detalle:
     c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,pid,qty,price,line_total,line_total*tc,cost_line,iva_pct))
@@ -1057,7 +1057,7 @@ def facturar_admision(aid):
  total10_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==10);total5_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==5);exento_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==0)
  base10_pyg,iva10_pyg=desglosar_iva_incluido(total10_pyg,10);base5_pyg,iva5_pyg=desglosar_iva_incluido(total5_pyg,5)
  subtotal_pyg=base10_pyg+base5_pyg+exento_pyg;iva_pyg=iva10_pyg+iva5_pyg;totg=total10_pyg+total5_pyg+exento_pyg
- subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];num=request.form['numero'];cur=c.execute('insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,ter,num,mon,tc,subtotal,iva,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));fid=cur.lastrowid;c.execute('update cargos_paciente set facturado=1 where admision_id=? and facturado=0',(aid,));c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,ter,num,mon,tc,(base10_pyg+base5_pyg)/tc,iva,exento_pyg/tc,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));vid=c.execute('select last_insert_rowid()').fetchone()[0];c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(vid,ter,mon,tc,total,total,totg));asiento(c,fecha,'Factura sanatorial '+num,'FACTURA_SANATORIO',fid,mon,tc,[('1.1.02',totg,0,total,'Paciente/Seguro'),('4.1.02',0,subtotal_pyg,subtotal,'Servicios sanatoriales'),('2.1.02',0,iva_pyg,iva,'IVA débito')]);c.commit();audit('FACTURA_SANATORIO',str(fid));return redirect(f'/cuenta-paciente/{aid}')
+ subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];punto_id_operativo=_punto_id_caja_actual(c,a['tipo']);num,punto_factura=_siguiente_numero_factura(c,punto_id_operativo);cur=c.execute('insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,ter,num,mon,tc,subtotal,iva,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));fid=cur.lastrowid;c.execute('update cargos_paciente set facturado=1 where admision_id=? and facturado=0',(aid,));c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,ter,num,mon,tc,(base10_pyg+base5_pyg)/tc,iva,exento_pyg/tc,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));vid=c.execute('select last_insert_rowid()').fetchone()[0];ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],vid));c.execute('update facturas_sanatorio set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],fid));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(vid,ter,mon,tc,total,total,totg));asiento(c,fecha,'Factura sanatorial '+num,'FACTURA_SANATORIO',fid,mon,tc,[('1.1.02',totg,0,total,'Paciente/Seguro'),('4.1.02',0,subtotal_pyg,subtotal,'Servicios sanatoriales'),('2.1.02',0,iva_pyg,iva,'IVA débito')]);c.commit();audit('FACTURA_SANATORIO',str(fid));return redirect(f'/cuenta-paciente/{aid}')
 # ===== V13.9.66: liquidación de cobertura por seguro ítem por ítem =====
 def init_v13966_cobertura_seguro():
  c=db()
@@ -3375,11 +3375,11 @@ def caja_central_facturar(aid):
   if not a or not a['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
   items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
   if not items:raise ValueError('La cuenta no tiene cargos pendientes para facturar.')
-  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'));medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'RECEPCION',True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
   total=sum(float(x['total_pyg'] or 0) for x in items)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de facturar una cuenta en efectivo.')
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,a['tercero_id'],numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
-  c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
+  ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,str(a['tipo'] or 'OTROS'),vid))
   for x in items:c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),0,0,x['descripcion']))
   c.execute('update cargos_paciente set facturado=1 where admision_id=? and coalesce(facturado,0)=0',(aid,));c.execute("update remisiones_internas set estado='FACTURADA' where admision_id=? and estado='PENDIENTE'",(aid,));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,a['tercero_id'],'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
   if medio=='Efectivo':
@@ -3401,11 +3401,11 @@ def caja_central_consultorio_facturar(pid):
   x=c.execute("select k.*,p.nombre paciente,p.tercero_id from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone()
   if not x:raise ValueError('La prestación ya fue procesada o no existe.')
   if not x['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
-  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'));medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'RECEPCION',True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de cobrar en efectivo.')
   base,iva=desglosar_iva_incluido(total,10)
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,x['tercero_id'],numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
-  c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
+  ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'CONSULTORIO',vid))
   c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,1,total,total,total,0,10,x['descripcion']))
   c.execute("update caja_pendientes_consultorio set estado='FACTURADO',venta_id=?,procesado_en=? where id=?",(vid,now(),pid));c.execute('update consultas set facturada=1,venta_id=? where id=?',(vid,x['consulta_id']))
   c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,x['tercero_id'],'PYG',1,total,0,0,'PAGADO'))
@@ -3520,6 +3520,77 @@ def init_v13938_sifen():
     c.commit();c.close()
 init_v13938_sifen()
 init_v13944_puntos_expedicion()
+
+
+# ===== V13.9.77: punto de expedición determinado por caja/origen =====
+def init_v13977_puntos_por_caja():
+    c=db()
+    c.execute("""CREATE TABLE IF NOT EXISTS caja_punto_expedicion(
+      caja_id INTEGER PRIMARY KEY,punto_id INTEGER NOT NULL,codigo_area TEXT,actualizado_en TEXT)""")
+    # Trazabilidad: el origen clínico no se pierde aunque otra caja facture la cuenta.
+    vcols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,ddl in [('caja_id','INTEGER'),('origen_area','TEXT')]:
+        if col not in vcols:c.execute(f'alter table ventas add column {col} {ddl}')
+    fcols={r['name'] for r in c.execute('pragma table_info(facturas_sanatorio)').fetchall()}
+    for col,ddl in [('sifen_punto_id','INTEGER'),('establecimiento','TEXT'),('punto_expedicion','TEXT'),('caja_id','INTEGER'),('origen_area','TEXT')]:
+        if col not in fcols:c.execute(f'alter table facturas_sanatorio add column {col} {ddl}')
+    base=c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,id limit 1").fetchone()
+    est=str((base['establecimiento'] if base else '001') or '001').zfill(3)
+    tim=(base['timbrado'] if base else '') or ''
+    aut=int((base['autorizado_dnit'] if base else 0) or 0)
+    # Se crean los tres puntos operativos. El indicador de autorización se hereda de la
+    # configuración existente; el administrador debe verificar que 001/002/003 estén autorizados por DNIT.
+    for cod,desc in [('001','Recepción'),('002','Urgencias'),('003','Internaciones / Cirugías / Otros')]:
+        c.execute("""insert or ignore into sifen_puntos_expedicion
+          (establecimiento,punto_expedicion,descripcion,timbrado,factura_electronica,nota_credito_electronica,nota_debito_electronica,autorizado_dnit,activo,predeterminado,proximo_numero_factura,creado_en,actualizado_en)
+          values(?,?,?,?,1,1,1,?,1,0,1,?,?)""",(est,cod,desc,tim,aut,now(),now()))
+        c.execute("update sifen_puntos_expedicion set factura_electronica=1,nota_credito_electronica=1,nota_debito_electronica=1,activo=1,actualizado_en=? where establecimiento=? and punto_expedicion=?",(now(),est,cod))
+    # Asignación automática de cajas existentes por nombre.
+    for caja in c.execute('select id,nombre from cajas').fetchall():
+        n=str(caja['nombre'] or '').upper()
+        cod='001' if 'RECEP' in n else ('002' if 'URGEN' in n else '003')
+        pt=c.execute('select id from sifen_puntos_expedicion where establecimiento=? and punto_expedicion=?',(est,cod)).fetchone()
+        if pt:c.execute('insert or replace into caja_punto_expedicion(caja_id,punto_id,codigo_area,actualizado_en) values(?,?,?,?)',(caja['id'],pt['id'],cod,now()))
+    # Bloqueo de duplicados futuros. No altera documentos históricos ya existentes.
+    c.executescript("""
+    CREATE TRIGGER IF NOT EXISTS trg_ventas_numero_unico_ins BEFORE INSERT ON ventas
+    WHEN NEW.numero IS NOT NULL AND trim(NEW.numero)<>'' AND EXISTS(SELECT 1 FROM ventas WHERE numero=NEW.numero)
+    BEGIN SELECT RAISE(ABORT,'Número de factura ya utilizado. La correlatividad no permite duplicados.'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_ventas_numero_unico_upd BEFORE UPDATE OF numero ON ventas
+    WHEN NEW.numero IS NOT NULL AND trim(NEW.numero)<>'' AND EXISTS(SELECT 1 FROM ventas WHERE numero=NEW.numero AND id<>OLD.id)
+    BEGIN SELECT RAISE(ABORT,'Número de factura ya utilizado. La correlatividad no permite duplicados.'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_nce_numero_unico_ins BEFORE INSERT ON notas_credito_ventas
+    WHEN NEW.numero IS NOT NULL AND trim(NEW.numero)<>'' AND EXISTS(SELECT 1 FROM notas_credito_ventas WHERE numero=NEW.numero)
+    BEGIN SELECT RAISE(ABORT,'Número de Nota de Crédito ya utilizado.'); END;
+    CREATE TRIGGER IF NOT EXISTS trg_nde_numero_unico_ins BEFORE INSERT ON notas_debito_ventas
+    WHEN NEW.numero IS NOT NULL AND trim(NEW.numero)<>'' AND EXISTS(SELECT 1 FROM notas_debito_ventas WHERE numero=NEW.numero)
+    BEGIN SELECT RAISE(ABORT,'Número de Nota de Débito ya utilizado.'); END;
+    """)
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.77-puntos-por-caja',?)",(now(),))
+    c.commit();c.close()
+
+def _punto_id_codigo(c,codigo):
+    base=c.execute("select establecimiento from sifen_puntos_expedicion order by predeterminado desc,id limit 1").fetchone()
+    est=str((base['establecimiento'] if base else '001') or '001').zfill(3)
+    p=c.execute("select * from sifen_puntos_expedicion where establecimiento=? and punto_expedicion=? and activo=1 and factura_electronica=1",(est,str(codigo).zfill(3))).fetchone()
+    if not p:raise ValueError('No está configurado el punto de expedición '+str(codigo).zfill(3)+'.')
+    if not int(p['autorizado_dnit'] or 0):raise ValueError('El punto '+est+'-'+str(codigo).zfill(3)+' debe verificarse/habilitarse como autorizado DNIT antes de emitir.')
+    return p['id']
+
+def _punto_id_caja_actual(c,origen_area=None,forzar_recepcion=False):
+    if forzar_recepcion:return _punto_id_codigo(c,'001')
+    ap=caja_abierta(c)
+    if ap:
+        m=c.execute('select punto_id from caja_punto_expedicion where caja_id=?',(ap['caja_id'],)).fetchone()
+        if m:return m['punto_id']
+        nom=str(ap['caja'] or '').upper();cod='001' if 'RECEP' in nom else ('002' if 'URGEN' in nom else '003')
+        return _punto_id_codigo(c,cod)
+    area=str(origen_area or '').upper()
+    if 'URGEN' in area:return _punto_id_codigo(c,'002')
+    if area in ('INTERNACION','QUIROFANO','CIRUGIA','CIRUGÍAS','OTROS'):return _punto_id_codigo(c,'003')
+    return _punto_id_codigo(c,'001')
+
+init_v13977_puntos_por_caja()
 
 SIFEN_TEST_BASE='https://sifen-test.set.gov.py'
 def _sifen_dir():
@@ -4747,14 +4818,60 @@ _IMP_ALIASES={
 }
 
 def _imp_decode_text(data):
-    """Intenta decodificar exportaciones de sistemas antiguos, aun si usan .xls como extensión."""
-    for enc in ('utf-8-sig','utf-16','utf-16-le','utf-16-be','cp1252','latin1'):
+    """Decodifica texto sin confundir CSV ANSI/CP1252 con UTF-16.
+    Gasparini suele exportar CSV Windows-1252 sin BOM; probar UTF-16 a ciegas
+    produce caracteres legibles pero falsos y rompe la detección de columnas.
+    """
+    if not data:
+        return ''
+    candidates=[]
+    if data.startswith((b'\xff\xfe', b'\xfe\xff')):
+        candidates.extend(('utf-16','utf-16-le','utf-16-be'))
+    else:
+        # Solo considerar UTF-16 sin BOM cuando hay patrón real de bytes NUL.
+        sample=data[:4000]
+        even_nul=sum(1 for i in range(0,len(sample),2) if sample[i:i+1]==b'\x00')
+        odd_nul=sum(1 for i in range(1,len(sample),2) if sample[i:i+1]==b'\x00')
+        slots=max(1,len(sample)//2)
+        if max(even_nul,odd_nul)/slots > .20:
+            candidates.extend(('utf-16-le','utf-16-be'))
+    candidates.extend(('utf-8-sig','cp1252','latin1'))
+    for enc in candidates:
         try:
             txt=data.decode(enc)
-            printable=sum(ch.isprintable() or ch in '\r\n\t' for ch in txt[:5000])
-            if txt and printable/max(1,len(txt[:5000]))>.80:return txt
-        except Exception: pass
+            probe=txt[:5000]
+            printable=sum(ch.isprintable() or ch in '\r\n\t' for ch in probe)
+            nul_ratio=probe.count('\x00')/max(1,len(probe))
+            if txt and printable/max(1,len(probe))>.90 and nul_ratio<.02:
+                return txt
+        except Exception:
+            pass
     return None
+
+def _imp_detect_delimiter(text):
+    """Detecta delimitador de exportaciones Gasparini aun cuando csv.Sniffer falla."""
+    import csv
+    sample='\n'.join((text or '').splitlines()[:25])[:50000]
+    try:
+        return csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
+    except Exception:
+        pass
+    # Elegir el separador que produzca una cantidad estable y útil de columnas.
+    best=', '; best_score=-1
+    for delim in (',',';','\t','|'):
+        try:
+            lens=[]
+            for row in list(csv.reader(io.StringIO(sample),delimiter=delim))[:20]:
+                if row: lens.append(len(row))
+            if not lens: continue
+            useful=sum(1 for n in lens if n>1)
+            common=max(lens.count(n) for n in set(lens))
+            score=useful*100+common*10+min(max(lens),200)
+            if score>best_score:
+                best_score=score;best=delim
+        except Exception:
+            continue
+    return best.strip() or ','
 
 def _imp_html_rows(txt):
     from html.parser import HTMLParser
@@ -4931,9 +5048,7 @@ def _imp_rows(file):
         elif name.endswith(('.csv','.txt','.tsv','.xls')) and text is not None:
             import csv
             _imp_csv_field_limit()
-            sample=text[:8192]
-            try: delim=csv.Sniffer().sniff(sample,delimiters=',;\t|').delimiter
-            except Exception: delim='\t' if '\t' in sample else ';'
+            delim=_imp_detect_delimiter(text)
             vals=list(csv.reader(io.StringIO(text),delimiter=delim))
         else:
             # Último intento: .XLS legado exportado como flujo BIFF crudo, sin contenedor OLE.
