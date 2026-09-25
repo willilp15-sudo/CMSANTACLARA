@@ -2758,9 +2758,9 @@ def factura_venta_pdf(venta_id):
     ex=iva5=iva10=0
     for x in items:
         pct=float(x['iva_pct'] or 0); total=float(x['total'] or 0); exv=total if pct==0 else 0; v5=total if pct==5 else 0; v10=total if pct==10 else 0; ex+=exv;iva5+=v5;iva10+=v10
-        data.append([x['codigo'] or '',x['nombre'] or '','UNI',f"{float(x['cantidad'] or 0):,.2f}",f"{float(x['precio'] or 0):,.0f}",'0',f"{exv:,.0f}" if exv else '',f"{v5:,.0f}" if v5 else '',f"{v10:,.0f}" if v10 else ''])
+        data.append([x['codigo'] or '',Paragraph(str(x['nombre'] or ''),st['Normal']),'UNI',f"{float(x['cantidad'] or 0):,.2f}",f"{float(x['precio'] or 0):,.0f}",'0',f"{exv:,.0f}" if exv else '',f"{v5:,.0f}" if v5 else '',f"{v10:,.0f}" if v10 else ''])
     while len(data)<12:data.append(['','','','','','','','',''])
-    t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1,rowHeights=[8*mm]+[10*mm]*(len(data)-1));t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
+    t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
     total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
     tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
     url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if es_dte and v['cdc'] else None
@@ -3501,3 +3501,235 @@ def rrhh_configuracion():
 def rrhh_informes():
     if not _rrhh_perm():return ('Acceso no autorizado',403)
     c=db();periodo=_rrhh_periodo(request.args.get('periodo'));res=c.execute('''select count(*) funcionarios,coalesce(sum(haberes),0) haberes,coalesce(sum(ips_obrero),0) ips_obrero,coalesce(sum(ips_patronal),0) ips_patronal,coalesce(sum(anticipos),0) anticipos,coalesce(sum(otros_descuentos),0) descuentos,coalesce(sum(neto),0) neto,coalesce(sum(costo_empresa),0) costo from rrhh_liquidaciones where periodo=? and estado!='ANULADA' ''',(periodo,)).fetchone();asist=c.execute("select estado,count(*) cantidad from rrhh_asistencias where substr(fecha,1,7)=? group by estado",(periodo,)).fetchall();c.close();return render_template('rrhh_reports.html',periodo=periodo,res=res,asist=asist)
+
+# ===== V13.9.46: Centro de intercambio tabular + exportación Marangatu =====
+import csv, zipfile
+
+def _tabular_xlsx(titulo,headers,rows,filename):
+ from openpyxl import Workbook
+ from openpyxl.styles import Font,Alignment
+ wb=Workbook();ws=wb.active;ws.title='Datos';ws.append(headers)
+ for cell in ws[1]: cell.font=Font(bold=True);cell.alignment=Alignment(horizontal='center')
+ for r in rows: ws.append([v for v in r])
+ for col in ws.columns:
+  ws.column_dimensions[col[0].column_letter].width=min(45,max(12,max(len(_safe(x.value)) for x in col)+2))
+ bio=io.BytesIO();wb.save(bio);bio.seek(0)
+ return send_file(bio,as_attachment=True,download_name=filename,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+def _tabular_csv(headers,rows,filename,delimiter=','):
+ bio=io.BytesIO();txt=io.TextIOWrapper(bio,encoding='utf-8-sig',newline='',write_through=True);w=csv.writer(txt,delimiter=delimiter,lineterminator='\n');w.writerow(headers)
+ for r in rows:w.writerow(['' if v is None else v for v in r])
+ txt.flush();bio.seek(0);return send_file(bio,as_attachment=True,download_name=filename,mimetype='text/csv; charset=utf-8')
+
+@app.get('/informes/<tipo>/excel')
+def informe_excel_tabla(tipo):
+ if tipo not in {x[0] for x in REPORT_GROUPS}:return ('Informe no encontrado',404)
+ desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();c=db();titulo,headers,rows=_report_data(c,tipo,desde,hasta);c.close();return _tabular_xlsx(titulo,headers,rows,f'{tipo}_{desde}_{hasta}.xlsx')
+
+@app.get('/informes/<tipo>/csv')
+def informe_csv_tabla(tipo):
+ if tipo not in {x[0] for x in REPORT_GROUPS}:return ('Informe no encontrado',404)
+ desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();c=db();titulo,headers,rows=_report_data(c,tipo,desde,hasta);c.close();return _tabular_csv(headers,rows,f'{tipo}_{desde}_{hasta}.csv')
+
+@app.get('/contabilidad/informe/<tipo>/csv')
+def contabilidad_csv(tipo):
+ if tipo not in {x[0] for x in ACCOUNTING_REPORTS}:return ('Informe contable no encontrado',404)
+ desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();cuenta=request.args.get('cuenta') or None;c=db();titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta);c.close();return _tabular_csv(headers,rows,f'{tipo}_{desde}_{hasta}.csv')
+
+def _ruc_sin_dv(ruc):
+ s=str(ruc or '').strip().replace('.','').replace(' ','')
+ return s.split('-')[0] if '-' in s else s
+
+def _fecha_dnit(v):
+ try:return datetime.date.fromisoformat(str(v)[:10]).strftime('%d/%m/%Y')
+ except:return str(v or '')
+
+def _condicion_dnit(v): return '2' if str(v or '').upper() in ('CREDITO','CUOTAS') else '1'
+
+def _marangatu_rows(c,desde,hasta,incluir_ventas=False,incluir_compras=True):
+ rows=[];errores=[]
+ if incluir_compras:
+  data=c.execute("select co.*,t.ruc,t.nombre proveedor from compras co left join terceros t on t.id=co.proveedor_id where co.fecha between ? and ? and co.estado!='ANULADA' order by co.fecha,co.id",(desde,hasta)).fetchall()
+  for x in data:
+   ruc=_ruc_sin_dv(x['ruc']); tim=_solo_digitos(x['timbrado']); num=str(x['numero'] or '').strip()
+   if not ruc or not tim or not num:errores.append(f"Compra #{x['id']}: falta RUC, timbrado o comprobante");continue
+   g10=round(float(x['gravado_10'] or 0)+float(x['iva_10'] or 0));g5=round(float(x['gravado_5'] or 0)+float(x['iva_5'] or 0));ex=round(float(x['exento_iva'] or 0));total=g10+g5+ex
+   rows.append(['2','11',ruc,'','109',_fecha_dnit(x['fecha']),tim,num,str(g10),str(g5),str(ex),str(total),_condicion_dnit(x['condicion_pago']),'S' if str(x['moneda'] or 'PYG').upper()!='PYG' else 'N','S','S','N','N','',''])
+ if incluir_ventas:
+  data=c.execute("select v.*,t.ruc,t.nombre cliente,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.fecha between ? and ? and v.estado!='ANULADA' and coalesce(v.estado_sifen,'NO_ENVIADO') not in ('APROBADO','DTE','APROBADO_SIFEN') order by v.fecha,v.id",(desde,hasta)).fetchall()
+  for x in data:
+   ruc=_ruc_sin_dv(x['ruc']); tipoid='11' if ruc else '15'; ident=ruc or '0'; nombre='' if ruc else (x['cliente'] or 'SIN NOMBRE');tim=_solo_digitos(x['punto_timbrado']);num=str(x['numero'] or '').strip()
+   if not tim or not num:errores.append(f"Venta #{x['id']}: falta timbrado o comprobante");continue
+   g10=round(float(x['gravado_10'] or 0)+float(x['iva_10'] or 0));g5=round(float(x['gravado_5'] or 0)+float(x['iva_5'] or 0));ex=round(float(x['exento_iva'] or 0));total=g10+g5+ex
+   rows.append(['1',tipoid,ident,nombre,'109',_fecha_dnit(x['fecha']),tim,num,str(g10),str(g5),str(ex),str(total),_condicion_dnit(x['condicion_venta']),'S' if str(x['moneda'] or 'PYG').upper()!='PYG' else 'N','S','S','N','',''])
+ return rows,errores
+
+@app.get('/intercambio')
+def intercambio_centro():
+ return render_template('data_exchange.html')
+
+@app.post('/intercambio/validar')
+def intercambio_validar():
+ f=request.files.get('archivo')
+ if not f or not f.filename:flash('Seleccione un archivo CSV, TXT o XLSX.');return redirect('/intercambio')
+ try:
+  ext=os.path.splitext(f.filename.lower())[1];rows=[]
+  if ext=='.xlsx':
+   from openpyxl import load_workbook
+   wb=load_workbook(f,read_only=True,data_only=True);ws=wb.active;rows=[list(r) for r in ws.iter_rows(values_only=True)]
+  elif ext in ('.csv','.txt'):
+   raw=f.read().decode('utf-8-sig');dial=csv.excel_tab if ext=='.txt' else csv.excel;rows=[list(r) for r in csv.reader(io.StringIO(raw),dialect=dial)]
+  else:raise ValueError('Formato no admitido. Use XLSX, CSV o TXT.')
+  headers=rows[0] if rows else [];data=rows[1:501] if len(rows)>1 else []
+  return render_template('data_import_preview.html',filename=f.filename,headers=headers,rows=data,total=max(0,len(rows)-1))
+ except Exception as e:flash('No se pudo validar el archivo: '+str(e));return redirect('/intercambio')
+
+@app.get('/marangatu/exportar')
+def marangatu_exportar():
+ periodo=(request.args.get('periodo') or datetime.date.today().strftime('%Y-%m'))[:7];tipo=request.args.get('tipo','compras');fmt=request.args.get('formato','zip')
+ try:y,m=map(int,periodo.split('-'));desde=f'{y:04d}-{m:02d}-01';hasta=(datetime.date(y+1,1,1)-datetime.timedelta(days=1)).isoformat() if m==12 else (datetime.date(y,m+1,1)-datetime.timedelta(days=1)).isoformat()
+ except:return ('Periodo inválido',400)
+ c=db();cfg=c.execute('select * from institucion_config where id=1').fetchone();rows,errores=_marangatu_rows(c,desde,hasta,tipo in ('ventas','ambos'),tipo in ('compras','ambos'));c.close()
+ if errores:flash('Advertencia: '+ ' | '.join(errores[:8]))
+ ruc=_ruc_sin_dv(cfg['ruc'] if cfg else '')
+ if not ruc:return ('Configure el RUC institucional antes de exportar para Marangatu.',400)
+ base=f"{ruc}_REG_{m:02d}{y}_SC001";raw=io.StringIO(newline='');w=csv.writer(raw,delimiter=',',lineterminator='\n');
+ for r in rows:w.writerow(r)
+ data=raw.getvalue().encode('utf-8')
+ if fmt=='csv':bio=io.BytesIO(data);return send_file(bio,as_attachment=True,download_name=base+'.csv',mimetype='text/csv; charset=utf-8')
+ out=io.BytesIO();
+ with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:z.writestr(base+'.csv',data)
+ out.seek(0);return send_file(out,as_attachment=True,download_name=base+'.zip',mimetype='application/zip')
+
+@app.get('/rrhh/informes/excel')
+def rrhh_informes_excel():
+ if not _rrhh_perm():return ('Acceso no autorizado',403)
+ periodo=_rrhh_periodo(request.args.get('periodo'));c=db();rows=c.execute('''select e.documento,e.nombre,e.cargo,l.periodo,l.salario_base,l.haberes,l.ips_obrero,l.ips_patronal,l.anticipos,l.prestamos,l.otros_descuentos,l.neto,l.costo_empresa,l.estado from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();c.close();headers=['CI','Funcionario','Cargo','Periodo','Salario base','Haberes','IPS obrero','IPS patronal','Anticipos','Préstamos','Otros descuentos','Neto','Costo empresa','Estado'];return _tabular_xlsx('RRHH',headers,rows,f'rrhh_{periodo}.xlsx')
+
+@app.get('/rrhh/informes/csv')
+def rrhh_informes_csv():
+ if not _rrhh_perm():return ('Acceso no autorizado',403)
+ periodo=_rrhh_periodo(request.args.get('periodo'));c=db();rows=c.execute('''select e.documento,e.nombre,e.cargo,l.periodo,l.salario_base,l.haberes,l.ips_obrero,l.ips_patronal,l.anticipos,l.prestamos,l.otros_descuentos,l.neto,l.costo_empresa,l.estado from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();c.close();headers=['CI','Funcionario','Cargo','Periodo','Salario base','Haberes','IPS obrero','IPS patronal','Anticipos','Préstamos','Otros descuentos','Neto','Costo empresa','Estado'];return _tabular_csv(headers,rows,f'rrhh_{periodo}.csv')
+
+ROUTE_MODULE.update({'intercambio_centro':'INFORMES','intercambio_validar':'INFORMES','marangatu_exportar':'CONTABILIDAD','informe_excel_tabla':'INFORMES','informe_csv_tabla':'INFORMES','contabilidad_csv':'CONTABILIDAD','rrhh_informes_excel':'RRHH','rrhh_informes_csv':'RRHH'})
+
+# ===== V13.9.47: Control fiscal, NC ventas/compras y monitor SIFEN =====
+def init_v13947_control_fiscal():
+    c=db()
+    c.execute("""CREATE TABLE IF NOT EXISTS notas_credito_ventas(
+      id INTEGER PRIMARY KEY,venta_id INTEGER NOT NULL,fecha TEXT NOT NULL,numero TEXT,
+      motivo TEXT NOT NULL,total REAL NOT NULL DEFAULT 0,estado TEXT NOT NULL DEFAULT 'EMITIDA',
+      estado_sifen TEXT NOT NULL DEFAULT 'NO_ENVIADA',cdc TEXT,protocolo_sifen TEXT,respuesta_sifen TEXT,
+      creado_en TEXT,usuario TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS nota_credito_venta_items(
+      id INTEGER PRIMARY KEY,nota_id INTEGER NOT NULL,venta_item_id INTEGER,producto_id INTEGER,
+      descripcion TEXT,cantidad REAL NOT NULL DEFAULT 0,precio REAL NOT NULL DEFAULT 0,total REAL NOT NULL DEFAULT 0,iva_pct REAL DEFAULT 10)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS notas_credito_compras(
+      id INTEGER PRIMARY KEY,compra_id INTEGER NOT NULL,fecha TEXT NOT NULL,numero TEXT NOT NULL,
+      timbrado TEXT,motivo TEXT NOT NULL,total REAL NOT NULL DEFAULT 0,estado TEXT NOT NULL DEFAULT 'REGISTRADA',creado_en TEXT,usuario TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS nota_credito_compra_items(
+      id INTEGER PRIMARY KEY,nota_id INTEGER NOT NULL,compra_item_id INTEGER,producto_id INTEGER,
+      descripcion TEXT,cantidad REAL NOT NULL DEFAULT 0,costo REAL NOT NULL DEFAULT 0,total REAL NOT NULL DEFAULT 0,iva_pct REAL DEFAULT 10)""")
+    cols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,defn in [('sifen_codigo_error','TEXT'),('sifen_mensaje_error','TEXT'),('sifen_ultimo_intento','TEXT'),('sifen_intentos','INTEGER DEFAULT 0'),('motivo_anulacion','TEXT'),('fecha_anulacion','TEXT')]:
+        if col not in cols:c.execute(f'alter table ventas add column {col} {defn}')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.47-control-fiscal',?)",(now(),));c.commit();c.close()
+init_v13947_control_fiscal()
+
+def _nc_numero(c,punto_id=None):
+    p=_punto_facturacion(c,punto_id)
+    if not p or not int(p['nota_credito_electronica'] or 0): raise ValueError('El punto de expedición no está habilitado para Nota de Crédito Electrónica.')
+    # Secuencia independiente de NC por punto, conservada en tabla auxiliar.
+    c.execute("CREATE TABLE IF NOT EXISTS sifen_correlativos(tipo TEXT,punto_id INTEGER,proximo INTEGER DEFAULT 1,PRIMARY KEY(tipo,punto_id))")
+    c.execute("insert or ignore into sifen_correlativos(tipo,punto_id,proximo) values('NCE',?,1)",(p['id'],))
+    n=int(c.execute("select proximo from sifen_correlativos where tipo='NCE' and punto_id=?",(p['id'],)).fetchone()[0]);
+    if n>9999999:raise ValueError('Se agotó la numeración de Nota de Crédito para este punto.')
+    c.execute("update sifen_correlativos set proximo=? where tipo='NCE' and punto_id=?",(n+1,p['id']))
+    return f"{str(p['establecimiento']).zfill(3)}-{str(p['punto_expedicion']).zfill(3)}-{str(n).zfill(7)}",p
+
+@app.route('/ventas/<int:venta_id>/nota-credito',methods=['GET','POST'])
+def nota_credito_venta(venta_id):
+    c=db();v=c.execute("select v.*,t.nombre cliente,t.ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(venta_id,)).fetchone()
+    if not v:c.close();return ('Venta no encontrada',404)
+    items=c.execute("select vi.*,p.nombre,p.codigo from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(venta_id,)).fetchall()
+    if request.method=='POST':
+      try:
+       motivo=(request.form.get('motivo') or '').strip()
+       if not motivo:raise ValueError('Indique el motivo de la Nota de Crédito.')
+       seleccion=[];total=0
+       for it in items:
+        q=float(request.form.get(f'qty_{it["id"]}') or 0)
+        if q<0 or q>float(it['cantidad'] or 0):raise ValueError('Cantidad inválida para '+str(it['nombre'] or 'ítem'))
+        if q>0:
+         t=q*float(it['precio'] or 0);total+=t;seleccion.append((it,q,t))
+       if not seleccion:raise ValueError('Seleccione al menos un ítem/cantidad a acreditar.')
+       numero,p=_nc_numero(c,v['sifen_punto_id']);cur=c.execute("insert into notas_credito_ventas(venta_id,fecha,numero,motivo,total,estado,estado_sifen,creado_en,usuario) values(?,?,?,?,?,'EMITIDA','PENDIENTE_ENVIO',?,?)",(venta_id,datetime.date.today().isoformat(),numero,motivo,total,now(),session.get('user')));nid=cur.lastrowid
+       for it,q,t in seleccion:c.execute("insert into nota_credito_venta_items(nota_id,venta_item_id,producto_id,descripcion,cantidad,precio,total,iva_pct) values(?,?,?,?,?,?,?,?)",(nid,it['id'],it['producto_id'],it['nombre'] or 'Ítem',q,it['precio'],t,it['iva_pct']))
+       c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'NCE','PENDIENTE_ENVIO',f'NC {numero} asociada a factura {v["numero"]}; pendiente de XML/firma/transmisión SIFEN'))
+       c.commit();flash('Nota de Crédito registrada. Quedó en el Monitor SIFEN como PENDIENTE DE ENVÍO.');c.close();return redirect('/sifen/monitor')
+      except Exception as e:c.rollback();flash(str(e))
+    puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and nota_credito_electronica=1 order by predeterminado desc,id").fetchall();c.close();return render_template('credit_note_sale.html',v=v,items=items,puntos=puntos)
+
+@app.post('/ventas/<int:venta_id>/anular')
+def anular_factura_venta(venta_id):
+    c=db()
+    try:
+      v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
+      if not v:raise ValueError('Factura no encontrada.')
+      if str(v['estado'] or '').upper()=='ANULADA':raise ValueError('La factura ya está anulada.')
+      motivo=(request.form.get('motivo') or '').strip()
+      if not motivo:raise ValueError('Indique el motivo de anulación.')
+      es_aprob=str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN')
+      if es_aprob:
+       # No se falsifica una cancelación DNIT: queda pendiente hasta que el WS de eventos confirme.
+       c.execute("update ventas set estado_sifen='CANCELACION_PENDIENTE',motivo_anulacion=?,sifen_ultimo_intento=? where id=?",(motivo,now(),venta_id))
+       c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','PENDIENTE_ENVIO',f'Factura {v["numero"]}: {motivo}'))
+       flash('Solicitud preparada. La factura NO se marca anulada fiscalmente hasta recibir confirmación de SIFEN.')
+      else:
+       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id));flash('Factura interna anulada. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.')
+      c.commit()
+    except Exception as e:c.rollback();flash(str(e))
+    finally:c.close()
+    return redirect(f'/ventas/{venta_id}/factura')
+
+@app.route('/compras/<int:compra_id>/nota-credito',methods=['GET','POST'])
+def nota_credito_compra(compra_id):
+    c=db();co=c.execute("select co.*,t.nombre proveedor,t.ruc from compras co left join terceros t on t.id=co.proveedor_id where co.id=?",(compra_id,)).fetchone()
+    if not co:c.close();return ('Compra no encontrada',404)
+    items=c.execute("select ci.*,p.nombre,p.codigo from compra_items ci left join productos p on p.id=ci.producto_id where ci.compra_id=? order by ci.id",(compra_id,)).fetchall()
+    if request.method=='POST':
+      try:
+       numero=(request.form.get('numero') or '').strip();tim=(request.form.get('timbrado') or '').strip();motivo=(request.form.get('motivo') or '').strip()
+       if not numero or not motivo:raise ValueError('Número de Nota de Crédito y motivo son obligatorios.')
+       sel=[];total=0
+       for it in items:
+        q=float(request.form.get(f'qty_{it["id"]}') or 0)
+        if q<0 or q>float(it['cantidad'] or 0):raise ValueError('Cantidad inválida.')
+        if q>0:
+         # compra_items.total guarda base; para reversión operativa usamos costo unitario cargado.
+         t=q*float(it['costo'] or 0);total+=t;sel.append((it,q,t))
+       if not sel:raise ValueError('Seleccione al menos un producto.')
+       cur=c.execute("insert into notas_credito_compras(compra_id,fecha,numero,timbrado,motivo,total,creado_en,usuario) values(?,?,?,?,?,?,?,?)",(compra_id,request.form.get('fecha') or datetime.date.today().isoformat(),numero,tim,motivo,total,now(),session.get('user')));nid=cur.lastrowid
+       for it,q,t in sel:
+        c.execute("insert into nota_credito_compra_items(nota_id,compra_item_id,producto_id,descripcion,cantidad,costo,total,iva_pct) values(?,?,?,?,?,?,?,?)",(nid,it['id'],it['producto_id'],it['nombre'] or 'Ítem',q,it['costo'],t,it['iva_pct']))
+        c.execute('update productos set stock=stock-? where id=?',(q,it['producto_id']));c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'NC_COMPRA',?)",(request.form.get('fecha') or datetime.date.today().isoformat(),it['producto_id'],'SALIDA',-q,float(it['costo'] or 0)*float(co['tipo_cambio'] or 1),nid))
+       c.commit();flash('Nota de Crédito de compra registrada y stock ajustado.');c.close();return redirect(f'/compras/{compra_id}/ver')
+      except Exception as e:c.rollback();flash(str(e))
+    c.close();return render_template('credit_note_purchase.html',co=co,items=items)
+
+@app.get('/sifen/monitor')
+def sifen_monitor():
+    c=db();estado=(request.args.get('estado') or '').strip().upper();q=(request.args.get('q') or '').strip();where=["coalesce(v.estado_sifen,'NO_ENVIADO') not in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN')"];args=[]
+    if estado:where.append("upper(coalesce(v.estado_sifen,'NO_ENVIADO'))=?");args.append(estado)
+    if q:where.append("(v.numero like ? or coalesce(v.cdc,'') like ? or coalesce(t.nombre,'') like ?)");args += ['%'+q+'%']*3
+    rows=c.execute("select v.*,t.nombre cliente from ventas v left join terceros t on t.id=v.cliente_id where "+' and '.join(where)+" order by v.id desc limit 500",args).fetchall()
+    ncs=c.execute("select n.*,v.numero factura,t.nombre cliente from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where coalesce(n.estado_sifen,'NO_ENVIADA') not in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA') order by n.id desc limit 200").fetchall();c.close();return render_template('sifen_monitor.html',rows=rows,ncs=ncs,estado=estado,q=q)
+
+@app.post('/sifen/monitor/venta/<int:venta_id>/reintentar')
+def sifen_reintentar_venta(venta_id):
+    c=db();v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
+    if not v:c.close();return ('No encontrada',404)
+    # Esta versión no declara envío exitoso sin respuesta real del WS.
+    c.execute("update ventas set sifen_intentos=coalesce(sifen_intentos,0)+1,sifen_ultimo_intento=?,estado_sifen=case when estado_sifen='RECHAZADO' then 'PENDIENTE_REENVIO' else coalesce(estado_sifen,'NO_ENVIADO') end where id=?",(now(),venta_id));c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'REENVIO','PENDIENTE',f'Factura {v["numero"]}: solicitud de reenvío registrada; requiere transmisor XML/WS SIFEN activo'));c.commit();c.close();flash('Reintento registrado en el monitor. No se marcará como aprobado sin respuesta real de SIFEN.');return redirect('/sifen/monitor')
+
+ROUTE_MODULE.update({'nota_credito_venta':'FACTURACION','anular_factura_venta':'FACTURACION','nota_credito_compra':'COMPRAS','sifen_monitor':'FACTURACION','sifen_reintentar_venta':'FACTURACION'})
