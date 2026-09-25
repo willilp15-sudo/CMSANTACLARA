@@ -5,10 +5,28 @@
 <form method="post"><input type="hidden" name="accion" value="guardar">
 <div class="grid">
 <label>RUC<input name="ruc" value="{{cfg.ruc or ''}}"></label><label>DV<input name="dv" value="{{cfg.dv or ''}}"></label>
-<label>Timbrado de prueba<input name="timbrado" value="{{cfg.timbrado or ''}}"></label><label>Tipo de contribuyente<select name="tipo_contribuyente"><option value="1" {% if cfg.tipo_contribuyente=='1' %}selected{% endif %}>1 · Persona Física</option><option value="2" {% if cfg.tipo_contribuyente!='1' %}selected{% endif %}>2 · Persona Jurídica</option></select></label><label>Establecimiento<input name="establecimiento" value="{{cfg.establecimiento or '001'}}"></label>
-<label>Punto expedición<input name="punto_expedicion" value="{{cfg.punto_expedicion or '001'}}"></label><label>ID CSC<input name="csc_id" value="{{cfg.csc_id or ''}}"></label>
+<label>Timbrado de prueba<input name="timbrado" value="{{cfg.timbrado or ''}}"></label><label>Tipo de contribuyente<select name="tipo_contribuyente"><option value="1" {% if cfg.tipo_contribuyente=='1' %}selected{% endif %}>1 · Persona Física</option><option value="2" {% if cfg.tipo_contribuyente!='1' %}selected{% endif %}>2 · Persona Jurídica</option></select></label><label>ID CSC<input name="csc_id" value="{{cfg.csc_id or ''}}"></label>
 <label style="grid-column:1/-1">CSC de prueba<input type="password" name="csc" value="{{cfg.csc or ''}}" autocomplete="off"></label>
 </div><button>Guardar configuración TEST</button></form>
+
+<hr><h3>Establecimientos y puntos de expedición autorizados por DNIT</h3>
+<p>Registre aquí únicamente establecimientos y puntos que ya estén habilitados por DNIT. Cada punto mantiene su propio correlativo de Factura Electrónica.</p>
+<form method="post" class="card"><input type="hidden" name="accion" value="punto_guardar"><input type="hidden" name="p_id" value="">
+<div class="grid">
+<label>Establecimiento (3 dígitos)<input name="p_establecimiento" maxlength="3" pattern="[0-9]{1,3}" required placeholder="001"></label>
+<label>Punto de expedición (3 dígitos)<input name="p_punto" maxlength="3" pattern="[0-9]{1,3}" required placeholder="001"></label>
+<label>Descripción<input name="p_descripcion" placeholder="Ej.: Caja Recepción"></label>
+<label>Timbrado electrónico<input name="p_timbrado" inputmode="numeric"></label>
+<label>Próxima Factura Electrónica<input name="p_proximo" type="number" min="1" max="9999999" value="1" required></label>
+<label><input type="checkbox" name="p_autorizado" checked> Autorizado por DNIT</label>
+<label><input type="checkbox" name="p_activo" checked> Activo</label>
+<label><input type="checkbox" name="p_predeterminado"> Predeterminado</label>
+<label><input type="checkbox" name="p_factura" checked> Factura Electrónica</label>
+<label><input type="checkbox" name="p_nc"> Nota de Crédito Electrónica</label>
+<label><input type="checkbox" name="p_nd"> Nota de Débito Electrónica</label>
+</div><button>➕ Registrar punto autorizado</button></form>
+<div class="table"><table><tr><th>Est.</th><th>Punto</th><th>Descripción</th><th>Timbrado</th><th>Próx. FE</th><th>Documentos</th><th>Estado</th><th>Acción</th></tr>
+{% for p in puntos or [] %}<tr><td>{{p.establecimiento}}</td><td>{{p.punto_expedicion}}</td><td>{{p.descripcion or ''}}</td><td>{{p.timbrado or ''}}</td><td>{{'%07d'|format(p.proximo_numero_factura or 1)}}</td><td>{% if p.factura_electronica %}FE {% endif %}{% if p.nota_credito_electronica %}NC {% endif %}{% if p.nota_debito_electronica %}ND{% endif %}</td><td>{% if p.autorizado_dnit %}DNIT ✓{% else %}No autorizado{% endif %} · {% if p.activo %}Activo{% else %}Inactivo{% endif %}{% if p.predeterminado %} · <b>Predeterminado</b>{% endif %}</td><td>{% if not p.predeterminado %}<form method="post" style="display:inline"><input type="hidden" name="accion" value="punto_predeterminado"><input type="hidden" name="p_id" value="{{p.id}}"><button>Usar por defecto</button></form>{% endif %}</td></tr>{% endfor %}</table></div>
 <hr><h3>Certificado digital</h3>
 <p>El certificado se guarda fuera del repositorio, en el almacenamiento persistente del servidor. La contraseña se usa únicamente para abrir el P12/PFX y no se guarda.</p>
 <form method="post" enctype="multipart/form-data"><input type="hidden" name="accion" value="certificado"><input type="file" name="certificado" accept=".p12,.pfx" required> <input type="password" name="password" placeholder="Contraseña del certificado" required> <button>Instalar y validar certificado</button></form>

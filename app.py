@@ -516,6 +516,67 @@ def ventas_unificado():
  c.close()
  return render_template('ventas_unificado.html',ap=ap,hoy=hoy,agenda_hoy=agenda_hoy,pendientes=pendientes,ventas_hoy=ventas_hoy)
 
+
+# ===== V13.9.44: múltiples establecimientos/puntos de expedición y correlatividad independiente =====
+def init_v13944_puntos_expedicion():
+    c=db()
+    c.execute("""CREATE TABLE IF NOT EXISTS sifen_puntos_expedicion(
+      id INTEGER PRIMARY KEY,
+      establecimiento TEXT NOT NULL,
+      punto_expedicion TEXT NOT NULL,
+      descripcion TEXT,
+      timbrado TEXT,
+      factura_electronica INTEGER NOT NULL DEFAULT 1,
+      nota_credito_electronica INTEGER NOT NULL DEFAULT 0,
+      nota_debito_electronica INTEGER NOT NULL DEFAULT 0,
+      autorizado_dnit INTEGER NOT NULL DEFAULT 1,
+      activo INTEGER NOT NULL DEFAULT 1,
+      predeterminado INTEGER NOT NULL DEFAULT 0,
+      proximo_numero_factura INTEGER NOT NULL DEFAULT 1,
+      creado_en TEXT, actualizado_en TEXT,
+      UNIQUE(establecimiento,punto_expedicion)
+    )""")
+    vcols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,defn in [('sifen_punto_id','INTEGER'),('establecimiento','TEXT'),('punto_expedicion','TEXT')]:
+        if col not in vcols:c.execute(f'alter table ventas add column {col} {defn}')
+    # Migra la configuración anterior como punto inicial sin borrar ningún dato.
+    n=c.execute('select count(*) from sifen_puntos_expedicion').fetchone()[0]
+    if not n:
+        cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        ic=c.execute('select * from institucion_config where id=1').fetchone()
+        est=((cfg['establecimiento'] if cfg else None) or '001').strip().zfill(3)
+        pex=((cfg['punto_expedicion'] if cfg else None) or '001').strip().zfill(3)
+        tim=((cfg['timbrado'] if cfg else None) or '').strip()
+        prox=max(1,int((ic['proximo_numero_factura'] if ic else 1) or 1))
+        c.execute('insert or ignore into sifen_puntos_expedicion(establecimiento,punto_expedicion,descripcion,timbrado,autorizado_dnit,activo,predeterminado,proximo_numero_factura,creado_en,actualizado_en) values(?,?,?,?,1,1,1,?,?,?)',(est,pex,'Punto migrado de la configuración anterior',tim,prox,now(),now()))
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.44-multipunto-expedicion',?)",(now(),))
+    c.commit();c.close()
+
+def _punto_facturacion(c,punto_id=None):
+    if punto_id:
+        p=c.execute("select * from sifen_puntos_expedicion where id=? and activo=1 and autorizado_dnit=1 and factura_electronica=1",(int(punto_id),)).fetchone()
+        if not p: raise ValueError('El punto de expedición seleccionado no está activo/autorizado para Factura Electrónica.')
+        return p
+    p=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and factura_electronica=1 order by predeterminado desc,id limit 1").fetchone()
+    if not p: raise ValueError('Configure al menos un punto de expedición DNIT activo y autorizado para Factura Electrónica.')
+    return p
+
+def _siguiente_numero_factura(c,punto_id=None):
+    """Reserva el correlativo del punto dentro de la misma transacción de la venta."""
+    p=_punto_facturacion(c,punto_id)
+    est=str(p['establecimiento']).zfill(3);pex=str(p['punto_expedicion']).zfill(3)
+    n=max(1,int(p['proximo_numero_factura'] or 1))
+    while c.execute('select 1 from ventas where numero=? limit 1',(f'{est}-{pex}-{n:07d}',)).fetchone(): n+=1
+    numero=f'{est}-{pex}-{n:07d}'
+    c.execute('update sifen_puntos_expedicion set proximo_numero_factura=?,actualizado_en=? where id=?',(n+1,now(),p['id']))
+    return numero,p
+
+def _proximo_numero_factura_preview(c,punto_id=None):
+    p=_punto_facturacion(c,punto_id)
+    est=str(p['establecimiento']).zfill(3);pex=str(p['punto_expedicion']).zfill(3);n=max(1,int(p['proximo_numero_factura'] or 1))
+    while c.execute('select 1 from ventas where numero=? limit 1',(f'{est}-{pex}-{n:07d}',)).fetchone(): n+=1
+    return f'{est}-{pex}-{n:07d}'
+
 @app.route('/ventas/carga',methods=['GET','POST'])
 def ventas():
  c=db()
@@ -558,6 +619,7 @@ def ventas():
     else:exento+=line_total
     detalle.append((p,pid,qty,price,line_total,base,line_iva,iva_pct,cost_line))
    tid=int(request.form['proveedor_id']);totg=total*tc;ivag=iva*tc
+   numero_factura,punto_factura=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'))
    if condicion=='CUOTAS' and entrega>total:raise ValueError('La entrega inicial no puede superar el total de la venta')
    cuotas_venta=[]
    if condicion=='CUOTAS':
@@ -565,7 +627,8 @@ def ventas():
     if saldo_fin>0 and not cuotas_venta:raise ValueError('Debe cargar al menos una cuota para el saldo financiado')
     suma=round(sum(float(x.get('importe') or 0) for x in cuotas_venta),2)
     if abs(suma-saldo_fin)>0.01:raise ValueError(f'La suma de cuotas ({suma:,.2f}) debe ser igual al saldo financiado ({saldo_fin:,.2f})')
-   cur=c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,referencia_cobro,entrega_inicial,fecha_vencimiento) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tid,request.form['numero'],mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,medio or None,ref or None,entrega,venc));vid=cur.lastrowid
+   cur=c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,referencia_cobro,entrega_inicial,fecha_vencimiento) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tid,numero_factura,mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,medio or None,ref or None,entrega,venc));vid=cur.lastrowid
+   c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
    c.execute('update ventas set cuenta_bancaria_id=?,terminal_pos_id=? where id=?',(cuenta_id,pos_id,vid))
    for p,pid,qty,price,line_total,base,line_iva,iva_pct,cost_line in detalle:
     c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,pid,qty,price,line_total,line_total*tc,cost_line,iva_pct));c.execute('update productos set stock=stock-? where id=?',(qty,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'SALIDA',-qty,p['costo_pyg'],'VENTA',vid))
@@ -585,10 +648,10 @@ def ventas():
    if cobro_inicial>0:lineas.append(('1.1.01',cobro_inicial*tc,0,cobro_inicial,'Cobro inicial'))
    if saldo>0:lineas.append(('1.1.02',saldo*tc,0,saldo,'Cuenta a cobrar'))
    lineas += [('4.1.01',0,base_total*tc,base_total,'Venta'),('2.1.02',0,ivag,iva,'IVA débito'),('5.1.01',costg,0,0,'Costo de venta'),('1.1.03',0,costg,0,'Salida inventario')]
-   asiento(c,fecha,'Venta '+request.form['numero'],'VENTA',vid,mon,tc,lineas)
+   asiento(c,fecha,'Venta '+numero_factura,'VENTA',vid,mon,tc,lineas)
    # V13.9.39: en TEST se genera el CDC conforme a la estructura del Manual Técnico.
    try:
-    cdc_test=_generar_cdc_test_venta(c,vid,fecha,request.form['numero'])
+    cdc_test=_generar_cdc_test_venta(c,vid,fecha,numero_factura)
     if cdc_test: flash('CDC de PRUEBA generado: '+cdc_test+' · Sin valor fiscal hasta validación SIFEN TEST.')
    except Exception as sx:
     _sifen_log('CDC_TEST','ERROR',f'Venta {vid}: {sx}')
@@ -602,7 +665,7 @@ def ventas():
  if buscado:
   like='%'+q+'%'
   rows=c.execute("select x.*,t.nombre tercero from ventas x join terceros t on t.id=x.cliente_id where x.numero like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(like,like,like,like)).fetchall()
- ters=c.execute("select * from terceros where tipo in ('CLIENTE','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();c.close();return render_template('transaction.html',kind='Venta',rows=rows,ters=ters,prods=prods,mons=mons,cuentas=cuentas,poses=poses,buscado=buscado,q=q)
+ ters=c.execute("select * from terceros where tipo in ('CLIENTE','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and factura_electronica=1 order by predeterminado desc,establecimiento,punto_expedicion").fetchall();proximo_numero=_proximo_numero_factura_preview(c) if puntos else 'Configure un punto DNIT';c.close();return render_template('transaction.html',kind='Venta',rows=rows,ters=ters,prods=prods,mons=mons,cuentas=cuentas,poses=poses,puntos=puntos,buscado=buscado,q=q,proximo_numero=proximo_numero)
 
 @app.route('/ventas/recepcion-caja',methods=['GET','POST'])
 def recepcion_caja_unificada():
@@ -801,11 +864,8 @@ def config_sanatorio():
    c.execute('insert or ignore into especialidades(nombre,precio_consulta,honorario_medico) values(?,?,?)',(esp,precio,hon))
    c.execute('insert into medicos(nombre,registro,especialidad,precio_consulta,honorario_consulta,consultorio_numero,documento,ruc,telefono,email,direccion,activo) values(?,?,?,?,?,?,?,?,?,?,?,1)',(request.form['nombre'].strip(),request.form.get('registro','').strip(),esp,precio,hon,request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip()))
   elif k=='actualizar_medico':
-   mid=int(request.form['medico_id'])
-   antes=c.execute('select * from medicos where id=?',(mid,)).fetchone()
-   c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,mid))
-   despues=c.execute('select * from medicos where id=?',(mid,)).fetchone()
-   audit_change(c,'EDITAR_MEDICO','MEDICOS',mid,snapshot(antes),snapshot(despues),'Edición de ficha médica')
+   c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,int(request.form['medico_id'])))
+   audit('EDITAR_MEDICO',request.form['medico_id'])
   elif k=='aseguradora':
    cur=c.execute("insert into terceros(tipo,ruc,nombre,moneda) values('CLIENTE',?,?,?)",(request.form['ruc'],request.form['nombre'],request.form['moneda']));c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda) values(?,?,?,?)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda']))
   elif k=='cama':
@@ -2703,10 +2763,8 @@ def factura_venta_pdf(venta_id):
     t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1,rowHeights=[8*mm]+[10*mm]*(len(data)-1));t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
     total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
     tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
-    # QR oficial: solo si deriva del DigestValue de la firma XML real y del CSC.
-    qr_url=(v['sifen_qr_url'] if 'sifen_qr_url' in v.keys() else None)
-    firmado=bool(v['cdc']) and bool(v['sifen_digest_value'] if 'sifen_digest_value' in v.keys() else None) and bool(qr_url)
-    _kude_footer(story,inst,v['cdc'],qr_url,firmado)
+    url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if es_dte and v['cdc'] else None
+    _kude_footer(story,inst,v['cdc'],url,es_dte)
     doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
 
 
@@ -3010,7 +3068,7 @@ def caja_central_detalle(aid):
  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall();total=sum(float(x['total_pyg'] or 0) for x in items);rem=c.execute("select * from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
  if not rem:
   numero='REM-'+str(aid);c.execute('insert or ignore into remisiones_internas(numero,fecha,paciente_id,admision_id,creado_por,creado_en) values(?,?,?,?,?,?)',(numero,a['fecha'],a['paciente_id'],aid,session.get('user'),now()));c.commit();rem=c.execute('select * from remisiones_internas where numero=?',(numero,)).fetchone()
- c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem)
+ puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and factura_electronica=1 order by predeterminado desc,establecimiento,punto_expedicion").fetchall();c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem,puntos=puntos)
 
 @app.post('/ventas/caja-central/<int:aid>/facturar')
 def caja_central_facturar(aid):
@@ -3020,25 +3078,24 @@ def caja_central_facturar(aid):
   if not a or not a['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
   items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
   if not items:raise ValueError('La cuenta no tiene cargos pendientes para facturar.')
-  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero=(request.form.get('numero') or '').strip();medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
-  if not numero:raise ValueError('Ingrese el numero de factura.')
-  if c.execute('select 1 from ventas where numero=?',(numero,)).fetchone():raise ValueError('Ya existe una venta/factura con ese numero.')
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'));medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
   total=sum(float(x['total_pyg'] or 0) for x in items)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de facturar una cuenta en efectivo.')
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,a['tercero_id'],numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
+  c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
   for x in items:c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),0,0,x['descripcion']))
   c.execute('update cargos_paciente set facturado=1 where admision_id=? and coalesce(facturado,0)=0',(aid,));c.execute("update remisiones_internas set estado='FACTURADA' where admision_id=? and estado='PENDIENTE'",(aid,));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,a['tercero_id'],'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
   if medio=='Efectivo':
    ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro cuenta completa '+a['paciente'],total,'VENTA',vid,session.get('user')))
-  asiento(c,fecha,'Factura caja cuenta '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,total,total,'Servicios')]);c.commit();audit('FACTURAR_CUENTA_CAJA',f'{aid}:{vid}');flash('Cuenta completa facturada correctamente. Factura '+numero);return redirect(f'/ventas/{vid}/factura')
+  asiento(c,fecha,'Factura caja cuenta '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,total,total,'Servicios')]);_generar_cdc_test_venta(c,vid,fecha,numero);c.commit();audit('FACTURAR_CUENTA_CAJA',f'{aid}:{vid}');flash('Cuenta completa facturada correctamente. Factura '+numero);return redirect(f'/ventas/{vid}/factura')
  except Exception as e:c.rollback();flash('No se pudo facturar la cuenta: '+str(e));return redirect(f'/ventas/caja-central/{aid}')
  finally:c.close()
 
 @app.get('/ventas/caja-central/consultorio/<int:pid>')
 def caja_central_consultorio_detalle(pid):
- c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();c.close()
+ c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and factura_electronica=1 order by predeterminado desc,establecimiento,punto_expedicion").fetchall();c.close()
  if not x:flash('La prestación ya fue facturada o no existe.');return redirect('/ventas/caja-central')
- return render_template('cash_consult_detail.html',x=x)
+ return render_template('cash_consult_detail.html',x=x,puntos=puntos)
 
 @app.post('/ventas/caja-central/consultorio/<int:pid>/facturar')
 def caja_central_consultorio_facturar(pid):
@@ -3047,19 +3104,18 @@ def caja_central_consultorio_facturar(pid):
   x=c.execute("select k.*,p.nombre paciente,p.tercero_id from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone()
   if not x:raise ValueError('La prestación ya fue procesada o no existe.')
   if not x['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
-  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero=(request.form.get('numero') or '').strip();medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
-  if not numero:raise ValueError('Ingrese el número de factura.')
-  if c.execute('select 1 from ventas where numero=?',(numero,)).fetchone():raise ValueError('Ya existe una factura con ese número.')
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'));medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de cobrar en efectivo.')
   base,iva=desglosar_iva_incluido(total,10)
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,x['tercero_id'],numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
+  c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
   c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,1,total,total,total,0,10,x['descripcion']))
   c.execute("update caja_pendientes_consultorio set estado='FACTURADO',venta_id=?,procesado_en=? where id=?",(vid,now(),pid));c.execute('update consultas set facturada=1,venta_id=? where id=?',(vid,x['consulta_id']))
   c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,x['tercero_id'],'PYG',1,total,0,0,'PAGADO'))
   c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro consultorio '+x['paciente'],'VENTA',vid))
   if medio=='Efectivo':
    ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro consultorio '+x['paciente'],total,'VENTA',vid,session.get('user')))
-  asiento(c,fecha,'Factura consultorio '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,base,base,'Servicio'),('2.1.02',0,iva,iva,'IVA débito')]);c.commit();audit('FACTURAR_CONSULTORIO_CAJA',f'{pid}:{vid}');flash('Prestación facturada y cobrada correctamente en Caja.');return redirect(f'/ventas/{vid}/factura')
+  asiento(c,fecha,'Factura consultorio '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,base,base,'Servicio'),('2.1.02',0,iva,iva,'IVA débito')]);_generar_cdc_test_venta(c,vid,fecha,numero);c.commit();audit('FACTURAR_CONSULTORIO_CAJA',f'{pid}:{vid}');flash('Prestación facturada y cobrada correctamente en Caja.');return redirect(f'/ventas/{vid}/factura')
  except Exception as e:c.rollback();flash('No se pudo facturar: '+str(e));return redirect(f'/ventas/caja-central/consultorio/{pid}')
  finally:c.close()
 
@@ -3166,6 +3222,7 @@ def init_v13938_sifen():
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.38-sifen-test',?)",(now(),))
     c.commit();c.close()
 init_v13938_sifen()
+init_v13944_puntos_expedicion()
 
 SIFEN_TEST_BASE='https://sifen-test.set.gov.py'
 def _sifen_dir():
@@ -3195,10 +3252,24 @@ def configuracion_sifen():
     c=db()
     if request.method=='POST':
         accion=request.form.get('accion','guardar')
+        if accion=='punto_guardar':
+            try:
+                est=_solo_digitos(request.form.get('p_establecimiento'))[-3:].zfill(3);pex=_solo_digitos(request.form.get('p_punto'))[-3:].zfill(3)
+                if not est or not pex: raise ValueError('Establecimiento y punto son obligatorios.')
+                pid=int(request.form.get('p_id') or 0);pred=1 if request.form.get('p_predeterminado') else 0
+                if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0')
+                vals=(est,pex,(request.form.get('p_descripcion') or '').strip(),(request.form.get('p_timbrado') or '').strip(),1 if request.form.get('p_factura') else 0,1 if request.form.get('p_nc') else 0,1 if request.form.get('p_nd') else 0,1 if request.form.get('p_autorizado') else 0,1 if request.form.get('p_activo') else 0,pred,max(1,int(request.form.get('p_proximo') or 1)),now())
+                if pid:c.execute('update sifen_puntos_expedicion set establecimiento=?,punto_expedicion=?,descripcion=?,timbrado=?,factura_electronica=?,nota_credito_electronica=?,nota_debito_electronica=?,autorizado_dnit=?,activo=?,predeterminado=?,proximo_numero_factura=?,actualizado_en=? where id=?',vals+(pid,))
+                else:c.execute('insert into sifen_puntos_expedicion(establecimiento,punto_expedicion,descripcion,timbrado,factura_electronica,nota_credito_electronica,nota_debito_electronica,autorizado_dnit,activo,predeterminado,proximo_numero_factura,creado_en,actualizado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',vals[:-1]+(now(),vals[-1]))
+                c.commit();flash('Punto de expedición guardado. Use únicamente códigos previamente autorizados por DNIT.')
+            except Exception as e:c.rollback();flash('No se pudo guardar el punto: '+str(e))
+            c.close();return redirect('/configuracion/sifen')
+        elif accion=='punto_predeterminado':
+            pid=int(request.form.get('p_id') or 0);c.execute('update sifen_puntos_expedicion set predeterminado=0');c.execute('update sifen_puntos_expedicion set predeterminado=1,activo=1 where id=?',(pid,));c.commit();c.close();return redirect('/configuracion/sifen')
         if accion=='guardar':
             # Seguridad: esta versión habilita únicamente TEST. Producción requiere activación deliberada posterior.
-            vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','establecimiento','punto_expedicion','csc_id','csc','tipo_contribuyente')]
-            c.execute("update sifen_config set ambiente='TEST',ruc=?,dv=?,timbrado=?,establecimiento=?,punto_expedicion=?,csc_id=?,csc=?,tipo_contribuyente=?,actualizado_en=? where id=1",(*vals,now()))
+            vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
+            c.execute("update sifen_config set ambiente='TEST',ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,actualizado_en=? where id=1",(*vals,now()))
             c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN TEST actualizada');flash('Configuración SIFEN TEST guardada.')
         elif accion=='certificado':
             archivo=request.files.get('certificado');password=request.form.get('password','')
@@ -3226,8 +3297,8 @@ def configuracion_sifen():
             except Exception as e:
                 detalle=str(e);c.execute("update sifen_config set ultimo_test=?,ultimo_estado='ERROR',ultimo_detalle=? where id=1",(now(),detalle));c.commit();_sifen_log('CONEXION_MTLS','ERROR',detalle);flash('Prueba de conexión fallida: '+detalle)
         c.close();return redirect('/configuracion/sifen')
-    cfg=c.execute('select * from sifen_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();c.close()
-    return render_template('sifen_config.html',cfg=cfg,logs=logs,test_base=SIFEN_TEST_BASE)
+    cfg=c.execute('select * from sifen_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();c.close()
+    return render_template('sifen_config.html',cfg=cfg,logs=logs,puntos=puntos,test_base=SIFEN_TEST_BASE)
 
 ROUTE_MODULE.update({'configuracion_sifen':'CONFIG_SANATORIO'})
 
@@ -3263,7 +3334,7 @@ def _generar_cdc_test_venta(c,venta_id,fecha,numero):
     if not cfg or str(cfg['ambiente'] or '').upper()!='TEST': return None
     if not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']):
         raise ValueError('El certificado SIFEN TEST no está instalado en el servidor.')
-    ruc=_solo_digitos(cfg['ruc']); dv=_solo_digitos(cfg['dv']); est=_solo_digitos(cfg['establecimiento']); pexp=_solo_digitos(cfg['punto_expedicion'])
+    ruc=_solo_digitos(cfg['ruc']); dv=_solo_digitos(cfg['dv']); venta=c.execute('select sifen_punto_id,establecimiento,punto_expedicion from ventas where id=?',(venta_id,)).fetchone(); pto=_punto_facturacion(c,venta['sifen_punto_id'] if venta else None); est=_solo_digitos((venta['establecimiento'] if venta else None) or pto['establecimiento']); pexp=_solo_digitos((venta['punto_expedicion'] if venta else None) or pto['punto_expedicion'])
     tip=_solo_digitos(cfg['tipo_contribuyente'] or '2')
     if not (ruc and dv and est and pexp and tip): raise ValueError('Complete RUC, DV, establecimiento, punto de expedición y tipo de contribuyente en Configuración SIFEN.')
     if len(ruc)>8: raise ValueError('El RUC emisor del CDC no puede superar 8 dígitos.')
@@ -3281,66 +3352,152 @@ def _generar_cdc_test_venta(c,venta_id,fecha,numero):
     c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'CDC_TEST','GENERADO',f'Venta {venta_id} · CDC {cdc} · NO ENVIADO / NO APROBADO'))
     return cdc
 
-
-# ===== V13.9.42: QR SIFEN TEST conforme MT v150 + corrección edición médicos =====
-def init_v13942_qr_sifen():
+# ===== V13.9.45: Recursos Humanos Integral =====
+def init_v13945_rrhh():
     c=db()
-    vcols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
-    for col,defn in [('sifen_fecha_emision','TEXT'),('sifen_digest_value','TEXT'),('sifen_qr_url','TEXT'),('sifen_qr_hash','TEXT'),('sifen_xml_path','TEXT'),('sifen_respuesta_codigo','TEXT'),('sifen_respuesta_mensaje','TEXT')]:
-        if col not in vcols:c.execute(f'alter table ventas add column {col} {defn}')
-    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.42-qr-sifen-test-seguro',?)",(now(),))
+    c.executescript('''
+    CREATE TABLE IF NOT EXISTS empleados(
+      id INTEGER PRIMARY KEY,nombre TEXT NOT NULL,documento TEXT,ruc TEXT,fecha_nacimiento TEXT,telefono TEXT,email TEXT,direccion TEXT,
+      cargo TEXT,departamento TEXT,fecha_ingreso TEXT,fecha_salida TEXT,tipo_contrato TEXT,salario_base REAL DEFAULT 0,
+      ips_numero TEXT,ips_activo INTEGER DEFAULT 1,turno TEXT,usuario_id INTEGER,estado TEXT DEFAULT 'ACTIVO',observacion TEXT,creado_en TEXT,actualizado_en TEXT);
+    CREATE TABLE IF NOT EXISTS rrhh_config(id INTEGER PRIMARY KEY CHECK(id=1),ips_obrero_pct REAL DEFAULT 9,ips_patronal_pct REAL DEFAULT 16.5,
+      cuenta_sueldos TEXT DEFAULT '5.4.01',cuenta_cargas TEXT DEFAULT '5.4.02',cuenta_obligaciones TEXT DEFAULT '2.1.04',actualizado_en TEXT);
+    INSERT OR IGNORE INTO rrhh_config(id,ips_obrero_pct,ips_patronal_pct) VALUES(1,9,16.5);
+    CREATE TABLE IF NOT EXISTS rrhh_asistencias(id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,fecha TEXT NOT NULL,hora_entrada TEXT,hora_salida TEXT,
+      estado TEXT DEFAULT 'PRESENTE',minutos_tardanza INTEGER DEFAULT 0,horas_extra REAL DEFAULT 0,observacion TEXT,registrado_por TEXT,creado_en TEXT,UNIQUE(empleado_id,fecha));
+    CREATE TABLE IF NOT EXISTS rrhh_novedades(id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,fecha TEXT NOT NULL,periodo TEXT NOT NULL,tipo TEXT NOT NULL,
+      descripcion TEXT,monto REAL DEFAULT 0,cantidad REAL DEFAULT 0,desde TEXT,hasta TEXT,estado TEXT DEFAULT 'PENDIENTE',archivo_ref TEXT,creado_por TEXT,creado_en TEXT);
+    CREATE TABLE IF NOT EXISTS rrhh_liquidaciones(id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,periodo TEXT NOT NULL,fecha TEXT NOT NULL,
+      salario_base REAL DEFAULT 0,haberes REAL DEFAULT 0,horas_extra REAL DEFAULT 0,bonificaciones REAL DEFAULT 0,otros_haberes REAL DEFAULT 0,
+      ips_base REAL DEFAULT 0,ips_obrero REAL DEFAULT 0,ips_patronal REAL DEFAULT 0,anticipos REAL DEFAULT 0,prestamos REAL DEFAULT 0,otros_descuentos REAL DEFAULT 0,
+      neto REAL DEFAULT 0,costo_empresa REAL DEFAULT 0,estado TEXT DEFAULT 'BORRADOR',asiento_id INTEGER,pagado_en TEXT,creado_por TEXT,creado_en TEXT,
+      UNIQUE(empleado_id,periodo));
+    CREATE TABLE IF NOT EXISTS rrhh_vacaciones(id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,desde TEXT,hasta TEXT,dias REAL DEFAULT 0,
+      tipo TEXT DEFAULT 'VACACIONES',motivo TEXT,estado TEXT DEFAULT 'SOLICITADO',creado_por TEXT,creado_en TEXT);
+    CREATE TABLE IF NOT EXISTS rrhh_documentos(id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,tipo TEXT,nombre TEXT,referencia TEXT,vencimiento TEXT,observacion TEXT,creado_en TEXT);
+    ''')
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.45-recursos-humanos-integral',?)",(now(),))
+    # Cuentas RRHH, sin reemplazar plan existente.
+    for x in [('2.1.06','IPS a Pagar','PASIVO'),('1.1.05','Anticipos al Personal','ACTIVO')]:
+        c.execute('insert or ignore into plan_cuentas(codigo,nombre,tipo) values(?,?,?)',x)
+    # Módulo y permisos de administrador.
+    MODULES['RRHH']='Recursos Humanos'
+    rid=c.execute("select id from roles where nombre='ADMINISTRADOR'").fetchone()
+    if rid:
+        for a in ACTIONS:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid[0],'RRHH',a))
     c.commit();c.close()
-init_v13942_qr_sifen()
+init_v13945_rrhh()
 
-SIFEN_QR_TEST_BASE='https://www.ekuatia.set.gov.py/consultas-test/qr?'
+ROUTE_MODULE.update({
+ 'rrhh_inicio':'RRHH','rrhh_funcionarios':'RRHH','rrhh_funcionario_editar':'RRHH','rrhh_asistencia':'RRHH','rrhh_novedades':'RRHH',
+ 'rrhh_liquidaciones':'RRHH','rrhh_liquidar':'RRHH','rrhh_liquidacion_detalle':'RRHH','rrhh_liquidacion_pdf':'RRHH','rrhh_configuracion':'RRHH','rrhh_informes':'RRHH'
+})
 
-def _sifen_hex_utf8(valor):
-    return str(valor or '').encode('utf-8').hex()
+def _rrhh_perm(accion='VER'):
+    return user_has('RRHH',accion)
 
-def _sifen_decimal_qr(valor):
-    from decimal import Decimal
-    d=Decimal(str(valor or 0)); txt=format(d,'f')
-    if '.' in txt: txt=txt.rstrip('0').rstrip('.')
-    return txt or '0'
+def _rrhh_periodo(v=None):
+    return (v or datetime.date.today().strftime('%Y-%m'))[:7]
 
-def _sifen_construir_qr_test(c,venta_id,digest_value,fecha_emision=None):
-    import hashlib
-    v=c.execute('select v.*,t.ruc receptor_ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?',(venta_id,)).fetchone()
-    cfg=c.execute('select * from sifen_config where id=1').fetchone()
-    if not v: raise ValueError('Venta no encontrada.')
-    if not cfg or str(cfg['ambiente'] or '').upper()!='TEST': raise ValueError('El ambiente SIFEN debe ser TEST.')
-    cdc=_solo_digitos(v['cdc'])
-    if len(cdc)!=44: raise ValueError('El CDC debe tener 44 dígitos antes de generar el QR.')
-    csc=str(cfg['csc'] or '').strip(); idcsc=_solo_digitos(cfg['csc_id']).zfill(4)
-    if not csc or len(idcsc)!=4: raise ValueError('Configure CSC e IdCSC TEST antes de generar el QR.')
-    digest=str(digest_value or '').strip()
-    if not digest: raise ValueError('Falta DigestValue de la firma digital XML (XS17).')
-    femi=(fecha_emision or (v['sifen_fecha_emision'] if 'sifen_fecha_emision' in v.keys() else None) or now())
-    femi=str(femi)[:19].replace(' ','T')
-    receptor=_solo_digitos(v['receptor_ruc']) or '0'
-    total=_sifen_decimal_qr(v['total']); iva=_sifen_decimal_qr(v['iva'])
-    nitems=c.execute('select count(*) from venta_items where venta_id=?',(venta_id,)).fetchone()[0] or 0
-    params=[('nVersion','150'),('Id',cdc),('dFeEmiDE',_sifen_hex_utf8(femi)),('dRucRec',receptor),('dTotGralOpe',total),('dTotIVA',iva),('cItems',str(nitems)),('DigestValue',_sifen_hex_utf8(digest)),('IdCSC',idcsc)]
-    datos='&'.join(f'{k}={val}' for k,val in params)
-    chash=hashlib.sha256((datos+csc).encode('utf-8')).hexdigest()
-    url=SIFEN_QR_TEST_BASE+datos+'&cHashQR='+chash
-    c.execute("update ventas set sifen_fecha_emision=?,sifen_digest_value=?,sifen_qr_url=?,sifen_qr_hash=?,estado_sifen=case when coalesce(estado_sifen,'') in ('APROBADO','ACEPTADO') then estado_sifen else 'DE_FIRMADO_TEST' end where id=?",(femi,digest,url,chash,venta_id))
-    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'QR_TEST','GENERADO',f'Venta {venta_id} · CDC {cdc} · QR construido desde DigestValue XMLDSig real'))
-    return url
+@app.route('/rrhh')
+def rrhh_inicio():
+    if not _rrhh_perm(): return ('Acceso no autorizado',403)
+    c=db();periodo=_rrhh_periodo(request.args.get('periodo'))
+    stats={
+      'activos':c.execute("select count(*) n from empleados where estado='ACTIVO'").fetchone()['n'],
+      'ausencias':c.execute("select count(*) n from rrhh_asistencias where substr(fecha,1,7)=? and estado in ('AUSENTE','REPOSO','PERMISO')",(periodo,)).fetchone()['n'],
+      'anticipos':c.execute("select coalesce(sum(monto),0) n from rrhh_novedades where periodo=? and tipo='ANTICIPO' and estado!='ANULADO'",(periodo,)).fetchone()['n'],
+      'nomina':c.execute("select coalesce(sum(neto),0) n from rrhh_liquidaciones where periodo=? and estado!='ANULADA'",(periodo,)).fetchone()['n']}
+    recientes=c.execute('select e.nombre,n.tipo,n.descripcion,n.monto,n.fecha,n.estado from rrhh_novedades n join empleados e on e.id=n.empleado_id order by n.id desc limit 10').fetchall();c.close()
+    return render_template('rrhh_dashboard.html',stats=stats,periodo=periodo,recientes=recientes)
 
-@app.post('/ventas/<int:venta_id>/sifen/qr-test')
-def venta_sifen_qr_test(venta_id):
+@app.route('/rrhh/funcionarios',methods=['GET','POST'])
+def rrhh_funcionarios():
+    if request.method=='POST' and not _rrhh_perm('CREAR'): return ('Acceso no autorizado',403)
+    if not _rrhh_perm(): return ('Acceso no autorizado',403)
     c=db()
-    try:
-        v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
-        if not v: raise ValueError('Venta no encontrada.')
-        digest=v['sifen_digest_value'] if 'sifen_digest_value' in v.keys() else None
-        if not digest: raise ValueError('El QR oficial no puede generarse todavía: falta firmar el XML y obtener DigestValue (XS17).')
-        _sifen_construir_qr_test(c,venta_id,digest,v['sifen_fecha_emision'] if 'sifen_fecha_emision' in v.keys() else None)
-        c.commit();flash('QR SIFEN TEST generado correctamente desde la firma digital del XML.')
-    except Exception as e:
-        c.rollback();flash(str(e))
-    finally:c.close()
-    return redirect(f'/ventas/{venta_id}/factura')
+    if request.method=='POST':
+        f=request.form
+        c.execute('''insert into empleados(nombre,documento,ruc,fecha_nacimiento,telefono,email,direccion,cargo,departamento,fecha_ingreso,tipo_contrato,salario_base,ips_numero,ips_activo,turno,estado,observacion,creado_en,actualizado_en)
+        values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),'ACTIVO',f.get('observacion'),now(),now()))
+        c.commit();c.close();audit('RRHH_FUNCIONARIO_CREAR',f.get('nombre',''));flash('Funcionario registrado.');return redirect('/rrhh/funcionarios')
+    q=(request.args.get('q') or '').strip();params=[];sql='select * from empleados'
+    if q: sql+=' where nombre like ? or documento like ? or cargo like ? or departamento like ?';params=['%'+q+'%']*4
+    sql+=' order by estado desc,nombre';rows=c.execute(sql,params).fetchall();c.close();return render_template('rrhh_employees.html',rows=rows,q=q)
 
-ROUTE_MODULE.update({'venta_sifen_qr_test':'FACTURACION'})
+@app.route('/rrhh/funcionarios/<int:i>/editar',methods=['GET','POST'])
+def rrhh_funcionario_editar(i):
+    if not _rrhh_perm('EDITAR'): return ('Acceso no autorizado',403)
+    c=db();e=c.execute('select * from empleados where id=?',(i,)).fetchone()
+    if not e:c.close();return ('Funcionario no encontrado',404)
+    if request.method=='POST':
+        f=request.form;c.execute('''update empleados set nombre=?,documento=?,ruc=?,fecha_nacimiento=?,telefono=?,email=?,direccion=?,cargo=?,departamento=?,fecha_ingreso=?,fecha_salida=?,tipo_contrato=?,salario_base=?,ips_numero=?,ips_activo=?,turno=?,estado=?,observacion=?,actualizado_en=? where id=?''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('fecha_salida'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),f.get('estado','ACTIVO'),f.get('observacion'),now(),i));c.commit();c.close();audit('RRHH_FUNCIONARIO_EDITAR',str(i));flash('Ficha actualizada.');return redirect('/rrhh/funcionarios')
+    c.close();return render_template('rrhh_employee_edit.html',e=e)
+
+@app.route('/rrhh/asistencia',methods=['GET','POST'])
+def rrhh_asistencia():
+    if request.method=='POST' and not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db()
+    if request.method=='POST':
+        f=request.form;c.execute('''insert into rrhh_asistencias(empleado_id,fecha,hora_entrada,hora_salida,estado,minutos_tardanza,horas_extra,observacion,registrado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?)
+        on conflict(empleado_id,fecha) do update set hora_entrada=excluded.hora_entrada,hora_salida=excluded.hora_salida,estado=excluded.estado,minutos_tardanza=excluded.minutos_tardanza,horas_extra=excluded.horas_extra,observacion=excluded.observacion,registrado_por=excluded.registrado_por''',(f['empleado_id'],f['fecha'],f.get('hora_entrada'),f.get('hora_salida'),f.get('estado','PRESENTE'),int(f.get('minutos_tardanza') or 0),float(f.get('horas_extra') or 0),f.get('observacion'),session.get('user'),now()));c.commit();flash('Asistencia guardada.')
+    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();rows=c.execute('''select a.*,e.nombre from rrhh_asistencias a join empleados e on e.id=a.empleado_id where a.fecha between ? and ? order by a.fecha desc,e.nombre''',(desde,hasta)).fetchall();c.close();return render_template('rrhh_attendance.html',emps=emps,rows=rows,desde=desde,hasta=hasta)
+
+@app.route('/rrhh/novedades',methods=['GET','POST'])
+def rrhh_novedades():
+    if request.method=='POST' and not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();periodo=_rrhh_periodo(request.values.get('periodo'))
+    if request.method=='POST':
+        f=request.form;tipo=f.get('tipo','OTRO');estado='APROBADO' if tipo in ('ANTICIPO','DESCUENTO','BONIFICACION','PRESTAMO','HORA_EXTRA') else 'PENDIENTE'
+        c.execute('insert into rrhh_novedades(empleado_id,fecha,periodo,tipo,descripcion,monto,cantidad,desde,hasta,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?)',(f['empleado_id'],f.get('fecha') or datetime.date.today().isoformat(),periodo,tipo,f.get('descripcion'),float(f.get('monto') or 0),float(f.get('cantidad') or 0),f.get('desde'),f.get('hasta'),estado,session.get('user'),now()));c.commit();flash('Novedad registrada.');c.close();return redirect('/rrhh/novedades?periodo='+periodo)
+    emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();rows=c.execute('''select n.*,e.nombre from rrhh_novedades n join empleados e on e.id=n.empleado_id where n.periodo=? order by n.fecha desc,n.id desc''',(periodo,)).fetchall();c.close();return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo)
+
+@app.route('/rrhh/liquidaciones')
+def rrhh_liquidaciones():
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();periodo=_rrhh_periodo(request.args.get('periodo'));rows=c.execute('''select l.*,e.nombre,e.documento from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();c.close();return render_template('rrhh_payroll.html',rows=rows,emps=emps,periodo=periodo)
+
+@app.post('/rrhh/liquidar')
+def rrhh_liquidar():
+    if not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
+    eid=int(request.form['empleado_id']);periodo=_rrhh_periodo(request.form.get('periodo'));c=db();e=c.execute('select * from empleados where id=?',(eid,)).fetchone();cfg=c.execute('select * from rrhh_config where id=1').fetchone()
+    if not e:c.close();return ('Funcionario no encontrado',404)
+    nov=c.execute("select tipo,coalesce(sum(monto),0) monto,coalesce(sum(cantidad),0) cantidad from rrhh_novedades where empleado_id=? and periodo=? and estado in ('APROBADO','PENDIENTE') group by tipo",(eid,periodo)).fetchall();d={r['tipo']:(r['monto'],r['cantidad']) for r in nov};base=float(e['salario_base'] or 0);bon=d.get('BONIFICACION',(0,0))[0];he=d.get('HORA_EXTRA',(0,0))[0];otros=d.get('OTRO_HABER',(0,0))[0];anticipos=d.get('ANTICIPO',(0,0))[0];prest=d.get('PRESTAMO',(0,0))[0];desc=d.get('DESCUENTO',(0,0))[0];ipsbase=base+bon+he+otros if e['ips_activo'] else 0;ipso=round(ipsbase*float(cfg['ips_obrero_pct'] or 0)/100);ipsp=round(ipsbase*float(cfg['ips_patronal_pct'] or 0)/100);hab=base+bon+he+otros;neto=hab-ipso-anticipos-prest-desc;costo=hab+ipsp
+    c.execute('''insert into rrhh_liquidaciones(empleado_id,periodo,fecha,salario_base,haberes,horas_extra,bonificaciones,otros_haberes,ips_base,ips_obrero,ips_patronal,anticipos,prestamos,otros_descuentos,neto,costo_empresa,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    on conflict(empleado_id,periodo) do update set salario_base=excluded.salario_base,haberes=excluded.haberes,horas_extra=excluded.horas_extra,bonificaciones=excluded.bonificaciones,otros_haberes=excluded.otros_haberes,ips_base=excluded.ips_base,ips_obrero=excluded.ips_obrero,ips_patronal=excluded.ips_patronal,anticipos=excluded.anticipos,prestamos=excluded.prestamos,otros_descuentos=excluded.otros_descuentos,neto=excluded.neto,costo_empresa=excluded.costo_empresa''',(eid,periodo,datetime.date.today().isoformat(),base,hab,he,bon,otros,ipsbase,ipso,ipsp,anticipos,prest,desc,neto,costo,'BORRADOR',session.get('user'),now()));c.commit();c.close();flash('Liquidación calculada.');return redirect('/rrhh/liquidaciones?periodo='+periodo)
+
+@app.route('/rrhh/liquidaciones/<int:i>')
+def rrhh_liquidacion_detalle(i):
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();l=c.execute('select l.*,e.nombre,e.documento,e.cargo,e.departamento,e.ips_numero from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.id=?',(i,)).fetchone();c.close()
+    if not l:return ('Liquidación no encontrada',404)
+    return render_template('rrhh_payroll_detail.html',l=l)
+
+@app.get('/rrhh/liquidaciones/<int:i>/pdf')
+def rrhh_liquidacion_pdf(i):
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    c=db();l=c.execute('select l.*,e.nombre,e.documento,e.cargo,e.ips_numero from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.id=?',(i,)).fetchone();c.close()
+    if not l:return ('Liquidación no encontrada',404)
+    out=io.BytesIO();doc=SimpleDocTemplate(out,pagesize=A4);st=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Recibo de Liquidación de Salario',st['Title']),Paragraph(f"Funcionario: {l['nombre']} · CI: {l['documento'] or '-'} · Periodo: {l['periodo']}",st['Normal']),Spacer(1,12)]
+    data=[['Concepto','Haberes Gs.','Descuentos Gs.'],['Salario base',_money_local(l['salario_base']),''],['Bonificaciones',_money_local(l['bonificaciones']),''],['Horas extra',_money_local(l['horas_extra']),''],['Otros haberes',_money_local(l['otros_haberes']),''],['IPS obrero','',_money_local(l['ips_obrero'])],['Anticipos','',_money_local(l['anticipos'])],['Préstamos','',_money_local(l['prestamos'])],['Otros descuentos','',_money_local(l['otros_descuentos'])],['NETO A COBRAR',_money_local(l['neto']),'']]
+    t=Table(data,colWidths=[230,120,120]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.4,colors.grey),('ALIGN',(1,1),(-1,-1),'RIGHT'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]));story += [t,Spacer(1,40),Paragraph('Firma del funcionario: ______________________________',st['Normal'])];doc.build(story);out.seek(0);return send_file(out,as_attachment=True,download_name=f"liquidacion_{l['periodo']}_{i}.pdf",mimetype='application/pdf')
+
+@app.route('/rrhh/configuracion',methods=['GET','POST'])
+def rrhh_configuracion():
+    if request.method=='POST' and not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db()
+    if request.method=='POST':
+        c.execute('update rrhh_config set ips_obrero_pct=?,ips_patronal_pct=?,cuenta_sueldos=?,cuenta_cargas=?,cuenta_obligaciones=?,actualizado_en=? where id=1',(float(request.form.get('ips_obrero_pct') or 0),float(request.form.get('ips_patronal_pct') or 0),request.form.get('cuenta_sueldos'),request.form.get('cuenta_cargas'),request.form.get('cuenta_obligaciones'),now()));c.commit();flash('Parámetros RR.HH. actualizados.')
+    cfg=c.execute('select * from rrhh_config where id=1').fetchone();c.close();return render_template('rrhh_config.html',cfg=cfg)
+
+@app.get('/rrhh/informes')
+def rrhh_informes():
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();periodo=_rrhh_periodo(request.args.get('periodo'));res=c.execute('''select count(*) funcionarios,coalesce(sum(haberes),0) haberes,coalesce(sum(ips_obrero),0) ips_obrero,coalesce(sum(ips_patronal),0) ips_patronal,coalesce(sum(anticipos),0) anticipos,coalesce(sum(otros_descuentos),0) descuentos,coalesce(sum(neto),0) neto,coalesce(sum(costo_empresa),0) costo from rrhh_liquidaciones where periodo=? and estado!='ANULADA' ''',(periodo,)).fetchone();asist=c.execute("select estado,count(*) cantidad from rrhh_asistencias where substr(fecha,1,7)=? group by estado",(periodo,)).fetchall();c.close();return render_template('rrhh_reports.html',periodo=periodo,res=res,asist=asist)
