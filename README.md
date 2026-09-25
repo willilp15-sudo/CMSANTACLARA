@@ -409,3 +409,12 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - Protección: una cama con admisión abierta no puede inactivarse.
 - Las camas inactivas dejan de ofrecerse para nuevas admisiones.
 - Auditoría de altas y modificaciones.
+
+
+## V13.9.61 — Servicios sin stock + importación CxC/CxP reforzada
+- Ventas: los artículos clasificados como SERVICIO no validan stock ni generan movimientos de inventario.
+- Agendamiento/facturación: aplica la misma regla cuando un registro del maestro de productos está clasificado como SERVICIO.
+- Edición de productos: permite revisar/corregir Tipo de producto y Clasificación general.
+- Cuentas por Cobrar: conserva botón Importar / actualizar CxC.
+- Cuentas por Pagar: botón Importar / actualizar CxP visible también en la pantalla específica de cuentas pendientes por proveedor.
+- La importación existente actualiza cuentas identificadas y mantiene auditoría de cambios.

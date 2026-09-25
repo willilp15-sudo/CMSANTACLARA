@@ -578,6 +578,14 @@ def _proximo_numero_factura_preview(c,punto_id=None):
     while c.execute('select 1 from ventas where numero=? limit 1',(f'{est}-{pex}-{n:07d}',)).fetchone(): n+=1
     return f'{est}-{pex}-{n:07d}'
 
+# ===== V13.9.61: servicios sin control de stock =====
+def _producto_es_servicio(p):
+    vals=[p['tipo_producto'] if 'tipo_producto' in p.keys() else '',p['clasif_general'] if 'clasif_general' in p.keys() else '',p['categoria'] if 'categoria' in p.keys() else '']
+    return any('SERVICIO' in str(v or '').strip().upper() for v in vals)
+
+def _producto_controla_stock(p):
+    return not _producto_es_servicio(p)
+
 @app.route('/ventas/carga',methods=['GET','POST'])
 def ventas():
  c=db()
@@ -611,10 +619,11 @@ def ventas():
     if pid<=0 or qty<=0 or price<0:raise ValueError('Cada ítem debe tener producto, cantidad mayor a cero y precio válido')
     p=c.execute('select * from productos where id=?',(pid,)).fetchone()
     if not p:raise ValueError('Uno de los productos ya no existe')
-    acumulado_stock[pid]=acumulado_stock.get(pid,0)+qty
-    if float(p['stock'] or 0)<acumulado_stock[pid]:raise ValueError('Stock insuficiente para '+p['nombre'])
+    if _producto_controla_stock(p):
+     acumulado_stock[pid]=acumulado_stock.get(pid,0)+qty
+     if float(p['stock'] or 0)<acumulado_stock[pid]:raise ValueError('Stock insuficiente para '+p['nombre'])
     iva_pct=float(p['iva_pct'] or 0);line_total=qty*price;base,line_iva=desglosar_iva_incluido(line_total,iva_pct)
-    total+=line_total;iva+=line_iva;cost_line=qty*float(p['costo_pyg'] or 0);costg+=cost_line
+    total+=line_total;iva+=line_iva;cost_line=(qty*float(p['costo_pyg'] or 0)) if _producto_controla_stock(p) else 0.0;costg+=cost_line
     if iva_pct==10:g10+=base;i10+=line_iva;grav+=base
     elif iva_pct==5:g5+=base;i5+=line_iva;grav+=base
     else:exento+=line_total
@@ -632,7 +641,9 @@ def ventas():
    c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],vid))
    c.execute('update ventas set cuenta_bancaria_id=?,terminal_pos_id=? where id=?',(cuenta_id,pos_id,vid))
    for p,pid,qty,price,line_total,base,line_iva,iva_pct,cost_line in detalle:
-    c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,pid,qty,price,line_total,line_total*tc,cost_line,iva_pct));c.execute('update productos set stock=stock-? where id=?',(qty,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'SALIDA',-qty,p['costo_pyg'],'VENTA',vid))
+    c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,pid,qty,price,line_total,line_total*tc,cost_line,iva_pct))
+    if _producto_controla_stock(p):
+     c.execute('update productos set stock=stock-? where id=?',(qty,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'SALIDA',-qty,p['costo_pyg'],'VENTA',vid))
    saldo=0 if condicion=='CONTADO' else (total-entrega if condicion=='CUOTAS' else total);estado='PAGADO' if saldo<=0.0001 else 'PENDIENTE';c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,tid,mon,tc,saldo,saldo,saldo*tc,estado))
    if condicion=='CREDITO':c.execute('insert into venta_cuotas(venta_id,numero,fecha_vencimiento,importe) values(?,?,?,?)',(vid,1,venc,total))
    elif condicion=='CUOTAS':
@@ -2060,7 +2071,7 @@ def producto_editar(rid):
     if request.method=='POST':
         cb=(request.form.get('codigo_barras') or '').strip() or None
         if cb and c.execute('select 1 from productos where codigo_barras=? and id<>?',(cb,rid)).fetchone():flash('Código de barras ya registrado en otro producto.');c.close();return redirect(f'/producto/{rid}/editar')
-        c.execute('update productos set codigo=?,codigo_barras=?,nombre=?,categoria=?,costo_pyg=?,precio_pyg=?,stock_min=?,iva_pct=? where id=?',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria'),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),rid));c.commit();c.close();audit('EDITAR_PRODUCTO',str(rid));return redirect('/productos')
+        c.execute('update productos set codigo=?,codigo_barras=?,nombre=?,categoria=?,costo_pyg=?,precio_pyg=?,stock_min=?,iva_pct=?,tipo_producto=?,clasif_general=? where id=?',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria'),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('tipo_producto') or '',request.form.get('clasif_general') or '',rid));c.commit();c.close();audit('EDITAR_PRODUCTO',str(rid));return redirect('/productos')
     c.close();return render_template('edit_master.html',title='Modificar producto',record=r,kind='producto')
 @app.post('/producto/<int:rid>/eliminar')
 def producto_eliminar(rid):
@@ -2533,7 +2544,7 @@ def agenda_generar_ventas():
     if tipo=='PRODUCTO':
      r=c.execute('select * from productos where id=?',(rid,)).fetchone()
      if not r:raise ValueError('Producto no encontrado.')
-     if float(r['stock'] or 0)<qty:raise ValueError('Stock insuficiente para '+r['nombre'])
+     if _producto_controla_stock(r) and float(r['stock'] or 0)<qty:raise ValueError('Stock insuficiente para '+r['nombre'])
      desc=r['nombre'];iva=float(r['iva_pct'] or 0);costo=float(r['costo_pyg'] or 0)
     elif tipo=='PROCEDIMIENTO':
      r=c.execute('select * from servicios where id=?',(rid,)).fetchone()
@@ -2563,7 +2574,8 @@ def agenda_generar_ventas():
     c.execute('insert into agenda_facturacion_items(agenda_id,tipo,referencia_id,descripcion,cantidad,precio_pyg,iva_pct,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?)',(gid,tipo,rid,desc,qty,precio,ivap,session.get('user'),now()))
     if tipo=='PRODUCTO':
      c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,rid,qty,precio,line,line,costo*qty,ivap))
-     c.execute('update productos set stock=stock-? where id=?',(qty,rid));c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'VENTA',?)",(g['fecha'],rid,'SALIDA',-qty,costo,vid))
+     if _producto_controla_stock(r):
+      c.execute('update productos set stock=stock-? where id=?',(qty,rid));c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'VENTA',?)",(g['fecha'],rid,'SALIDA',-qty,costo,vid))
     if g['aseguradora_id']:
      c.execute("""insert into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado)
       values(?,?,?,?,?,?,?,?,?,'PENDIENTE')""",(g['fecha'],g['aseguradora_id'],g['paciente_id'],'AGENDA_VENTA',vid,'MEDICAMENTOS' if tipo=='PRODUCTO' else 'SERVICIOS SANATORIALES',desc,line,ivap))
