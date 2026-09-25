@@ -1739,28 +1739,88 @@ def health():
   c=db();c.execute('select 1').fetchone();c.close();return jsonify(status='ok',database='ok'),200
  except Exception as e:return jsonify(status='error'),503
 
+# V13.9.29 - Backups con control de espacio. Evita llenar el disco persistente.
+BACKUP_5MIN_DIR=os.path.join(DATA_DIR,'backups','5min')
+BACKUP_MIN_FREE_BYTES=200*1024*1024       # reserva mínima de 200 MB para SQLite/ERP
+BACKUP_MAX_DISK_FRACTION=0.35             # backups <= 35% del disco
+BACKUP_5MIN_KEEP=24                       # 2 horas: 24 copias cada 5 minutos
+BACKUP_DAILY_KEEP=7                       # 7 copias diarias locales; externo recomendado
+
+def _archivos_db(carpeta):
+ try:
+  return sorted([os.path.join(carpeta,x) for x in os.listdir(carpeta) if x.endswith('.db') and os.path.isfile(os.path.join(carpeta,x))],key=os.path.getmtime,reverse=True)
+ except OSError:return []
+
+def _borrar_seguro(ruta):
+ try:os.remove(ruta);return True
+ except OSError:return False
+
+def limpiar_backups_emergencia():
+ os.makedirs(BACKUP_5MIN_DIR,exist_ok=True)
+ raiz=os.path.join(DATA_DIR,'backups')
+ # Primero limita por antigüedad/cantidad.
+ for viejo in _archivos_db(BACKUP_5MIN_DIR)[BACKUP_5MIN_KEEP:]:_borrar_seguro(viejo)
+ diarios=[x for x in _archivos_db(raiz) if 'antes_V' not in os.path.basename(x)]
+ for viejo in diarios[BACKUP_DAILY_KEEP:]:_borrar_seguro(viejo)
+ # Después libera espacio de forma adaptativa. Nunca toca DB principal ni branding.
+ try:
+  total,used,free=shutil.disk_usage(DATA_DIR)
+  limite=int(total*BACKUP_MAX_DISK_FRACTION)
+  candidatos=_archivos_db(BACKUP_5MIN_DIR)+diarios
+  candidatos=sorted(set(candidatos),key=lambda x:os.path.getmtime(x)) # más viejos primero
+  def tam_backups():
+   n=0
+   for f in _archivos_db(BACKUP_5MIN_DIR)+_archivos_db(raiz):
+    try:n+=os.path.getsize(f)
+    except OSError:pass
+   return n
+  usados=tam_backups()
+  while candidatos and (free<BACKUP_MIN_FREE_BYTES or usados>limite):
+   f=candidatos.pop(0)
+   # Conserva siempre al menos la copia de 5 min más reciente si existe.
+   recientes=_archivos_db(BACKUP_5MIN_DIR)
+   if f in recientes and len(recientes)<=1:continue
+   try:sz=os.path.getsize(f)
+   except OSError:sz=0
+   if _borrar_seguro(f):
+    usados=max(0,usados-sz)
+    total,used,free=shutil.disk_usage(DATA_DIR)
+  print('[Santa Clara] Espacio disco libre:',round(free/1024/1024,1),'MB')
+ except Exception as e:print('[Santa Clara] Limpieza backups:',e)
+
+def hay_espacio_para_backup():
+ try:
+  total,used,free=shutil.disk_usage(DATA_DIR)
+  dbsize=os.path.getsize(DB) if os.path.exists(DB) else 0
+  # Para crear una copia completa se exige DB + margen operativo.
+  return free >= dbsize + BACKUP_MIN_FREE_BYTES
+ except OSError:return False
+
 def backup_sqlite_5min():
- carpeta=os.path.join(DATA_DIR,'backups','5min');os.makedirs(carpeta,exist_ok=True)
+ os.makedirs(BACKUP_5MIN_DIR,exist_ok=True)
  while True:
   try:
-   if os.path.exists(DB):
-    destino=os.path.join(carpeta,'santa_clara_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
+   limpiar_backups_emergencia()
+   if os.path.exists(DB) and hay_espacio_para_backup():
+    destino=os.path.join(BACKUP_5MIN_DIR,'santa_clara_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
     src=sqlite3.connect(DB);dst=sqlite3.connect(destino)
     try:src.backup(dst)
     finally:dst.close();src.close()
-    copias=sorted([os.path.join(carpeta,x) for x in os.listdir(carpeta) if x.endswith('.db')],key=os.path.getmtime,reverse=True)
-    for viejo in copias[288:]:
-     try:os.remove(viejo)
-     except OSError:pass
+    limpiar_backups_emergencia()
+   else:
+    print('[Santa Clara] Backup 5 min omitido temporalmente: espacio insuficiente; la base activa no se toca.')
   except Exception as e:print('[Santa Clara] Backup 5 min:',e)
   time.sleep(300)
 
 def iniciar_backup_automatico():
  t=threading.Thread(target=backup_sqlite_5min,name='backup-santa-clara',daemon=True);t.start()
 
+# IMPORTANTE: liberar backups antiguos ANTES de cualquier copia o migración.
+limpiar_backups_emergencia()
 backup_inicio()
-iniciar_backup_automatico()
+limpiar_backups_emergencia()
 preparar_actualizacion_segura()
+iniciar_backup_automatico()
 init()
 
 def sincronizar_clientes_pacientes(c):
