@@ -3257,11 +3257,33 @@ def configuracion_sifen():
                 est=_solo_digitos(request.form.get('p_establecimiento'))[-3:].zfill(3);pex=_solo_digitos(request.form.get('p_punto'))[-3:].zfill(3)
                 if not est or not pex: raise ValueError('Establecimiento y punto son obligatorios.')
                 pid=int(request.form.get('p_id') or 0);pred=1 if request.form.get('p_predeterminado') else 0
-                if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0')
-                vals=(est,pex,(request.form.get('p_descripcion') or '').strip(),(request.form.get('p_timbrado') or '').strip(),1 if request.form.get('p_factura') else 0,1 if request.form.get('p_nc') else 0,1 if request.form.get('p_nd') else 0,1 if request.form.get('p_autorizado') else 0,1 if request.form.get('p_activo') else 0,pred,max(1,int(request.form.get('p_proximo') or 1)),now())
-                if pid:c.execute('update sifen_puntos_expedicion set establecimiento=?,punto_expedicion=?,descripcion=?,timbrado=?,factura_electronica=?,nota_credito_electronica=?,nota_debito_electronica=?,autorizado_dnit=?,activo=?,predeterminado=?,proximo_numero_factura=?,actualizado_en=? where id=?',vals+(pid,))
-                else:c.execute('insert into sifen_puntos_expedicion(establecimiento,punto_expedicion,descripcion,timbrado,factura_electronica,nota_credito_electronica,nota_debito_electronica,autorizado_dnit,activo,predeterminado,proximo_numero_factura,creado_en,actualizado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',vals[:-1]+(now(),vals[-1]))
-                c.commit();flash('Punto de expedición guardado. Use únicamente códigos previamente autorizados por DNIT.')
+                descripcion=(request.form.get('p_descripcion') or '').strip();timbrado=(request.form.get('p_timbrado') or '').strip()
+                fe=1 if request.form.get('p_factura') else 0;nc=1 if request.form.get('p_nc') else 0;nd=1 if request.form.get('p_nd') else 0
+                autorizado=1 if request.form.get('p_autorizado') else 0;activo=1 if request.form.get('p_activo') else 0
+                solicitado=max(1,int(request.form.get('p_proximo') or 1))
+                if pid:
+                    actual=c.execute('select * from sifen_puntos_expedicion where id=?',(pid,)).fetchone()
+                    if not actual: raise ValueError('Punto de expedición no encontrado.')
+                    uso_fe=c.execute('select count(*) from ventas where sifen_punto_id=?',(pid,)).fetchone()[0]
+                    uso_nc=0
+                    try: uso_nc=c.execute('select count(*) from notas_credito_ventas n join ventas v on v.id=n.venta_id where v.sifen_punto_id=?',(pid,)).fetchone()[0]
+                    except Exception: pass
+                    usado=(uso_fe or uso_nc)
+                    # Una vez usado, la identidad fiscal y el timbrado histórico no se reescriben.
+                    if usado and (est!=str(actual['establecimiento']).zfill(3) or pex!=str(actual['punto_expedicion']).zfill(3)):
+                        raise ValueError('Este punto ya tiene documentos emitidos. No se puede cambiar establecimiento/punto porque alteraría el historial fiscal. Cree un nuevo punto y desactive el anterior.')
+                    if usado and timbrado!=(actual['timbrado'] or ''):
+                        raise ValueError('Este punto ya tiene documentos emitidos. Para un nuevo timbrado cree un nuevo punto de expedición o configure el autorizado por DNIT sin alterar el historial.')
+                    if usado and solicitado!=int(actual['proximo_numero_factura'] or 1):
+                        raise ValueError('El correlativo de un punto que ya emitió documentos es automático y está protegido; no puede modificarse manualmente.')
+                    if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0 where id<>?',(pid,))
+                    c.execute('update sifen_puntos_expedicion set establecimiento=?,punto_expedicion=?,descripcion=?,timbrado=?,factura_electronica=?,nota_credito_electronica=?,nota_debito_electronica=?,autorizado_dnit=?,activo=?,predeterminado=?,proximo_numero_factura=?,actualizado_en=? where id=?',(est,pex,descripcion,timbrado,fe,nc,nd,autorizado,activo,pred,solicitado,now(),pid))
+                    flash('Punto de expedición actualizado correctamente.')
+                else:
+                    if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0')
+                    c.execute('insert into sifen_puntos_expedicion(establecimiento,punto_expedicion,descripcion,timbrado,factura_electronica,nota_credito_electronica,nota_debito_electronica,autorizado_dnit,activo,predeterminado,proximo_numero_factura,creado_en,actualizado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(est,pex,descripcion,timbrado,fe,nc,nd,autorizado,activo,pred,solicitado,now(),now()))
+                    flash('Punto de expedición registrado. Use únicamente códigos previamente autorizados por DNIT.')
+                c.commit()
             except Exception as e:c.rollback();flash('No se pudo guardar el punto: '+str(e))
             c.close();return redirect('/configuracion/sifen')
         elif accion=='punto_predeterminado':
@@ -3635,6 +3657,11 @@ def init_v13947_control_fiscal():
         if col not in cols:c.execute(f'alter table ventas add column {col} {defn}')
     c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.47-control-fiscal',?)",(now(),));c.commit();c.close()
 init_v13947_control_fiscal()
+
+# ===== V13.9.48: administración segura de puntos de expedición =====
+def init_v13948_puntos_editables():
+    c=db();c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.48-puntos-editables',?)",(now(),));c.commit();c.close()
+init_v13948_puntos_editables()
 
 def _nc_numero(c,punto_id=None):
     p=_punto_facturacion(c,punto_id)
