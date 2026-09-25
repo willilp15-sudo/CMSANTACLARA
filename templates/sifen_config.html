@@ -1,0 +1,20 @@
+{% extends 'base.html' %}{% block content %}
+<div class="card" style="max-width:1200px;margin:24px auto">
+<h2>🧾 SIFEN · Facturación Electrónica</h2>
+<div style="padding:12px;border:2px solid #c58b00;border-radius:10px;margin-bottom:16px"><b>AMBIENTE DE PRUEBAS (TEST)</b><br>Esta versión no transmite documentos a Producción. Los documentos de TEST no tienen valor tributario.</div>
+<form method="post"><input type="hidden" name="accion" value="guardar">
+<div class="grid">
+<label>RUC<input name="ruc" value="{{cfg.ruc or ''}}"></label><label>DV<input name="dv" value="{{cfg.dv or ''}}"></label>
+<label>Timbrado de prueba<input name="timbrado" value="{{cfg.timbrado or ''}}"></label><label>Establecimiento<input name="establecimiento" value="{{cfg.establecimiento or '001'}}"></label>
+<label>Punto expedición<input name="punto_expedicion" value="{{cfg.punto_expedicion or '001'}}"></label><label>ID CSC<input name="csc_id" value="{{cfg.csc_id or ''}}"></label>
+<label style="grid-column:1/-1">CSC de prueba<input type="password" name="csc" value="{{cfg.csc or ''}}" autocomplete="off"></label>
+</div><button>Guardar configuración TEST</button></form>
+<hr><h3>Certificado digital</h3>
+<p>El certificado se guarda fuera del repositorio, en el almacenamiento persistente del servidor. La contraseña se usa únicamente para abrir el P12/PFX y no se guarda.</p>
+<form method="post" enctype="multipart/form-data"><input type="hidden" name="accion" value="certificado"><input type="file" name="certificado" accept=".p12,.pfx" required> <input type="password" name="password" placeholder="Contraseña del certificado" required> <button>Instalar y validar certificado</button></form>
+{% if cfg.cert_subject %}<div style="margin-top:12px"><b>Certificado instalado:</b> {{cfg.cert_subject}}<br><b>Serie:</b> {{cfg.cert_serial}}<br><b>Válido hasta:</b> {{cfg.cert_not_after}}</div>{% endif %}
+<hr><h3>Prueba de conexión segura</h3><p>Servidor TEST: <code>{{test_base}}</code></p>
+<form method="post"><input type="hidden" name="accion" value="probar"><button>🔌 Probar conexión mTLS con SIFEN TEST</button></form>
+{% if cfg.ultimo_test %}<p><b>Última prueba:</b> {{cfg.ultimo_test}} · <b>{{cfg.ultimo_estado}}</b><br>{{cfg.ultimo_detalle}}</p>{% endif %}
+<hr><h3>Registro técnico</h3><table><tr><th>Fecha</th><th>Tipo</th><th>Estado</th><th>Detalle</th></tr>{% for x in logs %}<tr><td>{{x.fecha}}</td><td>{{x.tipo}}</td><td>{{x.estado}}</td><td>{{x.detalle}}</td></tr>{% endfor %}</table>
+</div>{% endblock %}

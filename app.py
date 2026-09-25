@@ -3131,3 +3131,82 @@ def arqueo_caja_pdf(apertura_id):
 ROUTE_MODULE.update({'arqueo_caja_diario':'CAJA','arqueo_caja_pdf':'CAJA'})
 
 # V13.9.35 - Formato documental unificado tipo KuDE para facturas, recibos y futuros documentos electrónicos.
+
+# ===== V13.9.38: SIFEN TEST - configuración segura, certificado y prueba mTLS =====
+def init_v13938_sifen():
+    c=db()
+    c.execute("""CREATE TABLE IF NOT EXISTS sifen_config(
+      id INTEGER PRIMARY KEY CHECK(id=1), ambiente TEXT NOT NULL DEFAULT 'TEST',
+      ruc TEXT, dv TEXT, timbrado TEXT, establecimiento TEXT DEFAULT '001', punto_expedicion TEXT DEFAULT '001',
+      csc_id TEXT, csc TEXT, cert_subject TEXT, cert_serial TEXT, cert_not_before TEXT, cert_not_after TEXT,
+      cert_path TEXT, key_path TEXT, ultimo_test TEXT, ultimo_estado TEXT, ultimo_detalle TEXT, actualizado_en TEXT)""")
+    c.execute("INSERT OR IGNORE INTO sifen_config(id,ambiente) VALUES(1,'TEST')")
+    c.execute("CREATE TABLE IF NOT EXISTS sifen_eventos(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT,estado TEXT,detalle TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.38-sifen-test',?)",(now(),))
+    c.commit();c.close()
+init_v13938_sifen()
+
+SIFEN_TEST_BASE='https://sifen-test.set.gov.py'
+def _sifen_dir():
+    p=os.path.join(DATA_DIR,'sifen');os.makedirs(p,exist_ok=True)
+    try: os.chmod(p,0o700)
+    except OSError: pass
+    return p
+
+def _sifen_log(tipo,estado,detalle):
+    c=db();c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),tipo,estado,str(detalle)[:3000]));c.commit();c.close()
+
+def _sifen_cert_info(p12_bytes,password):
+    from cryptography.hazmat.primitives.serialization import pkcs12,Encoding,PrivateFormat,NoEncryption
+    key,cert,chain=pkcs12.load_key_and_certificates(p12_bytes,password.encode() if password else None)
+    if not key or not cert: raise ValueError('El archivo no contiene certificado y clave privada.')
+    d=_sifen_dir(); cert_path=os.path.join(d,'client-cert.pem'); key_path=os.path.join(d,'client-key.pem')
+    with open(cert_path,'wb') as f:f.write(cert.public_bytes(Encoding.PEM))
+    with open(key_path,'wb') as f:f.write(key.private_bytes(Encoding.PEM,PrivateFormat.PKCS8,NoEncryption()))
+    try: os.chmod(cert_path,0o600);os.chmod(key_path,0o600)
+    except OSError: pass
+    return cert,cert_path,key_path
+
+@app.route('/configuracion/sifen',methods=['GET','POST'])
+def configuracion_sifen():
+    if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):
+        flash('No tiene permiso para configurar SIFEN.');return redirect('/')
+    c=db()
+    if request.method=='POST':
+        accion=request.form.get('accion','guardar')
+        if accion=='guardar':
+            # Seguridad: esta versión habilita únicamente TEST. Producción requiere activación deliberada posterior.
+            vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','establecimiento','punto_expedicion','csc_id','csc')]
+            c.execute("update sifen_config set ambiente='TEST',ruc=?,dv=?,timbrado=?,establecimiento=?,punto_expedicion=?,csc_id=?,csc=?,actualizado_en=? where id=1",(*vals,now()))
+            c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN TEST actualizada');flash('Configuración SIFEN TEST guardada.')
+        elif accion=='certificado':
+            archivo=request.files.get('certificado');password=request.form.get('password','')
+            if not archivo or not archivo.filename: flash('Seleccione un certificado .p12 o .pfx.')
+            elif Path(archivo.filename).suffix.lower() not in ('.p12','.pfx'): flash('Formato no permitido. Use .p12 o .pfx.')
+            else:
+                try:
+                    cert,cp,kp=_sifen_cert_info(archivo.read(),password)
+                    subj=cert.subject.rfc4514_string();serial=str(cert.serial_number)
+                    nb=getattr(cert,'not_valid_before_utc',cert.not_valid_before).isoformat();na=getattr(cert,'not_valid_after_utc',cert.not_valid_after).isoformat()
+                    c.execute('update sifen_config set cert_subject=?,cert_serial=?,cert_not_before=?,cert_not_after=?,cert_path=?,key_path=?,actualizado_en=? where id=1',(subj,serial,nb,na,cp,kp,now()));c.commit()
+                    _sifen_log('CERTIFICADO','OK',f'{subj} | vence {na}');flash('Certificado y clave privada validados e instalados en el almacenamiento persistente protegido. La contraseña no fue guardada.')
+                except Exception as e:
+                    _sifen_log('CERTIFICADO','ERROR',e);flash('No se pudo instalar el certificado: '+str(e))
+        elif accion=='probar':
+            cfg=c.execute('select * from sifen_config where id=1').fetchone()
+            try:
+                import requests
+                if not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']): raise ValueError('Primero instale el certificado .p12/.pfx.')
+                url=SIFEN_TEST_BASE+'/de/ws/consultas/consulta.wsdl?wsdl'
+                resp=requests.get(url,cert=(cfg['cert_path'],cfg['key_path']),timeout=20)
+                ok=200 <= resp.status_code < 400; estado='OK' if ok else 'ERROR';detalle=f'HTTP {resp.status_code} - {url}'
+                c.execute('update sifen_config set ultimo_test=?,ultimo_estado=?,ultimo_detalle=? where id=1',(now(),estado,detalle));c.commit();_sifen_log('CONEXION_MTLS',estado,detalle)
+                flash(('Conexión SIFEN TEST realizada correctamente.' if ok else 'SIFEN respondió con error: ')+detalle)
+            except Exception as e:
+                detalle=str(e);c.execute("update sifen_config set ultimo_test=?,ultimo_estado='ERROR',ultimo_detalle=? where id=1",(now(),detalle));c.commit();_sifen_log('CONEXION_MTLS','ERROR',detalle);flash('Prueba de conexión fallida: '+detalle)
+        c.close();return redirect('/configuracion/sifen')
+    cfg=c.execute('select * from sifen_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();c.close()
+    return render_template('sifen_config.html',cfg=cfg,logs=logs,test_base=SIFEN_TEST_BASE)
+
+ROUTE_MODULE.update({'configuracion_sifen':'CONFIG_SANATORIO'})
