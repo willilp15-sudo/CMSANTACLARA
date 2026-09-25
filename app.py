@@ -3622,11 +3622,93 @@ def _sifen_diagnostico(c,cfg):
     add('Certificado digital',certok,'Instalado en almacenamiento persistente' if certok else 'No instalado o archivo no disponible')
     aut=[p for p in puntos if int(p['autorizado_dnit'] or 0)]
     add('Puntos autorizados',bool(aut),', '.join(str(p['establecimiento'])+'-'+str(p['punto_expedicion']) for p in aut) if aut else 'No hay puntos marcados como autorizados')
-    # El ERP aún no incluye el transmisor XMLDSig/SOAP completo; nunca declarar listo a Producción sin él.
-    add('Transmisor XMLDSig + SOAP',False,'Pendiente de implementación/validación integral contra XSD V150 y Web Services SIFEN')
+    # V13.9.79: motor real de firma XMLDSig + transporte SOAP/mTLS instalado.
+    try:
+        import lxml.etree, signxml
+        motor_ok=True
+    except Exception:
+        motor_ok=False
+    add('Motor XMLDSig + SOAP',motor_ok,'Motor instalado' if motor_ok else 'Dependencias lxml/signxml no disponibles')
+    # La activación fiscal continúa bloqueada hasta disponer del generador DE completo,
+    # porque firmar/enviar un XML no basta: el DE debe cumplir íntegramente XSD V150.
+    add('Generador DE XML V150',False,'Pendiente completar mapeo fiscal integral del ERP contra XSD V150 antes de Producción')
     return checks
 
 init_v13978_sifen_produccion()
+
+# ===== V13.9.79: motor SIFEN XMLDSig + SOAP/mTLS =====
+def _sifen_endpoint(cfg, servicio='sync'):
+    base=_sifen_base(cfg)
+    rutas={
+      'sync':'/de/ws/sync/recibe.wsdl',
+      'lote':'/de/ws/async/recibe-lote.wsdl',
+      'consulta_lote':'/de/ws/consultas/consulta-lote.wsdl',
+      'consulta_cdc':'/de/ws/consultas/consulta.wsdl',
+      'eventos':'/de/ws/eventos/evento.wsdl',
+    }
+    if servicio not in rutas: raise ValueError('Servicio SIFEN no soportado: '+str(servicio))
+    return base+rutas[servicio]
+
+def _sifen_firmar_rde(xml_bytes,cfg):
+    """Firma un rDE V150 ya construido. No inventa campos fiscales faltantes."""
+    from lxml import etree
+    from signxml import XMLSigner,methods
+    if isinstance(xml_bytes,str): xml_bytes=xml_bytes.encode('utf-8')
+    parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
+    root=etree.fromstring(xml_bytes,parser)
+    ns='http://ekuatia.set.gov.py/sifen/xsd'
+    if etree.QName(root).localname!='rDE': raise ValueError('El XML debe tener raíz rDE.')
+    ver=root.find('{%s}dVerFor'%ns)
+    de=root.find('{%s}DE'%ns)
+    if ver is None or (ver.text or '').strip()!='150': raise ValueError('El DE debe ser versión 150.')
+    if de is None or not (de.get('Id') or '').strip(): raise ValueError('El DE no contiene CDC/Id.')
+    if not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital no instalado.')
+    cert=Path(cfg['cert_path']).read_bytes(); key=Path(cfg['key_path']).read_bytes()
+    signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
+    firmado=signer.sign(root,key=key,cert=cert,reference_uri='#'+de.get('Id'),id_attribute='Id')
+    return etree.tostring(firmado,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+
+def _sifen_enviar_sync(xml_firmado,cfg,timeout=35):
+    """Transmite un rDE firmado por recepción sincrónica SIFEN usando mTLS."""
+    import requests,secrets
+    from lxml import etree
+    if not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital no instalado.')
+    parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
+    rde=etree.fromstring(xml_firmado if isinstance(xml_firmado,(bytes,bytearray)) else xml_firmado.encode(),parser)
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'env':SOAP}); etree.SubElement(env,'{%s}Header'%SOAP); body=etree.SubElement(env,'{%s}Body'%SOAP)
+    envio=etree.SubElement(body,'{%s}rEnviDe'%NS); etree.SubElement(envio,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
+    xde=etree.SubElement(envio,'{%s}xDE'%NS); xde.append(rde)
+    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    url=_sifen_endpoint(cfg,'sync')
+    r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
+    return r.status_code,r.content,url
+
+def _sifen_parse_respuesta(xml_bytes):
+    from lxml import etree
+    out={'estado':'SIN_RESPUESTA','codigo':'','mensaje':'','protocolo':'','cdc':''}
+    try:
+        root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else str(xml_bytes).encode(),etree.XMLParser(resolve_entities=False,no_network=True))
+        def first(local):
+            x=root.xpath('//*[local-name()=$n]',n=local)
+            return (x[0].text or '').strip() if x else ''
+        out['estado']=first('dEstRes') or first('dEstRes') or 'RESPUESTA_RECIBIDA'
+        out['codigo']=first('dCodRes'); out['mensaje']=first('dMsgRes'); out['protocolo']=first('dProtAut'); out['cdc']=first('dId')
+    except Exception as e: out['estado']='ERROR_XML';out['mensaje']=str(e)
+    return out
+
+def _sifen_motor_autotest(cfg):
+    """Prueba local: construye un XML mínimo técnico, firma y verifica XMLDSig sin enviarlo."""
+    from lxml import etree
+    from signxml import XMLVerifier
+    if not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Instale primero el certificado digital.')
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; XSI='http://www.w3.org/2001/XMLSchema-instance'
+    root=etree.Element('{%s}rDE'%NS,nsmap={None:NS,'xsi':XSI}); etree.SubElement(root,'{%s}dVerFor'%NS).text='150'
+    de=etree.SubElement(root,'{%s}DE'%NS);de.set('Id','0'*44)
+    firmado=_sifen_firmar_rde(etree.tostring(root),cfg)
+    XMLVerifier().verify(firmado,x509_cert=Path(cfg['cert_path']).read_bytes(),id_attribute='Id')
+    return True
+
 def _sifen_dir():
     p=os.path.join(DATA_DIR,'sifen');os.makedirs(p,exist_ok=True)
     try: os.chmod(p,0o700)
@@ -3717,6 +3799,13 @@ def configuracion_sifen():
                     _sifen_log('CERTIFICADO','OK',f'{subj} | vence {na}');flash('Certificado y clave privada validados e instalados en el almacenamiento persistente protegido. La contraseña no fue guardada.')
                 except Exception as e:
                     _sifen_log('CERTIFICADO','ERROR',e);flash('No se pudo instalar el certificado: '+str(e))
+        elif accion=='motor_autotest':
+            cfg=c.execute('select * from sifen_config where id=1').fetchone()
+            try:
+                _sifen_motor_autotest(cfg);_sifen_log('XMLDSIG','OK','Firma XMLDSig RSA-SHA256 generada y verificada localmente. No se transmitió ningún documento.')
+                flash('Motor XMLDSig: firma y verificación local correctas. No se envió ningún documento a SIFEN.')
+            except Exception as e:
+                _sifen_log('XMLDSIG','ERROR',e);flash('Autoprueba XMLDSig fallida: '+str(e))
         elif accion=='probar':
             cfg=c.execute('select * from sifen_config where id=1').fetchone()
             try:
