@@ -368,3 +368,18 @@ Se incorporó el centro operativo de intercambio contable con plantillas, valida
 - El PDF respeta el modo elegido y, en modo rubricado, incorpora razón social, RUC, período, fecha de emisión y foliado correlativo por página.
 - La vista rubricada está preparada para impresión/archivo, sin afirmar que el PDF generado por el ERP sustituye la rúbrica, sellado o autorización legal aplicable.
 - Se mantienen Excel y CSV.
+
+## V13.9.56 — Visaciones de seguros integradas
+- Toda consulta, procedimiento, admisión (urgencia/internación/quirófano/consulta) y servicio cargado a una cuenta asegurada exige N.º, fecha, hora y médico de la visación.
+- Permite adjuntar PDF o imagen (JPG/JPEG/PNG/WEBP), almacenada en el directorio persistente de datos (`/var/data/visaciones` en Render), no en GitHub.
+- Laboratorio por seguro también registra visación y profesional.
+- Centro `Seguros → Visaciones / Autorizaciones` para consultar antecedentes y abrir adjuntos.
+- Pendientes de facturación del seguro muestran si la visación está registrada y permiten cargarla para prestaciones históricas.
+- La facturación consolidada al seguro bloquea prestaciones seleccionadas sin visación, evitando enviar cuentas incompletas.
+- Los registros se vinculan con paciente, aseguradora, médico y documento/prestación de origen.
+
+## V13.9.57 — Formato rubricado tradicional de libros contables
+- El Libro Diario en modo rubricado adopta el diseño visual solicitado: razón social/dirección, título centrado, RUC y página; columnas Asiento, Cuenta, Importe Debe e Importe Haber; glosa por asiento, fecha entre separadores y subtotales Debe/Haber.
+- El PDF rubricado del Libro Diario usa A4 vertical, foliado por página y encabezado repetido.
+- Los demás libros mantienen vista normal/rubricada y PDF, conservando su estructura contable propia.
+- La presentación rubricada facilita impresión/archivo; no afirma sustituir trámites formales de rúbrica o autorización que correspondan.

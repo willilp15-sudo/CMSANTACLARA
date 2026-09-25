@@ -1,6 +1,7 @@
 from flask import Flask,render_template,request,redirect,session,flash,jsonify,send_file
 import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from pathlib import Path
 app=Flask(__name__)
 
@@ -884,7 +885,13 @@ def hospital_admisiones():
  c=db()
  if request.method=='POST':
   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));cama=int(request.form['cama_id']) if request.form.get('cama_id') else None
-  cur=c.execute('insert into admisiones(fecha,paciente_id,tipo,medico_id,aseguradora_id,moneda,tipo_cambio,cama_id) values(?,?,?,?,?,?,?,?)',(fecha,int(request.form['paciente_id']),request.form['tipo'],request.form.get('medico_id') or None,request.form.get('aseguradora_id') or None,mon,tc,cama));
+  aseg_id=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None
+  if aseg_id and not all((request.form.get(k) or '').strip() for k in ('numero_visacion','fecha_visacion','hora_visacion')):
+   c.close();flash('Atención por seguro: complete número, fecha y hora de visación.');return redirect('/admisiones')
+  if aseg_id and not (request.form.get('medico_visacion_id') or request.form.get('medico_id')):
+   c.close();flash('Atención por seguro: seleccione el médico que realiza la atención.');return redirect('/admisiones')
+  cur=c.execute('insert into admisiones(fecha,paciente_id,tipo,medico_id,aseguradora_id,moneda,tipo_cambio,cama_id) values(?,?,?,?,?,?,?,?)',(fecha,int(request.form['paciente_id']),request.form['tipo'],request.form.get('medico_id') or None,aseg_id,mon,tc,cama)); aid=cur.lastrowid
+  if aseg_id:_registrar_visacion(c,aseg_id,int(request.form['paciente_id']),request.form['tipo'],aid,request.form.get('medico_id') or None)
   if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,))
   c.commit();audit('ADMISION',str(cur.lastrowid));return redirect('/admisiones')
  rows=c.execute('select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id order by a.id desc').fetchall();pats=c.execute('select * from pacientes').fetchall();med=c.execute('select * from medicos').fetchall();aseg=c.execute('select * from aseguradoras').fetchall();camas=c.execute("select * from camas where estado='LIBRE'").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_admissions.html',rows=rows,pats=pats,med=med,aseg=aseg,camas=camas,mons=mons)
@@ -895,6 +902,11 @@ def cuenta_paciente(aid):
   c.close();flash('La cuenta o admisión solicitada no existe. Puede localizar la cuenta desde Caja Central.');return redirect('/ventas/caja-central')
  if request.method=='POST':
   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));tipo=request.form['tipo'];ref=int(request.form['referencia_id']);qty=float(request.form['cantidad'])
+  if a['aseguradora_id'] and tipo=='SERVICIO':
+   if not all((request.form.get(k) or '').strip() for k in ('numero_visacion','fecha_visacion','hora_visacion')):
+    c.close();flash('Servicio por seguro: complete número, fecha y hora de visación.');return redirect(f'/cuenta-paciente/{aid}')
+   if not (request.form.get('medico_visacion_id') or a['medico_id']):
+    c.close();flash('Servicio por seguro: seleccione el médico que realiza la atención.');return redirect(f'/cuenta-paciente/{aid}')
   if tipo=='PRODUCTO':
    if not user_has('FARMACIA','ENTREGAR'):
     flash('Los productos y medicamentos deben solicitarse desde Enfermería y ser autorizados/entregados por Farmacia Interna.');c.close();return redirect(f'/cuenta-paciente/{aid}')
@@ -903,8 +915,10 @@ def cuenta_paciente(aid):
    price=x['precio_pyg']/tc;desc=x['nombre'];c.execute('update productos set stock=stock-? where id=?',(qty,ref));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,ref,'SALIDA',-qty,x['costo_pyg'],'PACIENTE',aid))
   else:
    x=c.execute('select * from servicios where id=?',(ref,)).fetchone();price=x['precio_pyg']/tc;desc=x['nombre']
-  iva_pct=float(x['iva_pct'] or 0);total=qty*price;c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,tipo,ref,desc,qty,price,mon,tc,total,total*tc,iva_pct));c.commit();return redirect(f'/cuenta-paciente/{aid}')
- cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,total=total)
+  iva_pct=float(x['iva_pct'] or 0);total=qty*price;cargo_id=c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,tipo,ref,desc,qty,price,mon,tc,total,total*tc,iva_pct)).lastrowid
+  if a['aseguradora_id'] and tipo=='SERVICIO':_registrar_visacion(c,a['aseguradora_id'],a['paciente_id'],'CARGO_SERVICIO',cargo_id,request.form.get('medico_id') or a['medico_id'])
+  c.commit();return redirect(f'/cuenta-paciente/{aid}')
+ cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();visaciones=c.execute("select v.*,m.nombre medico from seguro_visaciones v left join medicos m on m.id=v.medico_id where (v.origen_tipo=? and v.origen_id=?) or (v.origen_tipo='CARGO_SERVICIO' and v.origen_id in (select id from cargos_paciente where admision_id=?)) order by v.id desc",(a['tipo'],aid,aid)).fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,meds=meds,visaciones=visaciones,total=total)
 @app.post('/facturar-admision/<int:aid>')
 def facturar_admision(aid):
  c=db();a=c.execute('select a.*,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone();items=c.execute('select * from cargos_paciente where admision_id=? and facturado=0',(aid,)).fetchall()
@@ -1032,6 +1046,7 @@ def consultas_medicas():
    # crea una admisión de consultorio para vincular cuenta del paciente
    cur=c.execute("insert into admisiones(fecha,paciente_id,tipo,medico_id,aseguradora_id,moneda,tipo_cambio,estado) values(?,?,?,?,?,?,?,'ABIERTA')",(fecha,pid,'CONSULTORIO',mid,aseg,mon,tc)); aid=cur.lastrowid
    cur=c.execute('insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,admision_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,request.form.get('hora'),pid,mid,eid,aseg,aid,mon,tc,precio,hon,precio*tc,hon*tc,request.form.get('observacion'))); qid=cur.lastrowid
+   if aseg:_registrar_visacion(c,aseg,pid,'CONSULTA',qid,mid)
    esp=c.execute('select nombre from especialidades where id=?',(eid,)).fetchone()['nombre']
    c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,'CONSULTA',qid,'Consulta médica - '+esp,1,precio,mon,tc,precio,precio*tc))
    c.commit(); audit('CONSULTA_MEDICA',str(qid)); flash('Consulta registrada correctamente y cargada a la cuenta del paciente.')
@@ -1547,9 +1562,10 @@ def consultorio_prestaciones():
    if not s:raise ValueError('Servicio no encontrado.')
    mid=int(request.form['medico_id']);med=c.execute('select * from medicos where id=?',(mid,)).fetchone();esp=c.execute('select id from especialidades where nombre=?',(med['especialidad'],)).fetchone() if med else None
    aseg=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None;precio=float(request.form.get('precio') or s['precio_pyg'] or 0);hon=float(request.form.get('honorario_medico') or 0)
-   c.execute("""insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado,tipo_prestacion,servicio_id,origen_facturacion,facturada)
-   values(?,?,?,?,?,?,'PYG',1,?,?,?,?,?,'REALIZADA','PROCEDIMIENTO',?,?,0)""",(request.form['fecha'],request.form.get('hora'),int(request.form['paciente_id']),mid,esp['id'] if esp else None,aseg,precio,hon,precio,hon,request.form.get('observacion'),sid,'SEGURO' if aseg else 'PARTICULAR'))
-   c.commit();audit('PROCEDIMIENTO_CONSULTORIO',str(mid));flash('Procedimiento registrado para el cierre del consultorio.')
+   qid=c.execute("""insert into consultas(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,moneda,tipo_cambio,precio,honorario_medico,precio_pyg,honorario_pyg,observacion,estado,tipo_prestacion,servicio_id,origen_facturacion,facturada)
+   values(?,?,?,?,?,?,'PYG',1,?,?,?,?,?,'REALIZADA','PROCEDIMIENTO',?,?,0)""",(request.form['fecha'],request.form.get('hora'),int(request.form['paciente_id']),mid,esp['id'] if esp else None,aseg,precio,hon,precio,hon,request.form.get('observacion'),sid,'SEGURO' if aseg else 'PARTICULAR')).lastrowid
+   if aseg:_registrar_visacion(c,aseg,int(request.form['paciente_id']),'PROCEDIMIENTO',qid,mid)
+   c.commit();audit('PROCEDIMIENTO_CONSULTORIO',str(qid));flash('Procedimiento registrado para el cierre del consultorio.')
   except Exception as ex:c.rollback();flash(str(ex))
   finally:c.close()
   return redirect('/consultorio/prestaciones')
@@ -1613,17 +1629,18 @@ def laboratorio():
    lid=c.execute("""insert into laboratorio_prestaciones(fecha,paciente_id,aseguradora_id,tipo,descripcion,importe_pyg,origen,estado_facturacion,creado_por,creado_en,estudio_admisional)
                     values(?,?,?,'ANALISIS',?,?,?,?,?,?,?)""",(fecha,pid,aseg,desc,importe,origen,estado,session.get('user'),now(),adm)).lastrowid
    if aseg:
+    _registrar_visacion(c,aseg,pid,'LABORATORIO',lid,request.form.get('medico_id') or None)
     spid=c.execute("""insert into seguro_pendientes(fecha,aseguradora_id,paciente_id,origen_tipo,origen_id,categoria,descripcion,importe_pyg,iva_pct,estado)
                       values(?,?,?,?,?,'SERVICIOS SANATORIALES',?,?,10,'PENDIENTE')""",(fecha,aseg,pid,'LABORATORIO',lid,'Laboratorio - '+desc,importe)).lastrowid
     c.execute('update laboratorio_prestaciones set seguro_pendiente_id=? where id=?',(spid,lid))
    c.commit();audit('LABORATORIO_REGISTRO',f'{lid}/{origen}');flash('Análisis de laboratorio registrado.')
   except Exception as ex:c.rollback();flash('No se pudo registrar: '+str(ex))
   c.close();return redirect('/laboratorio')
- pats=c.execute('select * from pacientes order by nombre').fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall()
+ pats=c.execute('select * from pacientes order by nombre').fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall()
  rows=c.execute("""select l.*,p.nombre paciente,a.nombre aseguradora from laboratorio_prestaciones l
  left join pacientes p on p.id=l.paciente_id left join aseguradoras a on a.id=l.aseguradora_id
  order by l.fecha desc,l.id desc limit 300""").fetchall()
- c.close();return render_template('laboratory.html',pats=pats,asegs=asegs,rows=rows)
+ c.close();return render_template('laboratory.html',pats=pats,asegs=asegs,meds=meds,rows=rows)
 
 @app.post('/laboratorio/<int:lid>/facturar-particular')
 def laboratorio_facturar_particular(lid):
@@ -2298,10 +2315,10 @@ def contabilidad_informe(tipo):
  if buscado: titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta or None)
  else:
   titulo,headers,_=_accounting_report(c,tipo,'0001-01-01','0001-01-01',cuenta or None); rows=[]
- cuentas=c.execute('select codigo,nombre from plan_cuentas order by codigo').fetchall();c.close()
+ cuentas=c.execute('select codigo,nombre from plan_cuentas order by codigo').fetchall();config=c.execute('select * from institucion_config where id=1').fetchone();c.close()
  totales=_report_totals(headers,rows) if buscado else []
  modo='rubricado' if request.args.get('modo')=='rubricado' else 'normal'
- return render_template('accounting_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,cuenta=cuenta,cuentas=cuentas,buscado=buscado,totales=totales,report_value=_report_value,modo=modo)
+ return render_template('accounting_report.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,desde=desde,hasta=hasta,cuenta=cuenta,cuentas=cuentas,buscado=buscado,totales=totales,report_value=_report_value,modo=modo,config=config)
 
 def _safe(v): return '' if v is None else str(v)
 
@@ -2323,32 +2340,77 @@ def contabilidad_pdf(tipo):
  from reportlab.lib import colors
  from reportlab.lib.pagesizes import A4,landscape
  from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
- from reportlab.lib.enums import TA_CENTER
- from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
+ from reportlab.lib.enums import TA_CENTER,TA_LEFT,TA_RIGHT
+ from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,KeepTogether
  desde=request.args.get('desde') or '1900-01-01';hasta=request.args.get('hasta') or datetime.date.today().isoformat();cuenta=request.args.get('cuenta') or None
  modo='rubricado' if request.args.get('modo')=='rubricado' else 'normal'
  c=db();titulo,headers,rows=_accounting_report(c,tipo,desde,hasta,cuenta);inst=c.execute('select * from institucion_config where id=1').fetchone();c.close()
  empresa=(inst['razon_social'] if inst and 'razon_social' in inst.keys() and inst['razon_social'] else (inst['nombre'] if inst else 'CENTRO MEDICO SANTA CLARA'))
  ruc=(inst['ruc'] if inst and inst['ruc'] else '')
  if inst and 'dv' in inst.keys() and inst['dv'] and ruc and '-' not in ruc:ruc=f"{ruc}-{inst['dv']}"
- bio=io.BytesIO();doc=SimpleDocTemplate(bio,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=30,bottomMargin=30);styles=getSampleStyleSheet()
+ direccion=(inst['direccion'] if inst and 'direccion' in inst.keys() and inst['direccion'] else '')
+ bio=io.BytesIO();styles=getSampleStyleSheet()
+ # V13.9.57: el Libro Diario rubricado replica el formato tradicional mostrado por el usuario:
+ # encabezado institucional, asiento/cuenta/debe/haber, glosa, fecha separadora y folio por página.
+ if modo=='rubricado' and tipo=='diario':
+  from collections import OrderedDict
+  doc=SimpleDocTemplate(bio,pagesize=A4,leftMargin=22,rightMargin=22,topMargin=68,bottomMargin=28)
+  normal=ParagraphStyle('rdn',parent=styles['Normal'],fontName='Helvetica',fontSize=7.2,leading=9)
+  small=ParagraphStyle('rds',parent=normal,fontSize=6.6,leading=8)
+  money=ParagraphStyle('rdm',parent=normal,alignment=TA_RIGHT)
+  story=[];grupos=OrderedDict()
+  for r in rows:
+   # Fecha, Asiento, Concepto, Cuenta, Nombre, Debe, Haber, Moneda, TC
+   key=(r[0],r[1],r[2]);grupos.setdefault(key,[]).append(r)
+  for (fecha,num,concepto),det in grupos.items():
+   data=[];td=th=0
+   for r in det:
+    debe=float(r[5] or 0);haber=float(r[6] or 0);td+=debe;th+=haber
+    nombre=(r[4] or '').strip();cuenta=(r[3] or '').strip()
+    etiqueta=(('a ' if haber and not debe else '') + nombre).strip()
+    if cuenta: etiqueta=(cuenta+'  '+etiqueta).strip()
+    data.append([Paragraph(str(num),small),Paragraph(etiqueta,normal),Paragraph(_money_local(debe,'PYG') if debe else '0',money),Paragraph(_money_local(haber,'PYG') if haber else '0',money)])
+   data.append(['','',Paragraph(_money_local(td,'PYG'),money),Paragraph(_money_local(th,'PYG'),money)])
+   t=Table(data,colWidths=[52,330,82,82],hAlign='LEFT')
+   t.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),('TOPPADDING',(0,0),(-1,-1),2),('BOTTOMPADDING',(0,0),(-1,-2),2),('LINEABOVE',(2,-1),(-1,-1),0.55,colors.black),('LINEBELOW',(2,-1),(-1,-1),0.55,colors.black)]))
+   try: ftxt=datetime.datetime.strptime(str(fecha)[:10],'%Y-%m-%d').strftime('%d-%m-%y')
+   except: ftxt=str(fecha)
+   glosa=Paragraph(str(concepto or ''),small)
+   sep=Table([[glosa,Paragraph(ftxt,ParagraphStyle('date',parent=small,alignment=TA_CENTER)),'']],colWidths=[265,90,191])
+   sep.setStyle(TableStyle([('LINEBELOW',(0,0),(0,0),0.7,colors.black),('LINEBELOW',(2,0),(2,0),0.7,colors.black),('VALIGN',(0,0),(-1,-1),'BOTTOM'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),2)]))
+   story.append(KeepTogether([t,sep,Spacer(1,3)]))
+  def _cab(canvas,doc):
+   canvas.saveState();w,h=A4
+   canvas.setStrokeColor(colors.HexColor('#1f3f9a'));canvas.setLineWidth(1.2);canvas.line(0,h-2,w,h-2)
+   canvas.setFont('Helvetica-Bold',8);canvas.drawString(22,h-20,empresa.upper())
+   canvas.setFont('Helvetica',7);canvas.drawString(22,h-32,(direccion or '').upper())
+   canvas.setFont('Helvetica-Bold',8);canvas.drawCentredString(w/2,h-20,titulo)
+   canvas.setFont('Helvetica',7);canvas.drawRightString(w-22,h-20,f'Pág.: {doc.page}')
+   canvas.drawRightString(w-22,h-32,f'R.U.C.: {ruc or "-"}')
+   y=h-49
+   canvas.setLineWidth(.45);canvas.rect(22,y-10,w-44,11,stroke=1,fill=0)
+   canvas.setFont('Helvetica-Bold',6.6);canvas.drawString(28,y-7,'Asiento');canvas.drawString(83,y-7,'Cuenta');canvas.drawRightString(w-108,y-7,'Importe Debe');canvas.drawRightString(w-28,y-7,'Importe Haber')
+   canvas.restoreState()
+  doc.build(story,onFirstPage=_cab,onLaterPages=_cab);bio.seek(0)
+  return send_file(bio,as_attachment=False,download_name=f'{tipo}_RUBRICADO_{desde}_{hasta}.pdf',mimetype='application/pdf')
+ # Resto de informes: conserva tabla completa, con identidad y foliado rubricado.
+ doc=SimpleDocTemplate(bio,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=30,bottomMargin=30)
  story=[]
  if pdf_logo():story.append(pdf_logo())
  story += [Paragraph(empresa,styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'RUC: {ruc or "-"} &nbsp;&nbsp; | &nbsp;&nbsp; Periodo: {desde} al {hasta}',styles['Normal'])]
  if modo=='rubricado':
   aviso=ParagraphStyle('rubrica',parent=styles['Normal'],alignment=TA_CENTER,fontSize=8,leading=10)
-  story += [Paragraph('<b>FORMATO PARA IMPRESIÓN / ARCHIVO CONTABLE RUBRICADO</b>',aviso),Paragraph('La emisión desde el sistema no sustituye la rúbrica, foliado, sellado, comunicación o autorización que legalmente corresponda.',aviso)]
+  story += [Paragraph('<b>FORMATO PARA IMPRESIÓN / ARCHIVO CONTABLE RUBRICADO</b>',aviso),Paragraph('Vista de libro contable con foliado correlativo. La emisión desde el sistema no sustituye la rúbrica o autorización legal que corresponda.',aviso)]
  story += [Paragraph(f'Emitido: {datetime.datetime.now():%d/%m/%Y %H:%M}',styles['Normal']),Spacer(1,8)]
  data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows]
  tbl=Table(data,repeatRows=1)
- tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.35 if modo=='rubricado' else 0.25,colors.black if modo=='rubricado' else colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER')]))
+ tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.white if modo=='rubricado' else colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.35 if modo=='rubricado' else 0.25,colors.black if modo=='rubricado' else colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(0,0),(-1,0),'CENTER')]))
  story.append(tbl);story.append(Spacer(1,8));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']))
  for h,v in _report_totals(headers,rows): story.append(Paragraph(f'<b>{h}:</b> Gs. {_money_local(v,"PYG")}',styles['Normal']))
  def _pie(canvas,doc):
   canvas.saveState();canvas.setFont('Helvetica',7)
   if modo=='rubricado':
-   canvas.drawString(20,15,f'{empresa} - RUC {ruc or "-"} - {titulo}')
-   canvas.drawRightString(landscape(A4)[0]-20,15,f'Folio {doc.page}')
+   canvas.drawString(20,15,f'{empresa} - RUC {ruc or "-"} - {titulo}');canvas.drawRightString(landscape(A4)[0]-20,15,f'Pág.: {doc.page}')
   else: canvas.drawRightString(landscape(A4)[0]-20,15,f'Página {doc.page}')
   canvas.restoreState()
  doc.build(story,onFirstPage=_pie,onLaterPages=_pie);bio.seek(0)
@@ -2618,6 +2680,9 @@ def seguros_facturar():
    if not ids:raise ValueError('Seleccione al menos un ítem pendiente para facturar.')
    marks=','.join('?'*len(ids));rows=c.execute(f"select sp.* from seguro_pendientes sp where sp.id in ({marks}) and sp.aseguradora_id=? and sp.estado='PENDIENTE'",ids+[aseg]).fetchall()
    if not rows:raise ValueError('Los ítems seleccionados ya no están pendientes.')
+   for r in rows:
+    v=c.execute("select id from seguro_visaciones where (origen_tipo='PENDIENTE_SEGURO' and origen_id=?) or (origen_id=? and ((?='CARGO' and origen_tipo='CARGO_SERVICIO') or origen_tipo=?)) limit 1",(r['id'],r['origen_id'],r['origen_tipo'],r['origen_tipo'])).fetchone()
+    if not v:raise ValueError('No se puede facturar al seguro: existe una prestación seleccionada sin visación registrada. Cargue la visación desde Pendientes de Seguro.')
    fecha=request.form.get('fecha') or datetime.date.today().isoformat();num=(request.form.get('numero') or '').strip()
    if not num:raise ValueError('Ingrese el número de factura.')
    meds=sum(float(r['importe_pyg']) for r in rows if r['categoria']=='MEDICAMENTOS');desc=sum(float(r['importe_pyg']) for r in rows if r['categoria']=='DESCARTABLES');serv=sum(float(r['importe_pyg']) for r in rows if r['categoria']=='SERVICIOS SANATORIALES');total=meds+desc+serv
@@ -2638,7 +2703,10 @@ def seguros_facturar():
  if aseg_id:wh.append('sp.aseguradora_id=?');pa.append(aseg_id)
  if desde:wh.append('sp.fecha>=?');pa.append(desde)
  if hasta:wh.append('sp.fecha<=?');pa.append(hasta)
- rows=c.execute("select sp.*,p.nombre paciente,a.nombre seguro from seguro_pendientes sp left join pacientes p on p.id=sp.paciente_id join aseguradoras a on a.id=sp.aseguradora_id where "+' and '.join(wh)+' order by a.nombre,sp.fecha,sp.id',pa).fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall();c.commit();c.close();return render_template('insurance_billing.html',rows=rows,asegs=asegs,aseg_id=aseg_id,desde=desde,hasta=hasta)
+ rows=c.execute("""select sp.*,p.nombre paciente,a.nombre seguro,
+ coalesce((select v.id from seguro_visaciones v where v.origen_tipo='PENDIENTE_SEGURO' and v.origen_id=sp.id limit 1),
+ (select v.id from seguro_visaciones v where v.origen_id=sp.origen_id and ((sp.origen_tipo='CARGO' and v.origen_tipo='CARGO_SERVICIO') or v.origen_tipo=sp.origen_tipo) limit 1)) visacion_id
+ from seguro_pendientes sp left join pacientes p on p.id=sp.paciente_id join aseguradoras a on a.id=sp.aseguradora_id where """+' and '.join(wh)+' order by a.nombre,sp.fecha,sp.id',pa).fetchall();asegs=c.execute('select * from aseguradoras order by nombre').fetchall();c.commit();c.close();return render_template('insurance_billing.html',rows=rows,asegs=asegs,aseg_id=aseg_id,desde=desde,hasta=hasta)
 
 ROUTE_MODULE.update({'seguros_facturar':'FACTURACION'})
 init_v1356_seguros()
@@ -3065,8 +3133,6 @@ def backup_manual_eliminar(nombre):
 
 ROUTE_MODULE.update({'backups_manuales':'CONFIG_SANATORIO','backup_manual_descargar':'CONFIG_SANATORIO','backup_manual_eliminar':'CONFIG_SANATORIO'})
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0',port=5000,debug=False)
 
 # ===== V13.9.30: Caja central - localizar preventa/remision/cuenta completa =====
 def init_v13930_caja_central():
@@ -4136,3 +4202,78 @@ def anticipos_financieros():
     ters=c.execute("select * from terceros where tipo in ('CLIENTE','PROVEEDOR','AMBOS') order by nombre").fetchall();bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();rows=c.execute('select a.*,t.nombre tercero,b.banco,b.alias from anticipos_terceros a join terceros t on t.id=a.tercero_id left join cuentas_bancarias b on b.id=a.cuenta_bancaria_id order by a.id desc limit 200').fetchall();c.close();return render_template('treasury_advances.html',ters=ters,bancos=bancos,rows=rows)
 
 ROUTE_MODULE.update({'anticipos_financieros':'FINANZAS'})
+
+
+# ===== V13.9.56: Visaciones obligatorias para toda prestación por seguro =====
+VISACIONES_DIR=os.path.join(DATA_DIR,'visaciones')
+os.makedirs(VISACIONES_DIR,exist_ok=True)
+VISACION_EXT={'pdf','jpg','jpeg','png','webp'}
+
+def init_v13956_visaciones():
+    c=db();c.execute("""CREATE TABLE IF NOT EXISTS seguro_visaciones(
+      id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,hora TEXT NOT NULL,numero_visacion TEXT NOT NULL,
+      aseguradora_id INTEGER NOT NULL,paciente_id INTEGER,medico_id INTEGER,
+      origen_tipo TEXT NOT NULL,origen_id INTEGER NOT NULL,archivo_nombre TEXT,archivo_guardado TEXT,
+      archivo_tipo TEXT,observacion TEXT,creado_por TEXT,creado_en TEXT,
+      UNIQUE(origen_tipo,origen_id))""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_visacion_seguro ON seguro_visaciones(aseguradora_id,fecha)")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.56-visaciones-seguros',?)",(now(),));c.commit();c.close()
+init_v13956_visaciones()
+
+def _guardar_archivo_visacion(fileobj):
+    if not fileobj or not getattr(fileobj,'filename',''):return None,None,None
+    original=secure_filename(fileobj.filename)
+    ext=original.rsplit('.',1)[-1].lower() if '.' in original else ''
+    if ext not in VISACION_EXT:raise ValueError('La visación solo admite PDF, JPG, JPEG, PNG o WEBP.')
+    nombre=secrets.token_hex(16)+'.'+ext
+    fileobj.save(os.path.join(VISACIONES_DIR,nombre))
+    return original,nombre,(getattr(fileobj,'mimetype',None) or '')
+
+def _registrar_visacion(c,aseguradora_id,paciente_id,origen_tipo,origen_id,medico_id=None):
+    if not aseguradora_id:return None
+    numero=(request.form.get('numero_visacion') or '').strip();fecha=(request.form.get('fecha_visacion') or request.form.get('fecha') or '').strip();hora=(request.form.get('hora_visacion') or request.form.get('hora') or '').strip()
+    mid=request.form.get('medico_visacion_id') or medico_id
+    if not numero:raise ValueError('Para servicios por seguro debe ingresar el número de visación.')
+    if not fecha:raise ValueError('Para servicios por seguro debe ingresar la fecha de visación.')
+    if not hora:raise ValueError('Para servicios por seguro debe ingresar la hora de visación.')
+    if not mid:raise ValueError('Para servicios por seguro debe seleccionar el médico que realiza la atención.')
+    archivo=request.files.get('archivo_visacion');orig,guard,tipo=_guardar_archivo_visacion(archivo)
+    cur=c.execute("""insert into seguro_visaciones(fecha,hora,numero_visacion,aseguradora_id,paciente_id,medico_id,origen_tipo,origen_id,archivo_nombre,archivo_guardado,archivo_tipo,observacion,creado_por,creado_en)
+      values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(fecha,hora,numero,int(aseguradora_id),paciente_id,int(mid),origen_tipo,int(origen_id),orig,guard,tipo,request.form.get('observacion_visacion'),session.get('user'),now()))
+    return cur.lastrowid
+
+@app.get('/seguros/visaciones')
+def seguro_visaciones():
+    c=db();q=(request.args.get('q') or '').strip();args=[];where='1=1'
+    if q:where="(v.numero_visacion like ? or p.nombre like ? or a.nombre like ? or m.nombre like ?)";args=['%'+q+'%']*4
+    rows=c.execute("""select v.*,p.nombre paciente,a.nombre aseguradora,m.nombre medico from seguro_visaciones v
+      left join pacientes p on p.id=v.paciente_id left join aseguradoras a on a.id=v.aseguradora_id left join medicos m on m.id=v.medico_id
+      where """+where+" order by v.fecha desc,v.hora desc,v.id desc limit 1000",args).fetchall();c.close()
+    return render_template('insurance_authorizations.html',rows=rows,q=q)
+
+@app.get('/seguros/visaciones/<int:vid>/archivo')
+def seguro_visacion_archivo(vid):
+    c=db();v=c.execute('select * from seguro_visaciones where id=?',(vid,)).fetchone();c.close()
+    if not v or not v['archivo_guardado']:return ('Archivo no encontrado',404)
+    ruta=os.path.join(VISACIONES_DIR,v['archivo_guardado'])
+    if not os.path.isfile(ruta):return ('Archivo no encontrado',404)
+    return send_file(ruta,as_attachment=False,download_name=v['archivo_nombre'] or v['archivo_guardado'])
+
+
+@app.route('/seguros/pendiente/<int:spid>/visacion',methods=['GET','POST'])
+def seguro_pendiente_visacion(spid):
+    c=db();sp=c.execute("select sp.*,p.nombre paciente,a.nombre aseguradora from seguro_pendientes sp left join pacientes p on p.id=sp.paciente_id join aseguradoras a on a.id=sp.aseguradora_id where sp.id=?",(spid,)).fetchone()
+    if not sp:c.close();return ('Pendiente no encontrado',404)
+    if request.method=='POST':
+        try:
+            _registrar_visacion(c,sp['aseguradora_id'],sp['paciente_id'],'PENDIENTE_SEGURO',spid,request.form.get('medico_visacion_id'))
+            c.commit();audit('VISACION_SEGURO',str(spid));flash('Visación vinculada correctamente a la prestación pendiente.')
+        except Exception as ex:c.rollback();flash(str(ex))
+        c.close();return redirect('/seguros/facturar')
+    meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();c.close();return render_template('insurance_authorization_form.html',sp=sp,meds=meds)
+
+ROUTE_MODULE.update({'seguro_visaciones':'FACTURACION','seguro_visacion_archivo':'FACTURACION','seguro_pendiente_visacion':'FACTURACION'})
+
+
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=5000,debug=False)
