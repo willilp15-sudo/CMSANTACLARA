@@ -354,3 +354,10 @@ V13.6.5.1 FIX Configuración Empresa
 - Corregido definitivamente el orden de inicializacion ROUTE_MODULE.
 
 V13.9.40: edición completa de médicos (datos personales, profesionales, contacto, honorarios, consultorio y estado), conservando historial.
+
+
+## V13.9.42
+- Corrige edición de médicos con auditoría en la misma transacción SQLite.
+- Prepara QR SIFEN TEST conforme al Manual Técnico v150.
+- El QR solo se imprime cuando existe DigestValue real de XMLDSig; no genera un QR falso desde el CDC.
+- Mantiene ambiente TEST.

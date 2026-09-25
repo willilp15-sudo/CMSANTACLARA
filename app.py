@@ -801,8 +801,11 @@ def config_sanatorio():
    c.execute('insert or ignore into especialidades(nombre,precio_consulta,honorario_medico) values(?,?,?)',(esp,precio,hon))
    c.execute('insert into medicos(nombre,registro,especialidad,precio_consulta,honorario_consulta,consultorio_numero,documento,ruc,telefono,email,direccion,activo) values(?,?,?,?,?,?,?,?,?,?,?,1)',(request.form['nombre'].strip(),request.form.get('registro','').strip(),esp,precio,hon,request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip()))
   elif k=='actualizar_medico':
-   c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,int(request.form['medico_id'])))
-   audit('EDITAR_MEDICO',request.form['medico_id'])
+   mid=int(request.form['medico_id'])
+   antes=c.execute('select * from medicos where id=?',(mid,)).fetchone()
+   c.execute('update medicos set nombre=?,registro=?,especialidad=?,precio_consulta=?,honorario_consulta=?,consultorio_numero=?,documento=?,ruc=?,telefono=?,email=?,direccion=?,activo=? where id=?',(request.form['nombre'].strip(),request.form.get('registro','').strip(),request.form['especialidad'],float(request.form.get('precio_consulta') or 0),float(request.form.get('honorario_consulta') or 0),request.form.get('consultorio_numero','').strip(),request.form.get('documento','').strip(),request.form.get('ruc','').strip(),request.form.get('telefono','').strip(),request.form.get('email','').strip(),request.form.get('direccion','').strip(),1 if request.form.get('activo')=='1' else 0,mid))
+   despues=c.execute('select * from medicos where id=?',(mid,)).fetchone()
+   audit_change(c,'EDITAR_MEDICO','MEDICOS',mid,snapshot(antes),snapshot(despues),'Edición de ficha médica')
   elif k=='aseguradora':
    cur=c.execute("insert into terceros(tipo,ruc,nombre,moneda) values('CLIENTE',?,?,?)",(request.form['ruc'],request.form['nombre'],request.form['moneda']));c.execute('insert into aseguradoras(nombre,ruc,tercero_id,moneda) values(?,?,?,?)',(request.form['nombre'],request.form['ruc'],cur.lastrowid,request.form['moneda']))
   elif k=='cama':
@@ -2700,8 +2703,10 @@ def factura_venta_pdf(venta_id):
     t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1,rowHeights=[8*mm]+[10*mm]*(len(data)-1));t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
     total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
     tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
-    url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if es_dte and v['cdc'] else None
-    _kude_footer(story,inst,v['cdc'],url,es_dte)
+    # QR oficial: solo si deriva del DigestValue de la firma XML real y del CSC.
+    qr_url=(v['sifen_qr_url'] if 'sifen_qr_url' in v.keys() else None)
+    firmado=bool(v['cdc']) and bool(v['sifen_digest_value'] if 'sifen_digest_value' in v.keys() else None) and bool(qr_url)
+    _kude_footer(story,inst,v['cdc'],qr_url,firmado)
     doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
 
 
@@ -3275,3 +3280,67 @@ def _generar_cdc_test_venta(c,venta_id,fecha,numero):
     c.execute("update ventas set cdc=?,estado_sifen='TEST_GENERADO',codigo_seguridad_sifen=?,cdc_ambiente='TEST' where id=?",(cdc,codseg,venta_id))
     c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'CDC_TEST','GENERADO',f'Venta {venta_id} · CDC {cdc} · NO ENVIADO / NO APROBADO'))
     return cdc
+
+
+# ===== V13.9.42: QR SIFEN TEST conforme MT v150 + corrección edición médicos =====
+def init_v13942_qr_sifen():
+    c=db()
+    vcols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,defn in [('sifen_fecha_emision','TEXT'),('sifen_digest_value','TEXT'),('sifen_qr_url','TEXT'),('sifen_qr_hash','TEXT'),('sifen_xml_path','TEXT'),('sifen_respuesta_codigo','TEXT'),('sifen_respuesta_mensaje','TEXT')]:
+        if col not in vcols:c.execute(f'alter table ventas add column {col} {defn}')
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.9.42-qr-sifen-test-seguro',?)",(now(),))
+    c.commit();c.close()
+init_v13942_qr_sifen()
+
+SIFEN_QR_TEST_BASE='https://www.ekuatia.set.gov.py/consultas-test/qr?'
+
+def _sifen_hex_utf8(valor):
+    return str(valor or '').encode('utf-8').hex()
+
+def _sifen_decimal_qr(valor):
+    from decimal import Decimal
+    d=Decimal(str(valor or 0)); txt=format(d,'f')
+    if '.' in txt: txt=txt.rstrip('0').rstrip('.')
+    return txt or '0'
+
+def _sifen_construir_qr_test(c,venta_id,digest_value,fecha_emision=None):
+    import hashlib
+    v=c.execute('select v.*,t.ruc receptor_ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?',(venta_id,)).fetchone()
+    cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    if not v: raise ValueError('Venta no encontrada.')
+    if not cfg or str(cfg['ambiente'] or '').upper()!='TEST': raise ValueError('El ambiente SIFEN debe ser TEST.')
+    cdc=_solo_digitos(v['cdc'])
+    if len(cdc)!=44: raise ValueError('El CDC debe tener 44 dígitos antes de generar el QR.')
+    csc=str(cfg['csc'] or '').strip(); idcsc=_solo_digitos(cfg['csc_id']).zfill(4)
+    if not csc or len(idcsc)!=4: raise ValueError('Configure CSC e IdCSC TEST antes de generar el QR.')
+    digest=str(digest_value or '').strip()
+    if not digest: raise ValueError('Falta DigestValue de la firma digital XML (XS17).')
+    femi=(fecha_emision or (v['sifen_fecha_emision'] if 'sifen_fecha_emision' in v.keys() else None) or now())
+    femi=str(femi)[:19].replace(' ','T')
+    receptor=_solo_digitos(v['receptor_ruc']) or '0'
+    total=_sifen_decimal_qr(v['total']); iva=_sifen_decimal_qr(v['iva'])
+    nitems=c.execute('select count(*) from venta_items where venta_id=?',(venta_id,)).fetchone()[0] or 0
+    params=[('nVersion','150'),('Id',cdc),('dFeEmiDE',_sifen_hex_utf8(femi)),('dRucRec',receptor),('dTotGralOpe',total),('dTotIVA',iva),('cItems',str(nitems)),('DigestValue',_sifen_hex_utf8(digest)),('IdCSC',idcsc)]
+    datos='&'.join(f'{k}={val}' for k,val in params)
+    chash=hashlib.sha256((datos+csc).encode('utf-8')).hexdigest()
+    url=SIFEN_QR_TEST_BASE+datos+'&cHashQR='+chash
+    c.execute("update ventas set sifen_fecha_emision=?,sifen_digest_value=?,sifen_qr_url=?,sifen_qr_hash=?,estado_sifen=case when coalesce(estado_sifen,'') in ('APROBADO','ACEPTADO') then estado_sifen else 'DE_FIRMADO_TEST' end where id=?",(femi,digest,url,chash,venta_id))
+    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'QR_TEST','GENERADO',f'Venta {venta_id} · CDC {cdc} · QR construido desde DigestValue XMLDSig real'))
+    return url
+
+@app.post('/ventas/<int:venta_id>/sifen/qr-test')
+def venta_sifen_qr_test(venta_id):
+    c=db()
+    try:
+        v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
+        if not v: raise ValueError('Venta no encontrada.')
+        digest=v['sifen_digest_value'] if 'sifen_digest_value' in v.keys() else None
+        if not digest: raise ValueError('El QR oficial no puede generarse todavía: falta firmar el XML y obtener DigestValue (XS17).')
+        _sifen_construir_qr_test(c,venta_id,digest,v['sifen_fecha_emision'] if 'sifen_fecha_emision' in v.keys() else None)
+        c.commit();flash('QR SIFEN TEST generado correctamente desde la firma digital del XML.')
+    except Exception as e:
+        c.rollback();flash(str(e))
+    finally:c.close()
+    return redirect(f'/ventas/{venta_id}/factura')
+
+ROUTE_MODULE.update({'venta_sifen_qr_test':'FACTURACION'})
