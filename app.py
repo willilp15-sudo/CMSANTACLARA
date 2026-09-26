@@ -697,17 +697,21 @@ def ventas():
    if saldo>0:lineas.append(('1.1.02',saldo*tc,0,saldo,'Cuenta a cobrar'))
    lineas += [('4.1.01',0,base_total*tc,base_total,'Venta'),('2.1.02',0,ivag,iva,'IVA débito'),('5.1.01',costg,0,0,'Costo de venta'),('1.1.03',0,costg,0,'Salida inventario')]
    asiento(c,fecha,'Venta '+numero_factura,'VENTA',vid,mon,tc,lineas)
-   # V13.9.39: en TEST se genera el CDC conforme a la estructura del Manual Técnico.
-   try:
-    cdc_test=_generar_cdc_test_venta(c,vid,fecha,numero_factura)
-    if cdc_test: flash('CDC de PRUEBA generado: '+cdc_test+' · Sin valor fiscal hasta validación SIFEN TEST.')
-   except Exception as sx:
-    _sifen_log('CDC_TEST','ERROR',f'Venta {vid}: {sx}')
-    flash('Venta creada, pero no se pudo generar el CDC TEST: '+str(sx))
-   c.commit();success_vid=vid;audit('VENTA',str(vid));flash('Venta facturada correctamente con '+str(len(detalle))+' ítem(s).')
+   # V13.9.107: la emisión fiscal es un único proceso. Primero se confirma la
+   # venta y luego el motor SIFEN genera CDC/QR/XML/firma/XSD y, en PRODUCCIÓN,
+   # transmite automáticamente. No hay botones manuales de CDC/QR/envío.
+   c.commit();success_vid=vid;audit('VENTA',str(vid));flash('Venta registrada correctamente con '+str(len(detalle))+' ítem(s). Procesando Factura Electrónica automáticamente...')
   except Exception as e:c.rollback();flash(str(e))
   finally:c.close()
-  if success_vid: return redirect(f'/ventas/{success_vid}/factura')
+  if success_vid:
+   # Procesar SIFEN después del COMMIT para que el documento y sus ítems sean
+   # visibles para el motor fiscal. Siempre termina en el KuDE/PDF imprimible.
+   try:
+    _sifen_emitir_factura_automatico(success_vid)
+   except Exception as sx:
+    _sifen_log('FE_EMISION_AUTOMATICA','ERROR',f'Factura {success_vid}: {sx}')
+    flash('La venta fue registrada, pero el proceso SIFEN automático informó: '+str(sx))
+   return redirect(f'/ventas/{success_vid}/factura/pdf')
   return redirect('/ventas/carga')
  q=(request.args.get('q') or '').strip(); buscado=bool(q); rows=[]
  if buscado:
@@ -4293,6 +4297,42 @@ def _sifen_extraer_qr_rde(xml_bytes):
     root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else xml_bytes.encode('utf-8'))
     return (root.findtext('{%s}gCamFuFD/{%s}dCarQR'%(NS,NS)) or '').strip()
 
+def _sifen_emitir_factura_automatico(venta_id):
+    """Proceso único de emisión FE: CDC -> XML -> firma -> QR -> XSD -> SIFEN (PROD).
+    En TEST realiza todo salvo la transmisión fiscal. Devuelve el estado final.
+    """
+    c=db()
+    try:
+        cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        if not cfg: raise ValueError('Configuración SIFEN inexistente.')
+        xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
+        firmado=_sifen_firmar_rde(xml,cfg)
+        ok,detalle=_sifen_validar_xsd_v150(firmado)
+        if not ok: raise ValueError('XSD V150 rechazó el XML: '+str(detalle))
+        qr=_sifen_extraer_qr_rde(firmado)
+        if not qr: raise ValueError('El XML firmado no contiene dCarQR.')
+        _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
+        prod=str(cfg['ambiente'] or '').upper()=='PRODUCCION' and int(cfg['produccion_habilitada'] or 0)==1
+        if prod:
+            checks=_sifen_diagnostico(c,cfg); faltan=[x['nombre'] for x in checks if not x['ok']]
+            if faltan: raise ValueError('Diagnóstico de Producción pendiente: '+', '.join(faltan))
+            status,resp,url=_sifen_enviar_sync(firmado,cfg)
+            parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+            aprobado=estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
+            c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=?,protocolo_sifen=?,fecha_aprobacion_sifen=? where id=?',(cdc,qr,estado,parsed.get('protocolo',''),now() if aprobado else None,venta_id))
+            c.execute('update sifen_config set ultimo_envio_prod=?,ultimo_envio_prod_estado=?,actualizado_en=? where id=1',(now(),estado,now()))
+            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA',estado,f'Factura {venta_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")}'))
+        else:
+            estado='TEST_VALIDADO_XSD'
+            c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=? where id=?',(cdc,qr,estado,venta_id))
+            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA',estado,f'Factura {venta_id} · CDC {cdc} · QR/XML firmado · XSD V150 OK · ambiente TEST, sin transmisión fiscal'))
+        c.commit()
+        return estado
+    except Exception:
+        c.rollback(); raise
+    finally:
+        c.close()
+
 @app.post('/ventas/<int:venta_id>/sifen/preparar-validacion')
 def sifen_preparar_validacion_factura(venta_id):
     c=db()
@@ -4492,6 +4532,25 @@ def configuracion_sifen():
                     flash('Punto de expedición registrado. Use únicamente códigos previamente autorizados por DNIT.')
                 c.commit()
             except Exception as e:c.rollback();flash('No se pudo guardar el punto: '+str(e))
+            c.close();return redirect('/configuracion/sifen')
+        elif accion=='punto_eliminar':
+            pid=int(request.form.get('p_id') or 0)
+            try:
+                pto=c.execute('select * from sifen_puntos_expedicion where id=?',(pid,)).fetchone()
+                if not pto: raise ValueError('Punto de expedición no encontrado.')
+                uso=c.execute('select count(*) from ventas where sifen_punto_id=?',(pid,)).fetchone()[0]
+                try:
+                    uso+=c.execute('select count(*) from facturas_sanatorio where sifen_punto_id=?',(pid,)).fetchone()[0]
+                except Exception: pass
+                if uso:
+                    c.execute('update sifen_puntos_expedicion set activo=0,predeterminado=0,actualizado_en=? where id=?',(now(),pid))
+                    c.commit();flash('El punto tiene documentos emitidos y no puede borrarse del historial fiscal. Fue DESACTIVADO y ya no se usará para nuevas facturas.')
+                else:
+                    c.execute('delete from caja_punto_expedicion where punto_id=?',(pid,))
+                    c.execute('delete from sifen_puntos_expedicion where id=?',(pid,))
+                    c.commit();flash('Punto de expedición eliminado. Ya puede registrar el nuevo punto autorizado por DNIT.')
+            except Exception as e:
+                c.rollback();flash('No se pudo eliminar el punto: '+str(e))
             c.close();return redirect('/configuracion/sifen')
         elif accion=='punto_predeterminado':
             pid=int(request.form.get('p_id') or 0);c.execute('update sifen_puntos_expedicion set predeterminado=0');c.execute('update sifen_puntos_expedicion set predeterminado=1,activo=1 where id=?',(pid,));c.commit();c.close();return redirect('/configuracion/sifen')
