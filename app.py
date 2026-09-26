@@ -4129,7 +4129,17 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     root.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
     _sifen_xml_text(root,'dVerFor','150',NS)
     de=etree.SubElement(root,'{%s}DE'%NS);de.set('Id',cdc)
-    _sifen_xml_text(de,'dDVId',cdc[-1],NS);_sifen_xml_text(de,'dFecFirma',datetime.datetime.now().replace(microsecond=0).isoformat(),NS);_sifen_xml_text(de,'dSisFact','1',NS)
+    _sifen_xml_text(de,'dDVId',cdc[-1],NS)
+    # V13.9.124: Render ejecuta en UTC. SIFEN V150 exige dFecFirma en hora local
+    # de Paraguay, sin offset y anterior a la transmisión. ZoneInfo respeta los
+    # cambios históricos/vigentes de America/Asuncion; un margen de 5 segundos
+    # evita rechazo 1004 por pequeñas diferencias de reloj/red.
+    try:
+        from zoneinfo import ZoneInfo
+        fec_firma=(datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo('America/Asuncion'))-datetime.timedelta(seconds=5)).replace(tzinfo=None,microsecond=0)
+    except Exception:
+        fec_firma=(datetime.datetime.utcnow()-datetime.timedelta(hours=3,seconds=5)).replace(microsecond=0)
+    _sifen_xml_text(de,'dFecFirma',fec_firma.isoformat(),NS);_sifen_xml_text(de,'dSisFact','1',NS)
     go=etree.SubElement(de,'{%s}gOpeDE'%NS);_sifen_xml_text(go,'iTipEmi','1',NS);_sifen_xml_text(go,'dDesTipEmi','Normal',NS);_sifen_xml_text(go,'dCodSeg',cod_seg,NS)
     gt=etree.SubElement(de,'{%s}gTimb'%NS);_sifen_xml_text(gt,'iTiDE',ide,NS);_sifen_xml_text(gt,'dDesTiDE',des,NS);_sifen_xml_text(gt,'dNumTim',d['punto_timbrado'] or cfg['timbrado'],NS);_sifen_xml_text(gt,'dEst',est,NS);_sifen_xml_text(gt,'dPunExp',pun,NS);_sifen_xml_text(gt,'dNumDoc',num,NS);_sifen_xml_text(gt,'dFeIniT',cfg['timbrado_desde'],NS)
     gg=etree.SubElement(de,'{%s}gDatGralOpe'%NS);_sifen_xml_text(gg,'dFeEmiDE',str(fecha)[:10]+'T12:00:00',NS)
