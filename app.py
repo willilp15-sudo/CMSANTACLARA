@@ -4289,7 +4289,7 @@ def _sifen_generar_factura_test_autocontenida(c):
 def _sifen_validar_xsd_v150(xml_bytes):
     """Valida un rDE V150 contra el esquema de recepción oficial.
 
-    V13.9.116: el rDE conserva el schemaLocation oficial siRecepDE_v150.xsd, como indica la guía DNIT. Para prevalidar el elemento raíz rDE se compila DE_v150.xsd (Schema XML 18) con sus includes/imports.
+    V13.9.120: el rDE se valida como documento completo contra siRecepDE_v150.xsd, que es el esquema de recepción oficial publicado por DNIT.
     """
     try:
         from lxml import etree
@@ -4331,34 +4331,28 @@ def _sifen_validar_xsd_v150(xml_bytes):
         import os, pysifen
         from lxml import etree
         base=os.path.dirname(os.path.abspath(pysifen.__file__))
-        # Buscar el paquete real de esquemas sin asumir una sola ruta interna
-        dirs=[]
+        # V13.9.120: validar el DOCUMENTO rDE completo con el esquema de recepción.
+        # DNIT define rDE como raíz de siRecepDE_v150.xsd. DE_v150.xsd es una
+        # dependencia y no debe usarse como esquema raíz del rDE.
+        candidatos=[]
         for root_dir, subdirs, files in os.walk(base):
-            if 'DE_v150.xsd' in files:
-                dirs.append(root_dir)
-        if not dirs:
-            return False,['Motor SIFEN instalado, pero no contiene DE_v150.xsd. No se habilita Producción.']
+            for nombre in ('siRecepDE_v150.xsd','SiRecepDE_v150.xsd'):
+                if nombre in files:
+                    candidatos.append(os.path.join(root_dir,nombre))
+        if not candidatos:
+            return False,['Motor SIFEN instalado, pero no contiene siRecepDE_v150.xsd. Reinstale las dependencias con requirements.txt; no se habilita Producción.']
         errores=[]
-        for schema_dir in dirs:
-            schema_path=os.path.join(schema_dir,'DE_v150.xsd')
+        for schema_path in candidatos:
             try:
                 schema_doc=etree.parse(schema_path)
                 schema=etree.XMLSchema(schema_doc)
-                # DE_v150.xsd declara el elemento DE, no el contenedor de recepción rDE.
-                # El rDE es el sobre firmado exigido por siRecepDE; para validar la
-                # estructura fiscal contra DE_v150 se valida su hijo DE.
-                de_doc=doc.find('{%s}DE'%ns_sifen)
-                if de_doc is None:
-                    return False,['El rDE no contiene el elemento DE requerido.']
-                schema.assertValid(de_doc)
+                schema.assertValid(doc)
                 return True,[]
             except etree.DocumentInvalid as e:
-                # Si el esquema correcto compiló, devolver SUS errores reales y no probar
-                # DE_v150.xsd como raíz alternativa.
                 return False,[str(x) for x in e.error_log]
             except (etree.XMLSchemaParseError, etree.XMLSyntaxError, OSError) as e:
                 errores.append(os.path.basename(schema_path)+': '+str(e))
-        return False, errores or ['No fue posible compilar DE_v150.xsd con sus imports/includes.']
+        return False, errores or ['No fue posible compilar siRecepDE_v150.xsd con sus imports/includes.']
     except Exception as e:
         return False,['Validación XSD V150 no disponible: '+str(e)]
 
