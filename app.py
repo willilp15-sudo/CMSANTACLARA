@@ -283,8 +283,8 @@ def tipos_cambio():
 def terceros():
  c=db()
  if request.method=='POST':
-  vals=(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
-  c.execute('''insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',vals);c.commit();return redirect('/terceros')
+  vals=(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),request.form.get('sifen_barrio_codigo'),request.form.get('sifen_barrio_desc'))
+  c.execute('''insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc,sifen_barrio_codigo,sifen_barrio_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',vals);c.commit();return redirect('/terceros')
  rows=c.execute('select * from terceros order by nombre').fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('thirdparties.html',rows=rows,mons=mons)
 def init_v1357_codigo_barras():
  c=db()
@@ -2178,11 +2178,25 @@ def backup_sqlite_5min():
 def iniciar_backup_automatico():
  t=threading.Thread(target=backup_sqlite_5min,name='backup-santa-clara',daemon=True);t.start()
 
+def init_v13992_internacion_geografia():
+ c=db()
+ try:
+  c.execute("CREATE TABLE IF NOT EXISTS internacion_traslados(id INTEGER PRIMARY KEY,admision_id INTEGER NOT NULL,cama_origen_id INTEGER,cama_destino_id INTEGER NOT NULL,fecha TEXT NOT NULL,usuario TEXT,motivo TEXT)")
+  c.execute("CREATE TABLE IF NOT EXISTS geo_ubicaciones(id INTEGER PRIMARY KEY,departamento_codigo TEXT NOT NULL,departamento TEXT NOT NULL,distrito_codigo TEXT,distrito TEXT,ciudad_codigo TEXT,ciudad TEXT,barrio_codigo TEXT,barrio TEXT,activo INTEGER DEFAULT 1,actualizado_en TEXT,UNIQUE(departamento_codigo,distrito_codigo,ciudad_codigo,barrio_codigo))")
+  tcols={r['name'] for r in c.execute('pragma table_info(terceros)').fetchall()}
+  for col,typ in [('sifen_barrio_codigo','TEXT'),('sifen_barrio_desc','TEXT')]:
+   if col not in tcols:c.execute('alter table terceros add column '+col+' '+typ)
+  dup=c.execute("select cama_id,count(*) n from admisiones where estado='ABIERTA' and cama_id is not null group by cama_id having count(*)>1 limit 1").fetchone()
+  if not dup:c.execute("create unique index if not exists ux_admision_cama_abierta on admisiones(cama_id) where estado='ABIERTA' and cama_id is not null")
+  c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.92-internacion-geografia',?)",(now(),));c.commit()
+ finally:c.close()
+
 # IMPORTANTE: liberar backups antiguos ANTES de cualquier copia o migración.
 limpiar_backups_emergencia()
 preparar_actualizacion_segura()
 init()
 init_v13991_maestros_sifen()
+init_v13992_internacion_geografia()
 
 def sincronizar_clientes_pacientes(c):
  # En Santa Clara, CLIENTE y PACIENTE representan a la misma persona.
@@ -3865,6 +3879,13 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     _sifen_xml_text(ge,'cCiuEmi',ciu_cod,NS);_sifen_xml_text(ge,'dDesCiuEmi',ciu_desc,NS);_sifen_xml_text(ge,'dTelEmi',tel,NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
     gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
     nat=str(d['sifen_naturaleza'] or '1') if 'sifen_naturaleza' in d.keys() else '1';tiop=str(d['sifen_tipo_operacion'] or '1') if 'sifen_tipo_operacion' in d.keys() else '1';pais=str(d['sifen_pais'] or 'PRY') if 'sifen_pais' in d.keys() else 'PRY';paisd=str(d['sifen_pais_desc'] or 'Paraguay') if 'sifen_pais_desc' in d.keys() else 'Paraguay'
+    # V13.9.93: prevención del rechazo SIFEN 1300 (naturaleza/tipo de operación).
+    if nat=='1' and tiop not in ('1','3'):
+        raise ValueError('SIFEN 1300 preventivo: receptor Contribuyente incompatible con tipo de operación '+tiop+'. Revise el maestro del cliente (normalmente B2B).')
+    if nat=='2' and pais=='PRY' and tiop not in ('2','3'):
+        raise ValueError('SIFEN 1300 preventivo: receptor No contribuyente paraguayo incompatible con tipo de operación '+tiop+'. Corresponde B2C, salvo caso B2G válido.')
+    if nat=='2' and pais!='PRY' and tiop!='4':
+        raise ValueError('SIFEN 1300 preventivo: receptor del exterior debe configurarse como operación B2F.')
     _sifen_xml_text(gr,'iNatRec',nat,NS);_sifen_xml_text(gr,'iTiOpe',tiop,NS);_sifen_xml_text(gr,'cPaisRec',pais,NS);_sifen_xml_text(gr,'dDesPaisRe',paisd,NS)
     if nat=='1':
         _sifen_xml_text(gr,'iTiContRec',str(d['sifen_tipo_contribuyente'] or '2') if 'sifen_tipo_contribuyente' in d.keys() else '2',NS)
@@ -3980,14 +4001,20 @@ def _sifen_validar_xsd_v150(xml_bytes):
         archivos += [os.path.join(schema_dir,n) for n in os.listdir(schema_dir) if n.endswith('.xsd') and os.path.join(schema_dir,n) not in archivos]
         if not archivos:return False,['No se encontraron los XSD V150 instalados con el motor SIFEN.']
         doc=etree.fromstring(raw);ult=[]
-        for sp in archivos:
-            try:
-                schema=etree.XMLSchema(etree.parse(sp));schema.assertValid(doc);return True,[]
-            except etree.DocumentInvalid as e:
-                ult=[str(x) for x in e.error_log]
-            except Exception:
-                continue
-        return False,ult or ['El XML no pudo validarse contra los XSD V150 instalados.']
+        root_name=etree.QName(doc).localname
+        # V13.9.93: DE_v150.xsd es el esquema del Documento Electrónico; rDE es su raíz.
+        # No validar rDE contra esquemas SOAP/recepción.
+        if root_name!='rDE': return False,[f'Raíz XML inesperada: {root_name}. Para DE V150 se requiere rDE.']
+        de_schema=os.path.join(schema_dir,'DE_v150.xsd'); candidatos=[]
+        if os.path.exists(de_schema):
+            try:candidatos.append((de_schema,etree.parse(de_schema)))
+            except Exception as e:ult=[f'DE_v150.xsd: {e}']
+        if not candidatos:return False,['No se encontró DE_v150.xsd en el motor SIFEN instalado.']
+        for sp,xt in candidatos:
+            try:etree.XMLSchema(xt).assertValid(doc);return True,[]
+            except etree.DocumentInvalid as e:ult=[str(x) for x in e.error_log]
+            except Exception as e:ult=[f'{os.path.basename(sp)}: {e}']
+        return False,ult or ['El XML rDE no pasó DE_v150.xsd.']
     except Exception as e:
         return False,['Validación XSD V150 no disponible: '+str(e)]
 
@@ -4044,16 +4071,26 @@ def _sifen_enviar_sync(xml_firmado,cfg,timeout=35):
     return r.status_code,r.content,url
 
 def _sifen_parse_respuesta(xml_bytes):
+    """Interpreta respuestas SOAP SIFEN sync y consulta de lote sin depender del prefijo XML."""
     from lxml import etree
-    out={'estado':'SIN_RESPUESTA','codigo':'','mensaje':'','protocolo':'','cdc':''}
+    out={'estado':'SIN_RESPUESTA','codigo':'','mensaje':'','protocolo':'','cdc':'','lote':'','fecha_proceso':'','codigo_lote':'','mensaje_lote':'','resultados':[]}
     try:
         root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else str(xml_bytes).encode(),etree.XMLParser(resolve_entities=False,no_network=True))
-        def first(local):
-            x=root.xpath('//*[local-name()=$n]',n=local)
+        def first(local,ctx=None):
+            base=ctx if ctx is not None else root;x=base.xpath('.//*[local-name()=$n]',n=local)
             return (x[0].text or '').strip() if x else ''
-        out['estado']=first('dEstRes') or first('dEstRes') or 'RESPUESTA_RECIBIDA'
-        out['codigo']=first('dCodRes'); out['mensaje']=first('dMsgRes'); out['protocolo']=first('dProtAut'); out['cdc']=first('dId')
-    except Exception as e: out['estado']='ERROR_XML';out['mensaje']=str(e)
+        out['fecha_proceso']=first('dFecProc');out['codigo_lote']=first('dCodResLot');out['mensaje_lote']=first('dMsgResLot')
+        import re
+        m=re.search(r'\{(\d+)\}',out['mensaje_lote'] or '')
+        if m:out['lote']=m.group(1)
+        bloques=root.xpath('//*[local-name()="gResProcLote"]')
+        if bloques:
+            for b in bloques:out['resultados'].append({'cdc':first('id',b),'estado':first('dEstRes',b),'codigo':first('dCodRes',b),'mensaje':first('dMsgRes',b)})
+            r=out['resultados'][0];out['cdc']=r['cdc'];out['estado']=r['estado'] or 'RESPUESTA_RECIBIDA';out['codigo']=r['codigo'];out['mensaje']=r['mensaje']
+        else:
+            out['estado']=first('dEstRes') or 'RESPUESTA_RECIBIDA';out['codigo']=first('dCodRes');out['mensaje']=first('dMsgRes');out['protocolo']=first('dProtAut');out['cdc']=first('dId') or first('id')
+        if not out['mensaje'] and out['mensaje_lote']:out['mensaje']=out['mensaje_lote']
+    except Exception as e:out['estado']='ERROR_XML';out['mensaje']=str(e)
     return out
 
 def _sifen_motor_autotest(cfg):
@@ -5032,14 +5069,14 @@ def sifen_monitor():
     if fecha: wr.append("substr(coalesce(v.fecha,''),1,10)=?");args.append(fecha)
     if q: wr.append("(v.numero like ? or coalesce(v.cdc,'') like ? or coalesce(t.nombre,'') like ? or coalesce(v.sifen_mensaje_error,'') like ?)");args += ['%'+q+'%']*4
     if tipo in ('','FE'):
-        sql="select v.id,v.numero,v.fecha,v.cdc,v.estado_sifen,v.sifen_intentos,v.sifen_ultimo_intento,v.sifen_codigo_error,v.sifen_mensaje_error,t.nombre cliente,'' lote from ventas v left join terceros t on t.id=v.cliente_id"
+        sql="select v.id,v.numero,v.fecha,v.cdc,v.estado_sifen,v.sifen_intentos,v.sifen_ultimo_intento,v.sifen_codigo_error,v.sifen_mensaje_error,t.nombre cliente,coalesce(v.sifen_lote,'') lote from ventas v left join terceros t on t.id=v.cliente_id"
         if wr: sql+=' where '+' and '.join(wr)
         for r in c.execute(sql+' order by v.id desc limit 500',args).fetchall(): add_doc(r,'Factura electrónica','01',f'/sifen/monitor/FE/{r["id"]}/corregir',f'/ventas/{r["id"]}/factura',f'/sifen/monitor/venta/{r["id"]}/reintentar')
     for tab,label,code,key,pdf,retry in [('notas_credito_ventas','Nota de Crédito','05','NCE','/notas-credito/ventas/{}/pdf','/sifen/monitor/nc/{}/reintentar'),('notas_debito_ventas','Nota de Débito','06','NDE','/notas-debito/ventas/{}/pdf','/sifen/monitor/nd/{}/reintentar')]:
         if tipo not in ('',key): continue
         cols={x['name'] for x in c.execute('pragma table_info('+tab+')').fetchall()}
         ec="coalesce(n.sifen_codigo_error,'')" if 'sifen_codigo_error' in cols else "''"; em="coalesce(n.sifen_mensaje_error,'')" if 'sifen_mensaje_error' in cols else "''"; si="coalesce(n.sifen_intentos,0)" if 'sifen_intentos' in cols else '0'; ul="coalesce(n.sifen_ultimo_intento,'')" if 'sifen_ultimo_intento' in cols else "''"
-        sql=f"select n.id,n.numero,n.fecha,n.cdc,n.estado_sifen,{si} sifen_intentos,{ul} sifen_ultimo_intento,{ec} sifen_codigo_error,{em} sifen_mensaje_error,t.nombre cliente,'' lote from {tab} n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where 1=1"; a=[]
+        sql=f"select n.id,n.numero,n.fecha,n.cdc,n.estado_sifen,{si} sifen_intentos,{ul} sifen_ultimo_intento,{ec} sifen_codigo_error,{em} sifen_mensaje_error,t.nombre cliente,coalesce(n.sifen_lote,'') lote from {tab} n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where 1=1"; a=[]
         if estado: sql+=" and upper(coalesce(n.estado_sifen,'NO_ENVIADO'))=?";a.append(estado)
         if fecha: sql+=" and substr(coalesce(n.fecha,''),1,10)=?";a.append(fecha)
         if q: sql+=f" and (n.numero like ? or coalesce(n.cdc,'') like ? or coalesce(t.nombre,'') like ? or {em} like ?)";a += ['%'+q+'%']*4
@@ -5282,6 +5319,61 @@ def llamador_historico():
 
 ROUTE_MODULE.update({'llamador_historico':'CONSULTORIO'})
 
+
+
+# ===== V13.9.92: Panel de Internación + Catálogo Geográfico =====
+@app.get('/internacion/panel')
+def internacion_panel():
+ c=db();camas=c.execute("""select ca.*,h.nombre habitacion,a.id admision_id,a.fecha fecha_ingreso,p.nombre paciente,coalesce(sg.nombre,'PARTICULAR') cobertura,case when a.id is not null then 'OCUPADA' when coalesce(ca.activo,1)=0 then 'BLOQUEADA' else 'DISPONIBLE' end estado_real from camas ca join habitaciones h on h.id=ca.habitacion_id left join admisiones a on a.cama_id=ca.id and a.estado='ABIERTA' left join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id order by h.nombre,ca.codigo""").fetchall();disponibles=c.execute("select ca.id,ca.codigo,h.nombre habitacion from camas ca join habitaciones h on h.id=ca.habitacion_id where coalesce(ca.activo,1)=1 and not exists(select 1 from admisiones a where a.cama_id=ca.id and a.estado='ABIERTA') order by h.nombre,ca.codigo").fetchall();historial=c.execute("""select t.*,p.nombre paciente,coalesce(co.codigo,'-') cama_origen,cd.codigo cama_destino from internacion_traslados t join admisiones a on a.id=t.admision_id join pacientes p on p.id=a.paciente_id left join camas co on co.id=t.cama_origen_id join camas cd on cd.id=t.cama_destino_id order by t.id desc limit 100""").fetchall();c.close();return render_template('internacion_panel.html',camas=camas,disponibles=disponibles,historial=historial)
+
+@app.post('/internacion/trasladar/<int:aid>')
+def internacion_trasladar(aid):
+ if not (user_has('ADMISION','TRASLADAR') or user_has('USUARIOS','ADMINISTRAR')):flash('No tiene permiso para trasladar pacientes.');return redirect('/internacion/panel')
+ c=db()
+ try:
+  a=c.execute("select * from admisiones where id=? and estado='ABIERTA'",(aid,)).fetchone();destino=int(request.form.get('cama_destino_id') or 0)
+  if not a:raise ValueError('La internación ya no está abierta.')
+  if not destino or destino==a['cama_id']:raise ValueError('Seleccione una cama de destino diferente.')
+  if not c.execute('select 1 from camas where id=? and coalesce(activo,1)=1',(destino,)).fetchone():raise ValueError('La cama de destino no está disponible.')
+  if c.execute("select 1 from admisiones where cama_id=? and estado='ABIERTA' and id<>?",(destino,aid)).fetchone():raise ValueError('La cama de destino está ocupada.')
+  origen=a['cama_id'];c.execute('update admisiones set cama_id=? where id=?',(destino,aid))
+  if origen:c.execute("update camas set estado='LIBRE' where id=?",(origen,))
+  c.execute("update camas set estado='OCUPADA' where id=?",(destino,));c.execute('insert into internacion_traslados(admision_id,cama_origen_id,cama_destino_id,fecha,usuario,motivo) values(?,?,?,?,?,?)',(aid,origen,destino,now(),session.get('user'),request.form.get('motivo')));c.commit();flash('Paciente trasladado. Toda su cuenta permanece en la misma admisión.')
+ except Exception as e:c.rollback();flash('No se pudo trasladar: '+str(e))
+ finally:c.close()
+ return redirect('/internacion/panel')
+
+@app.route('/administracion/geografia',methods=['GET','POST'])
+def administracion_geografia():
+ if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):flash('No tiene permiso para administrar códigos geográficos.');return redirect('/')
+ c=db()
+ if request.method=='POST':
+  f=request.files.get('archivo')
+  if not f or not f.filename:c.close();flash('Seleccione un XLSX o CSV.');return redirect(request.path)
+  try:
+   import io,csv
+   data=f.read();name=f.filename.lower()
+   if name.endswith('.xlsx'):
+    from openpyxl import load_workbook
+    vals=list(load_workbook(io.BytesIO(data),read_only=True,data_only=True).active.iter_rows(values_only=True));headers=[str(x or '').strip().lower() for x in vals[0]];rows=[dict(zip(headers,r)) for r in vals[1:]]
+   elif name.endswith('.csv'):
+    txt=data.decode('utf-8-sig');dialect=csv.Sniffer().sniff(txt[:4096],delimiters=',;\t');rows=[{str(k).strip().lower():v for k,v in r.items()} for r in csv.DictReader(io.StringIO(txt),dialect=dialect)]
+   else:raise ValueError('Use XLSX o CSV.')
+   def pick(r,*names):
+    for k,v in r.items():
+     kk=''.join(ch for ch in str(k).lower() if ch.isalnum())
+     if kk in names and v is not None and str(v).strip():return str(v).strip()
+    return ''
+   n=0
+   for r in rows:
+    dc=pick(r,'codigodepartamento','coddepartamento','cdep','departamentocodigo');dn=pick(r,'departamento','desdepartamento','ddesdep')
+    if not dc or not dn:continue
+    vals=(dc,dn,pick(r,'codigodistrito','coddistrito','cdis','distritocodigo'),pick(r,'distrito','desdistrito','ddesdis'),pick(r,'codigociudad','codciudad','cciu','ciudadcodigo'),pick(r,'ciudad','desciudad','ddesciu'),pick(r,'codigobarrio','codbarrio','barriocodigo'),pick(r,'barrio','desbarrio'),now())
+    c.execute("insert into geo_ubicaciones(departamento_codigo,departamento,distrito_codigo,distrito,ciudad_codigo,ciudad,barrio_codigo,barrio,activo,actualizado_en) values(?,?,?,?,?,?,?,?,1,?) on conflict(departamento_codigo,distrito_codigo,ciudad_codigo,barrio_codigo) do update set departamento=excluded.departamento,distrito=excluded.distrito,ciudad=excluded.ciudad,barrio=excluded.barrio,activo=1,actualizado_en=excluded.actualizado_en",vals);n+=1
+   c.commit();flash(f'Importación completada: {n} registros.')
+  except Exception as e:c.rollback();flash('No se pudo importar: '+str(e))
+  c.close();return redirect(request.path)
+ rows=c.execute('select * from geo_ubicaciones order by departamento,distrito,ciudad,barrio limit 1000').fetchall();c.close();return render_template('geografia.html',rows=rows)
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
@@ -5941,3 +6033,60 @@ def libro_bancos():
     c.close();return render_template('bank_book.html',rows=rows,cuentas=cuentas,cuenta_sel=cuenta,banco=b,desde=desde,hasta=hasta,saldo_anterior=saldo_anterior,saldo_final=saldo)
 
 ROUTE_MODULE.update({'transferencias_bancarias':'FINANZAS','transferencia_bancaria_anular':'FINANZAS','libro_bancos':'FINANZAS'})
+
+
+# ===== V13.9.93: respuestas SOAP SIFEN + prevención rechazo 1300 =====
+def init_v13993_respuestas_sifen():
+    c=db()
+    for tab in ('ventas','notas_credito_ventas','notas_debito_ventas'):
+        try:
+            cols={r['name'] for r in c.execute('pragma table_info('+tab+')').fetchall()}
+            for col,ddl in [('sifen_lote','TEXT'),('sifen_fecha_proceso','TEXT'),('sifen_respuesta_xml','TEXT')]:
+                if col not in cols:c.execute(f'alter table {tab} add column {col} {ddl}')
+        except Exception:pass
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.93-respuestas-sifen-1300',?)",(now(),));c.commit();c.close()
+init_v13993_respuestas_sifen()
+
+def _sifen_aplicar_respuesta(c,tipo,doc_id,xml_respuesta):
+    # Guarda únicamente una respuesta real recibida; no inventa aprobaciones.
+    tipo=str(tipo).upper();tabs={'FE':'ventas','NCE':'notas_credito_ventas','NDE':'notas_debito_ventas'}
+    if tipo not in tabs:raise ValueError('Tipo SIFEN no soportado.')
+    r=_sifen_parse_respuesta(xml_respuesta);estado=str(r.get('estado') or 'RESPUESTA_RECIBIDA').upper();tab=tabs[tipo]
+    raw=xml_respuesta.decode('utf-8','replace') if isinstance(xml_respuesta,(bytes,bytearray)) else str(xml_respuesta)
+    c.execute(f'update {tab} set estado_sifen=?,sifen_codigo_error=?,sifen_mensaje_error=?,sifen_lote=?,sifen_fecha_proceso=?,sifen_respuesta_xml=? where id=?',(estado,r.get('codigo',''),r.get('mensaje',''),r.get('lote',''),r.get('fecha_proceso',''),raw,doc_id))
+    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),tipo+'_RESPUESTA',estado,f'{tipo} {doc_id}: {r.get("codigo","")} · {r.get("mensaje","")}'))
+    return r
+
+
+@app.post('/sifen/respuesta/importar')
+def sifen_importar_respuesta():
+    if not (user_has('USUARIOS','ADMINISTRAR') or user_has('FACTURACION','EDITAR')):
+        flash('No tiene permiso para importar respuestas SIFEN.');return redirect('/sifen/monitor')
+    archivo=request.files.get('respuesta');texto=(request.form.get('xml_respuesta') or '').strip()
+    raw=archivo.read() if archivo and archivo.filename else texto.encode('utf-8')
+    if not raw:flash('Seleccione un XML SOAP o pegue la respuesta SIFEN.');return redirect('/sifen/monitor')
+    c=db()
+    try:
+        r=_sifen_parse_respuesta(raw);resultados=r.get('resultados') or [r];aplicados=0
+        for rr in resultados:
+            cdc=(rr.get('cdc') or '').strip()
+            if not cdc:continue
+            encontrado=None
+            for tipo,tab in [('FE','ventas'),('NCE','notas_credito_ventas'),('NDE','notas_debito_ventas')]:
+                row=c.execute(f'select id from {tab} where cdc=?',(cdc,)).fetchone()
+                if row:encontrado=(tipo,row['id']);break
+            if encontrado:
+                # Para respuestas de lote con múltiples DE se construye una vista lógica del resultado
+                # y se conservan además fecha/lote de la respuesta contenedora.
+                tipo,did=encontrado;tab={'FE':'ventas','NCE':'notas_credito_ventas','NDE':'notas_debito_ventas'}[tipo]
+                estado=str(rr.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+                c.execute(f'update {tab} set estado_sifen=?,sifen_codigo_error=?,sifen_mensaje_error=?,sifen_lote=?,sifen_fecha_proceso=?,sifen_respuesta_xml=? where id=?',(estado,rr.get('codigo',''),rr.get('mensaje',''),r.get('lote',''),r.get('fecha_proceso',''),raw.decode('utf-8','replace'),did))
+                c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),tipo+'_RESPUESTA',estado,f'{tipo} {did}: {rr.get("codigo","")} · {rr.get("mensaje","")}'))
+                aplicados+=1
+        c.commit()
+        if aplicados:flash(f'Respuesta SIFEN procesada: {aplicados} documento(s) actualizado(s) con la respuesta real.')
+        else:flash('La respuesta SOAP es legible, pero ningún CDC de la respuesta coincide con documentos del ERP.')
+    except Exception as e:c.rollback();flash('No se pudo procesar la respuesta SIFEN: '+str(e))
+    finally:c.close()
+    return redirect('/sifen/monitor')
+ROUTE_MODULE.update({'sifen_importar_respuesta':'FACTURACION'})
