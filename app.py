@@ -4266,10 +4266,23 @@ def _sifen_enviar_sync(xml_firmado,cfg,timeout=35):
     parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
     rde=etree.fromstring(xml_firmado if isinstance(xml_firmado,(bytes,bytearray)) else xml_firmado.encode(),parser)
     NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
-    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'env':SOAP}); etree.SubElement(env,'{%s}Header'%SOAP); body=etree.SubElement(env,'{%s}Body'%SOAP)
-    envio=etree.SubElement(body,'{%s}rEnviDe'%NS); etree.SubElement(envio,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
-    xde=etree.SubElement(envio,'{%s}xDE'%NS); xde.append(rde)
+    # V13.9.103: SIFEN V150 prohíbe prefijos de namespace en las etiquetas del
+    # request. El prefijo soap: se conserva únicamente para el sobre SOAP; el
+    # documento SIFEN usa su namespace como namespace por defecto.
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP})
+    etree.SubElement(env,'{%s}Header'%SOAP)
+    body=etree.SubElement(env,'{%s}Body'%SOAP)
+    envio=etree.SubElement(body,'{%s}rEnviDe'%NS,nsmap={None:NS})
+    etree.SubElement(envio,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
+    xde=etree.SubElement(envio,'{%s}xDE'%NS)
+    xde.append(rde)
     payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    # No transmitir un request si lxml introdujo un prefijo automático (ns0,
+    # ns1, etc.). Es preferible bloquear localmente que consumir un número con
+    # un request que SIFEN rechazará por formato.
+    import re
+    if re.search(br'<\/?ns\d+:',payload) or re.search(br'xmlns:ns\d+=',payload):
+        raise ValueError('SOAP SIFEN inválido: se detectó un prefijo namespace automático (ns0/ns1). El envío fue bloqueado localmente.')
     url=_sifen_endpoint(cfg,'sync')
     r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
     return r.status_code,r.content,url
