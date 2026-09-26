@@ -4111,7 +4111,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if tipo=='FE':
         d=c.execute("select v.*,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Factura no encontrada.')
-        items=c.execute("select vi.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(p.nombre),''),nullif(trim(vi.descripcion),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(doc_id,)).fetchall()
+        items=c.execute("select vi.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(p.nombre),''),nullif(trim(vi.descripcion),''),'Servicio medico') sifen_desc_item,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc,p.tipo_producto sifen_tipo_producto,p.clasif_general sifen_clasif_general,p.categoria sifen_categoria from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(doc_id,)).fetchall()
         ide=1;des='Factura electrónica';fecha=d['fecha'];numero=d['numero'];asoc=None
     elif tipo=='NCE':
         d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
@@ -4170,10 +4170,12 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # lo que provocaba el rechazo SIFEN 1203.
     tiene_servicio=False; tiene_mercaderia=False
     for _it in items:
-        _pid=_it['producto_id'] if 'producto_id' in _it.keys() else None
-        _pr=c.execute("select tipo_producto,clasif_general,categoria from productos where id=?",(_pid,)).fetchone() if _pid else None
-        _desc_clas=str((_it['descripcion'] if 'descripcion' in _it.keys() else '') or '').upper()
-        if (_pr is not None and _producto_es_servicio(_pr)) or any(k in _desc_clas for k in ('SERVICIO','CONSULTA','PROCEDIMIENTO','HONORARIO','ESTUDIO','ANALISIS','ANÁLISIS')):
+        # V13.9.131: aliases únicos evitan que vi.* oculte la descripción/clasificación del maestro.
+        _vals=[]
+        for _k in ('sifen_tipo_producto','sifen_clasif_general','sifen_categoria','sifen_desc_item','descripcion'):
+            if _k in _it.keys(): _vals.append(str(_it[_k] or '').strip().upper())
+        _texto=' '.join(_vals)
+        if any(k in _texto for k in ('SERVICIO','CONSULTA','PROCEDIMIENTO','HONORARIO','ESTUDIO','ANALISIS','ANÁLISIS','MEDICO','MÉDICO')):
             tiene_servicio=True
         else:
             tiene_mercaderia=True
@@ -4285,7 +4287,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     for ix,it in enumerate(items,1):
         gi=etree.SubElement(gd,'{%s}gCamItem'%NS)
         _sifen_xml_text(gi,'dCodInt',it['codigo'] if 'codigo' in it.keys() and it['codigo'] else str(ix),NS)
-        desc_item=(str(it['descripcion'] or '').strip() if 'descripcion' in it.keys() else '') or 'Servicio medico'
+        desc_item=(str(it['sifen_desc_item'] or '').strip() if 'sifen_desc_item' in it.keys() else (str(it['descripcion'] or '').strip() if 'descripcion' in it.keys() else '')) or 'Servicio medico'
         _sifen_xml_text(gi,'dDesProSer',desc_item[:120],NS)
         _sifen_xml_text(gi,'cUniMed',(it['sifen_unidad_codigo'] if 'sifen_unidad_codigo' in it.keys() else None) or '77',NS);_sifen_xml_text(gi,'dDesUniMed',(it['sifen_unidad_desc'] if 'sifen_unidad_desc' in it.keys() else None) or 'UNI',NS)
         q=D(it['cantidad'], '1'); precio=D(it['precio']); pct=D(it['iva_pct'])

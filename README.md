@@ -16,3 +16,6 @@ V13.9.110: cajas autorizadas por usuario y control total ADMIN.
 
 
 V13.9.124: dFecFirma corregida para America/Asuncion en Render; margen técnico de 5 segundos antes de transmisión para evitar SIFEN 1004.
+
+
+V13.9.131: corrige clasificación iTipTra usando aliases únicos del maestro y la descripción SIFEN final; evita colisión de columna descripcion proveniente de vi.*.
