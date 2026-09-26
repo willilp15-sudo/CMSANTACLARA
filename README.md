@@ -26,3 +26,10 @@ V13.9.135 SIFEN PYG SCALE 0
 - Base IVA e IVA por item se redondean HALF_UP a guaranies enteros; IVA se deriva como total gravado - base para conservar identidad.
 - Otras monedas mantienen 4 decimales.
 - Pago contado usa la misma escala monetaria que el DE.
+
+V13.9.138 - Motor SIFEN alineado con MT150/NT13 y Guía DNIT:
+- PYG ya no se trunca a escala 0 antes de las fórmulas: hasta 8 decimales.
+- dBasGravIVA usa fórmula NT13 y dLiqIVAItem = dBasGravIVA * tasa/100.
+- Se omiten campos opcionales de descuento/anticipo cuando valen cero.
+- XMLDSig se genera con namespace por defecto, sin prefijo ds:.
+- Prevalidación local bloquea prefijo en Signature y opcionales cero antes del envío.

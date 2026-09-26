@@ -4281,7 +4281,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # los valores escritos en XML; por ello precio*cantidad, dTotOpeItem, base e IVA
     # se derivan de una única fuente y con redondeo HALF_UP uniforme.
     from decimal import Decimal, ROUND_HALF_UP
-    QM=Decimal('1') if mon_ope=='PYG' else Decimal('0.0001')
+    QM=Decimal('0.00000001')  # MT150/NT13: montos admiten hasta 8 decimales; no truncar PYG antes de validar fórmulas
     def D(v, default='0'):
         try: return Decimal(str(v if v not in (None,'') else default))
         except Exception: return Decimal(default)
@@ -4304,9 +4304,9 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         gv=etree.SubElement(gi,'{%s}gValorItem'%NS)
         _sifen_xml_text(gv,'dPUniProSer',X(precio),NS);_sifen_xml_text(gv,'dTotBruOpeItem',X(bruto),NS)
         gvr=etree.SubElement(gv,'{%s}gValorRestaItem'%NS)
-        _sifen_xml_text(gvr,'dDescItem','0',NS);_sifen_xml_text(gvr,'dPorcDesIt','0',NS)
-        _sifen_xml_text(gvr,'dDescGloItem','0',NS);_sifen_xml_text(gvr,'dAntPreUniIt','0',NS)
-        _sifen_xml_text(gvr,'dAntGloPreUniIt','0',NS);_sifen_xml_text(gvr,'dTotOpeItem',X(ope),NS)
+        # Guía DNIT de mejores prácticas: no emitir etiquetas opcionales con valor cero.
+        # Sin descuentos/anticipos, EA002/EA003/EA004/EA006/EA007 se omiten; EA008 es obligatorio.
+        _sifen_xml_text(gvr,'dTotOpeItem',X(ope),NS)
         giv=etree.SubElement(gi,'{%s}gCamIVA'%NS)
         af='3' if pct<=0 else '1'
         _sifen_xml_text(giv,'iAfecIVA',af,NS);_sifen_xml_text(giv,'dDesAfecIVA','Exento' if pct<=0 else 'Gravado IVA',NS)
@@ -4314,10 +4314,8 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         if pct>0:
             divisor=Decimal('1')+(pct/Decimal('100'))
             base=(ope/divisor).quantize(QM, rounding=ROUND_HALF_UP)
-            # E736: en PYG el motor usa escala 0; derivamos el impuesto como diferencia
-            # entre la porción gravada y la base ya redondeada para conservar identidad monetaria.
-            gravada=(ope*(Decimal('100')/Decimal('100'))).quantize(QM, rounding=ROUND_HALF_UP)
-            iva=(gravada-base).quantize(QM, rounding=ROUND_HALF_UP)
+            # E736 MT150: dLiqIVAItem = E735 * (E734/100). No derivar por diferencia.
+            iva=(base*(pct/Decimal('100'))).quantize(QM, rounding=ROUND_HALF_UP)
         else:
             base=Decimal('0'); iva=Decimal('0')
         _sifen_xml_text(giv,'dBasGravIVA',X(base),NS);_sifen_xml_text(giv,'dLiqIVAItem',X(iva),NS)
@@ -4431,6 +4429,17 @@ def _sifen_validar_xsd_v150(xml_bytes):
             if not doc.xpath(xp,namespaces=ns): falt.append(nombre)
         if falt:
             return False,['Prevalidación V150: faltan grupos/campos: '+', '.join(falt)]
+        # DNIT mejores prácticas: no prefijos en las etiquetas de XMLDSig.
+        sig=next((x for x in doc if etree.QName(x).localname=='Signature'),None)
+        if sig is not None and sig.prefix:
+            return False,['Prevalidación DNIT: Signature usa prefijo de namespace (%s). Debe usar XMLDSig como namespace por defecto.'%sig.prefix]
+        # No permitir etiquetas opcionales de descuentos/anticipos en cero.
+        opc_zero=('dPorcDesIt','dDescGloItem','dAntPreUniIt','dAntGloPreUniIt')
+        for tag in opc_zero:
+            for e in doc.xpath('.//s:'+tag,namespaces=ns):
+                try: z=Decimal((e.text or '0').strip())==0
+                except Exception: z=False
+                if z: return False,['Prevalidación DNIT: campo opcional %s informado en cero; debe omitirse.'%tag]
         for i,item in enumerate(doc.xpath('.//s:gCamItem',namespaces=ns),1):
             for tag in ('dCodInt','dDesProSer','cUniMed','dDesUniMed','dCantProSer'):
                 e=item.find('{%s}%s'%(ns_sifen,tag))
@@ -4534,6 +4543,8 @@ def _sifen_firmar_rde(xml_bytes,cfg):
     if not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital no instalado.')
     cert=Path(cfg['cert_path']).read_bytes();key=Path(cfg['key_path']).read_bytes()
     signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
+    # DNIT: la firma debe declarar XMLDSig como namespace por defecto, sin prefijo ds:.
+    signer.namespaces = {None: 'http://www.w3.org/2000/09/xmldsig#'}
     firmado=signer.sign(root,key=key,cert=cert,reference_uri='#'+de.get('Id'),id_attribute='Id')
     # El grupo J va después de Signature y no forma parte de la firma digital.
     for viejo in firmado.findall('{%s}gCamFuFD'%ns): firmado.remove(viejo)
