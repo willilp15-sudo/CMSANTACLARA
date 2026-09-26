@@ -11,3 +11,5 @@ La base SQLite persistente no se incluye en este paquete y las migraciones son a
 - El SAVEPOINT se revierte siempre: no deja datos TEST ni consume correlativos.
 - La prueba genera gCamItem, dCodInt, dDesProSer, unidad, cantidad, gValorItem, gValorRestaItem y gCamIVA antes de firmar/validar.
 - La factura TEST se firma con el certificado instalado y luego se valida contra XSD V150.
+
+V13.9.110: cajas autorizadas por usuario y control total ADMIN.
