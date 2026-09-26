@@ -4244,10 +4244,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
             codp,desp=mapa.get(forma.upper(),('1','Efectivo'))
             gp=etree.SubElement(gcond,'{%s}gPaConEIni'%NS)
             _sifen_xml_text(gp,'iTiPago',codp,NS);_sifen_xml_text(gp,'dDesTiPag',desp,NS)
-            # V13.9.128: el monto de pago debe coincidir con el total matemático de los ítems, no con un total histórico potencialmente desfasado.
-            from decimal import Decimal, ROUND_HALF_UP
-            _pay_total=sum((Decimal(str(x['cantidad'] or 1))*Decimal(str(x['precio'] or 0)) for x in items), Decimal('0'))
-            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP),'f'),NS)
+            _sifen_xml_text(gp,'dMonTiPag',str(round(float(d['total'] or 0),4)),NS)
             mon=str(d['moneda'] or 'PYG') if 'moneda' in d.keys() else 'PYG'
             _sifen_xml_text(gp,'cMoneTiPag',mon,NS);_sifen_xml_text(gp,'dDMoneTiPag','Guarani' if mon=='PYG' else mon,NS)
             if mon!='PYG' and 'tipo_cambio' in d.keys() and d['tipo_cambio']:
@@ -4257,64 +4254,58 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # V13.9.89: construcción integral de importes obligatorios V150.
     # TgValorItem exige un grupo gValorRestaItem real (no una etiqueta vacía) y
     # TgCamIVA exige dBasExe incluso cuando el ítem está gravado.
-    # V13.9.128: motor aritmético SIFEN con Decimal. La regla de SIFEN evalúa
-    # los valores escritos en XML; por ello precio*cantidad, dTotOpeItem, base e IVA
-    # se derivan de una única fuente y con redondeo HALF_UP uniforme.
-    from decimal import Decimal, ROUND_HALF_UP
-    Q4=Decimal('0.0001')
-    def D(v, default='0'):
-        try: return Decimal(str(v if v not in (None,'') else default))
-        except Exception: return Decimal(default)
-    def X(v):
-        v=D(v).quantize(Q4, rounding=ROUND_HALF_UP)
-        return format(v,'f')
-    total=Decimal('0'); sub_exe=Decimal('0'); sub5=Decimal('0'); sub10=Decimal('0')
-    iva5=Decimal('0'); iva10=Decimal('0'); base5=Decimal('0'); base10=Decimal('0')
+    total=0.0;iva_total=0.0;sub_exe=0.0;sub5=0.0;sub10=0.0;iva5=0.0;iva10=0.0;base5=0.0;base10=0.0
     for ix,it in enumerate(items,1):
         gi=etree.SubElement(gd,'{%s}gCamItem'%NS)
         _sifen_xml_text(gi,'dCodInt',it['codigo'] if 'codigo' in it.keys() and it['codigo'] else str(ix),NS)
         desc_item=(str(it['descripcion'] or '').strip() if 'descripcion' in it.keys() else '') or 'Servicio medico'
         _sifen_xml_text(gi,'dDesProSer',desc_item[:120],NS)
         _sifen_xml_text(gi,'cUniMed',(it['sifen_unidad_codigo'] if 'sifen_unidad_codigo' in it.keys() else None) or '77',NS);_sifen_xml_text(gi,'dDesUniMed',(it['sifen_unidad_desc'] if 'sifen_unidad_desc' in it.keys() else None) or 'UNI',NS)
-        q=D(it['cantidad'], '1'); precio=D(it['precio']); pct=D(it['iva_pct'])
-        # E727 = E721 * E711; EA008 coincide con E727 cuando no hay descuentos/anticipos.
-        bruto=(q*precio).quantize(Q4, rounding=ROUND_HALF_UP)
-        ope=bruto
-        _sifen_xml_text(gi,'dCantProSer',format(q.normalize(),'f'),NS)
+        q=float(it['cantidad'] or 1);precio=float(it['precio'] or 0);line=float(it['total'] or q*precio);pct=float(it['iva_pct'] or 0)
+        _sifen_xml_text(gi,'dCantProSer',('%0.4f'%q).rstrip('0').rstrip('.'),NS)
         gv=etree.SubElement(gi,'{%s}gValorItem'%NS)
-        _sifen_xml_text(gv,'dPUniProSer',X(precio),NS);_sifen_xml_text(gv,'dTotBruOpeItem',X(bruto),NS)
+        _sifen_xml_text(gv,'dPUniProSer',str(round(precio,4)),NS)
+        _sifen_xml_text(gv,'dTotBruOpeItem',str(round(line,4)),NS)
         gvr=etree.SubElement(gv,'{%s}gValorRestaItem'%NS)
         _sifen_xml_text(gvr,'dDescItem','0',NS);_sifen_xml_text(gvr,'dPorcDesIt','0',NS)
         _sifen_xml_text(gvr,'dDescGloItem','0',NS);_sifen_xml_text(gvr,'dAntPreUniIt','0',NS)
-        _sifen_xml_text(gvr,'dAntGloPreUniIt','0',NS);_sifen_xml_text(gvr,'dTotOpeItem',X(ope),NS)
+        _sifen_xml_text(gvr,'dAntGloPreUniIt','0',NS);_sifen_xml_text(gvr,'dTotOpeItem',str(round(line,4)),NS)
         giv=etree.SubElement(gi,'{%s}gCamIVA'%NS)
         af='3' if pct<=0 else '1'
         _sifen_xml_text(giv,'iAfecIVA',af,NS);_sifen_xml_text(giv,'dDesAfecIVA','Exento' if pct<=0 else 'Gravado IVA',NS)
         _sifen_xml_text(giv,'dPropIVA','100',NS);_sifen_xml_text(giv,'dTasaIVA',str(int(pct)),NS)
-        if pct>0:
-            divisor=Decimal('1')+(pct/Decimal('100'))
-            base=(ope/divisor).quantize(Q4, rounding=ROUND_HALF_UP)
-            # E736 = E735 * E734 / 100, exactamente como define V150.
-            iva=(base*(pct/Decimal('100'))).quantize(Q4, rounding=ROUND_HALF_UP)
-        else:
-            base=Decimal('0'); iva=Decimal('0')
-        _sifen_xml_text(giv,'dBasGravIVA',X(base),NS);_sifen_xml_text(giv,'dLiqIVAItem',X(iva),NS)
-        _sifen_xml_text(giv,'dBasExe',X(ope if pct<=0 else 0),NS)
-        total+=ope
-        if pct<=0: sub_exe+=ope
-        elif pct==Decimal('5'): sub5+=ope; iva5+=iva; base5+=base
-        elif pct==Decimal('10'): sub10+=ope; iva10+=iva; base10+=base
-        else: raise ValueError('Tasa IVA SIFEN no soportada: %s. Use 0, 5 o 10.'%pct)
+        # SIFEN V150: los totales F015/F016/F017 deben ser la SUMA EXACTA
+        # de E736 (dLiqIVAItem) y las bases F018/F019 la suma de E735.
+        # Por eso primero fijamos a 4 decimales los valores realmente escritos
+        # en cada item y luego acumulamos ESOS mismos valores, evitando diferencias
+        # por redondeo de floats entre detalle y gTotSub (rechazo 2371).
+        baseiva_raw=line/(1+pct/100) if pct>0 else 0
+        iva_raw=line-baseiva_raw if pct>0 else 0
+        baseiva=round(baseiva_raw,4); iva=round(iva_raw,4); line_xml=round(line,4)
+        _sifen_xml_text(giv,'dBasGravIVA',str(baseiva),NS);_sifen_xml_text(giv,'dLiqIVAItem',str(iva),NS)
+        _sifen_xml_text(giv,'dBasExe',str(round(line if pct<=0 else 0,4)),NS)
+        total+=line_xml;iva_total+=iva
+        if pct<=0: sub_exe+=line_xml
+        elif abs(pct-5)<0.001: sub5+=line_xml;iva5+=iva;base5+=baseiva
+        else: sub10+=line_xml;iva10+=iva;base10+=baseiva
 
+    # Grupo F / totales. Aunque gTotSub es opcional a nivel de binding, cuando
+    # se informa debe contener todos sus campos obligatorios; lo generamos de
+    # forma completa para FE/NCE/NDE y evitamos una cadena de errores sucesivos.
     tots=etree.SubElement(de,'{%s}gTotSub'%NS)
-    _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS);_sifen_xml_text(tots,'dSub5',X(sub5),NS);_sifen_xml_text(tots,'dSub10',X(sub10),NS)
-    _sifen_xml_text(tots,'dTotOpe',X(total),NS);_sifen_xml_text(tots,'dTotDesc','0',NS)
+    _sifen_xml_text(tots,'dSubExe',str(round(sub_exe,4)),NS)
+    _sifen_xml_text(tots,'dSub5',str(round(sub5,4)),NS);_sifen_xml_text(tots,'dSub10',str(round(sub10,4)),NS)
+    _sifen_xml_text(tots,'dTotOpe',str(round(total,4)),NS);_sifen_xml_text(tots,'dTotDesc','0',NS)
     _sifen_xml_text(tots,'dTotDescGlotem','0',NS);_sifen_xml_text(tots,'dTotAntItem','0',NS);_sifen_xml_text(tots,'dTotAnt','0',NS)
     _sifen_xml_text(tots,'dPorcDescTotal','0',NS);_sifen_xml_text(tots,'dDescTotal','0',NS);_sifen_xml_text(tots,'dAnticipo','0',NS)
-    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
-    _sifen_xml_text(tots,'dIVA5',X(iva5),NS);_sifen_xml_text(tots,'dIVA10',X(iva10),NS)
-    _sifen_xml_text(tots,'dTotIVA',X(iva5+iva10),NS);_sifen_xml_text(tots,'dBaseGrav5',X(base5),NS)
-    _sifen_xml_text(tots,'dBaseGrav10',X(base10),NS);_sifen_xml_text(tots,'dTBasGraIVA',X(base5+base10),NS)
+    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',str(round(total,4)),NS)
+    # F015/F016 son la suma de E736 por tasa; F017 = F015 + F016 cuando
+    # dRedon=0. F036/F037 (dLiqTotIVA5/10) NO son el IVA total por tasa:
+    # corresponden exclusivamente al IVA DEL REDONDEO. Como dRedon=0, se omiten.
+    _sifen_xml_text(tots,'dIVA5',str(round(iva5,4)),NS);_sifen_xml_text(tots,'dIVA10',str(round(iva10,4)),NS)
+    iva_total=round(iva5+iva10,4)
+    _sifen_xml_text(tots,'dTotIVA',str(iva_total),NS);_sifen_xml_text(tots,'dBaseGrav5',str(round(base5,4)),NS)
+    _sifen_xml_text(tots,'dBaseGrav10',str(round(base10,4)),NS);_sifen_xml_text(tots,'dTBasGraIVA',str(round(base5+base10,4)),NS)
     if asoc:
         ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
     xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
