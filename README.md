@@ -33,3 +33,11 @@ V13.9.138 - Motor SIFEN alineado con MT150/NT13 y Guía DNIT:
 - Se omiten campos opcionales de descuento/anticipo cuando valen cero.
 - XMLDSig se genera con namespace por defecto, sin prefijo ds:.
 - Prevalidación local bloquea prefijo en Signature y opcionales cero antes del envío.
+
+## V13.9.139 — Reestructuración del núcleo SIFEN
+- Se separó el cálculo fiscal del controlador Flask en `sifen_core/`.
+- `calculator.py` implementa Decimal y la fórmula E735 de NT13.
+- `validator.py` bloquea incoherencias antes de firmar/transmitir.
+- El XML consume resultados del motor fiscal; ya no recalcula IVA por caminos distintos.
+- Se mantienen XSD, firma, QR, transmisión y auditoría existentes mientras se desacoplan progresivamente.
+- Esta entrega no declara aprobación SIFEN: la aprobación solo existe cuando SIFEN responde aprobado.
