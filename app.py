@@ -3100,41 +3100,107 @@ def factura_venta(venta_id):
 
 @app.get('/ventas/<int:venta_id>/factura/pdf')
 def factura_venta_pdf(venta_id):
+    """KuDE de Factura Electrónica: formato visual compacto basado en el modelo aportado por el usuario.
+    No cambia datos fiscales ni lógica SIFEN; solamente la representación gráfica PDF.
+    """
     from io import BytesIO
     from flask import send_file
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
     from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle
+    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,KeepTogether
     v,items,inst=_factura_venta_data(venta_id)
     if not v: flash('Factura no encontrada.'); return redirect('/ventas/carga')
-    b=BytesIO();doc=SimpleDocTemplate(b,pagesize=A4,rightMargin=10*mm,leftMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm);st=getSampleStyleSheet();story=[]
-    es_dte=bool(v['cdc']) and str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
-    _kude_header(story,inst,'FACTURA ELECTRÓNICA' if es_dte else 'FACTURA',v['numero'] or v['id'],'KuDE de Factura Electrónica' if es_dte else 'Comprobante de Factura')
-    cuotas='-'
+    c=db()
     try:
-        cc=db(); cuotas=str(cc.execute('select count(*) from venta_cuotas where venta_id=?',(venta_id,)).fetchone()[0] or '-');cc.close()
-    except Exception: cuotas='-'
-    cli=[[Paragraph('<b>Fecha y Hora de Emisión:</b> '+str(v['fecha']),st['Normal']),Paragraph('<b>R.U.C./C.I.:</b> '+str(v['ruc'] or '-'),st['Normal'])],
-         [Paragraph('<b>Condición de Venta:</b> '+str(v['condicion_venta'] or '-'),st['Normal']),Paragraph('<b>Razón Social:</b> '+str(v['cliente'] or '-'),st['Normal'])],
-         [Paragraph('<b>Cuotas:</b> '+cuotas,st['Normal']),Paragraph('<b>Dirección:</b> '+str(v['cliente_direccion'] or '-'),st['Normal'])],
-         [Paragraph('<b>Moneda:</b> '+str(v['moneda'] or 'PYG')+' &nbsp;&nbsp; <b>Tipo de Cambio:</b> '+str(v['tipo_cambio'] or 1),st['Normal']),Paragraph('<b>Teléfono:</b> '+str(v['cliente_telefono'] or '-'),st['Normal'])],
-         [Paragraph('<b>N° Venta:</b> '+str(v['id']),st['Normal']),Paragraph('<b>Correo Electrónico:</b> '+str(v['cliente_email'] or '-'),st['Normal'])],
-         [Paragraph('<b>N° Pedido:</b> -',st['Normal']),Paragraph('<b>Tipo de Transacción:</b> '+('B2B' if str(v['sifen_tipo_operacion'] or '')=='1' else 'B2C' if str(v['sifen_tipo_operacion'] or '')=='2' else 'B2G' if str(v['sifen_tipo_operacion'] or '')=='3' else 'B2F' if str(v['sifen_tipo_operacion'] or '')=='4' else '-'),st['Normal'])]]
-    tc=Table(cli,colWidths=[95*mm,91*mm]);tc.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('INNERGRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story += [tc,Spacer(1,2*mm)]
-    data=[['Código','Descripción','Unidad Medida','Cantidad','Precio Unitario','Descuento','Exentas','5%','10%']]
-    ex=iva5=iva10=0
+        acts=c.execute("select codigo,descripcion from sifen_actividades_economicas where activo=1 order by principal desc,id").fetchall()
+        punto=c.execute("select * from sifen_puntos_expedicion where id=?",(v['sifen_punto_id'],)).fetchone() if v['sifen_punto_id'] else None
+    except Exception:
+        acts=[]; punto=None
+    finally:c.close()
+    e=_kude_empresa(inst)
+    es_dte=bool(v['cdc']) and str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN')
+    b=BytesIO(); doc=SimpleDocTemplate(b,pagesize=A4,rightMargin=7*mm,leftMargin=7*mm,topMargin=7*mm,bottomMargin=7*mm)
+    st=getSampleStyleSheet()
+    normal=ParagraphStyle('kNormal',parent=st['Normal'],fontName='Helvetica',fontSize=7.2,leading=8.6,textColor=colors.black)
+    small=ParagraphStyle('kSmall',parent=normal,fontSize=6.4,leading=7.4)
+    tiny=ParagraphStyle('kTiny',parent=normal,fontSize=5.8,leading=6.7)
+    center=ParagraphStyle('kCenter',parent=normal,alignment=TA_CENTER)
+    title=ParagraphStyle('kTitle',parent=normal,fontName='Helvetica-Bold',fontSize=10,leading=11,alignment=TA_CENTER)
+    big=ParagraphStyle('kBig',parent=normal,fontName='Helvetica-Bold',fontSize=11,leading=13,alignment=TA_CENTER)
+    story=[]
+
+    # Franja superior como el modelo KuDE de referencia.
+    top=Table([[Paragraph('<b>KuDE de Factura Electrónica</b>',center)]],colWidths=[196*mm])
+    top.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#f2f2f2')),('TOPPADDING',(0,0),(-1,-1),2.5),('BOTTOMPADDING',(0,0),(-1,-1),2.5)]));story.append(top)
+
+    logo=logo_path_actual(); left=[]
+    if os.path.exists(logo): left.append(Image(logo,width=42*mm,height=18*mm))
+    left.append(Paragraph('<b>'+str(e['nombre'])+'</b>',title))
+    acttxt='<br/>'.join([str(a['descripcion'] or '') for a in acts[:3]]) or ''
+    if acttxt:left.append(Paragraph(acttxt,small))
+    ubic=' - '.join([x for x in [str(e['direccion'] or '').strip(),str(e['ciudad'] or '').strip(),str(e['departamento'] or '').strip()] if x])
+    if ubic:left.append(Paragraph(ubic,small))
+    left.append(Paragraph('<b>Teléfono:</b> '+str(e['telefono'] or '-')+'<br/><b>Email:</b> '+str(e['email'] or '-'),small))
+    timbrado=(punto['timbrado'] if punto and 'timbrado' in punto.keys() and punto['timbrado'] else e['timbrado'])
+    est=str(v['establecimiento'] or (punto['establecimiento'] if punto else '') or '').zfill(3)
+    pexp=str(v['punto_expedicion'] or (punto['punto_expedicion'] if punto else '') or '').zfill(3)
+    nro=str(v['numero'] or v['id'])
+    # Si el número almacenado ya contiene establecimiento-punto, no se vuelve a prefijar.
+    nro_imp=nro if '-' in nro else f"{est}-{pexp}-{str(nro).zfill(7)}"
+    right=Paragraph(f"<b>RUC:</b>&nbsp;&nbsp; {e['ruc']}<br/><b>Timbrado Nº:</b>&nbsp;&nbsp; {timbrado or '-'}<br/><b>Inicio de vigencia:</b>&nbsp;&nbsp; {e['inicio'] or '-'}<br/><b>Código interno:</b>&nbsp;&nbsp; {v['id']}<br/><br/><b>FACTURA ELECTRÓNICA</b><br/><font size='11'><b>N°: {nro_imp}</b></font>",normal)
+    head=Table([[left,right]],colWidths=[133*mm,63*mm])
+    head.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('LINEBEFORE',(1,0),(1,0),.8,colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]));story += [head,Spacer(1,1.2*mm)]
+
+    # Datos del receptor/operación en dos columnas, conservando toda la información ya existente.
+    tipo_tx=('B2B' if str(v['sifen_tipo_operacion'] or '')=='1' else 'B2C' if str(v['sifen_tipo_operacion'] or '')=='2' else 'B2G' if str(v['sifen_tipo_operacion'] or '')=='3' else 'B2F' if str(v['sifen_tipo_operacion'] or '')=='4' else '-')
+    operacion='Prestación de servicios / venta' if items else 'Venta'
+    fecha=str(v['fecha'] or '-')
+    left_cli=Paragraph(f"<b>Nombre o Razón Social:</b>&nbsp;&nbsp; {v['cliente'] or '-'}<br/><b>RUC/Documento de Identidad Nº:</b>&nbsp;&nbsp; {v['ruc'] or '-'}<br/><b>Fecha y hora:</b>&nbsp;&nbsp; {fecha}<br/><b>Dirección:</b>&nbsp;&nbsp; {v['cliente_direccion'] or '-'}<br/><b>Teléfono:</b>&nbsp;&nbsp; {v['cliente_telefono'] or '-'}<br/><b>Correo Electrónico:</b>&nbsp;&nbsp; {v['cliente_email'] or '-'}",normal)
+    right_cli=Paragraph(f"<b>Condición de Venta:</b>&nbsp;&nbsp; {v['condicion_venta'] or '-'}<br/><b>Moneda:</b>&nbsp;&nbsp; {v['moneda'] or 'PYG'}<br/><b>Tipo de Cambio:</b>&nbsp;&nbsp; {v['tipo_cambio'] or 1}<br/><b>Operación:</b>&nbsp;&nbsp; {operacion}<br/><b>Tipo de Transacción:</b>&nbsp;&nbsp; {tipo_tx}<br/><b>N° Venta:</b>&nbsp;&nbsp; {v['id']}",normal)
+    cli=Table([[left_cli,right_cli]],colWidths=[116*mm,80*mm])
+    cli.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]));story += [cli,Spacer(1,1.2*mm)]
+
+    # Detalle alto, con la misma disposición visual del KuDE modelo.
+    hdr=[Paragraph('<b>Cod.</b>',center),Paragraph('<b>Descripción</b>',center),Paragraph('<b>UNI</b>',center),Paragraph('<b>Cantidad</b>',center),Paragraph('<b>Precio Unitario</b>',center),Paragraph('<b>Descuento</b>',center),Paragraph('<b>Exentas</b>',center),Paragraph('<b>5%</b>',center),Paragraph('<b>10%</b>',center)]
+    data=[hdr]; ex=base5=base10=0.0
     for x in items:
-        pct=float(x['iva_pct'] or 0); total=float(x['total'] or 0); exv=total if pct==0 else 0; v5=total if pct==5 else 0; v10=total if pct==10 else 0; ex+=exv;iva5+=v5;iva10+=v10
-        data.append([x['codigo'] or '',Paragraph(str(x['nombre'] or ''),st['Normal']),'UNI',f"{float(x['cantidad'] or 0):,.2f}",f"{float(x['precio'] or 0):,.0f}",'0',f"{exv:,.0f}" if exv else '',f"{v5:,.0f}" if v5 else '',f"{v10:,.0f}" if v10 else ''])
-    while len(data)<12:data.append(['','','','','','','','',''])
-    t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
-    total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
-    tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
-    url=(v['qr_sifen'] if 'qr_sifen' in v.keys() else None) or None  # dCarQR real extraído del rDE firmado; nunca se fabrica solo desde el CDC.
-    _kude_footer(story,inst,v['cdc'],url,es_dte)
-    doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
+        pct=float(x['iva_pct'] or 0); total=float(x['total'] or 0); exv=total if pct==0 else 0; v5=total if pct==5 else 0; v10=total if pct==10 else 0; ex+=exv;base5+=v5;base10+=v10
+        data.append([str(x['codigo'] or ''),Paragraph(str(x['nombre'] or ''),small),'UNI',f"{float(x['cantidad'] or 0):,.2f}",f"{float(x['precio'] or 0):,.0f}",'0',f"{exv:,.0f}" if exv else '',f"{v5:,.0f}" if v5 else '',f"{v10:,.0f}" if v10 else ''])
+    # Filas vacías para conservar la apariencia vertical del modelo sin alterar datos.
+    min_rows=15
+    while len(data)<min_rows:data.append(['','','','','','','','',''])
+    widths=[13*mm,52*mm,10*mm,16*mm,25*mm,20*mm,20*mm,20*mm,20*mm]
+    detail=Table(data,colWidths=widths,repeatRows=1,rowHeights=[8*mm]+[5.4*mm]*(len(data)-1))
+    detail.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eeeeee')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),6.4),('ALIGN',(0,0),(0,-1),'CENTER'),('ALIGN',(2,0),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),('TOPPADDING',(0,1),(-1,-1),2)]));story.append(detail)
+
+    total=float(v['total'] or 0); descuento=0.0
+    totals=[
+      [Paragraph('<b>Sub Total:</b>',small),'','','','','',f"{ex:,.0f}" if ex else '',f"{base5:,.0f}" if base5 else '',f"{base10:,.0f}" if base10 else ''],
+      [Paragraph('<b>Descuento global:</b>',small),'','','','','','','',f"- {descuento:,.0f}"],
+      [Paragraph('<b>Total a pagar</b>&nbsp;&nbsp; '+monto_letras(total),small),'','','','','','','',f"{total:,.0f}"],
+      [Paragraph('<b>Total en guaraníes</b>',small),'','','','','','','',f"{float(v['total_pyg'] or total):,.0f}"],
+      [Paragraph('<b>Liquidación IVA</b>',small),'','',Paragraph('<b>(5%)</b> '+f"{float(v['iva_5'] or 0):,.0f}",small),'','',Paragraph('<b>(10%)</b> '+f"{float(v['iva_10'] or 0):,.0f}",small),'',Paragraph('<b>Total IVA</b> '+f"{float(v['iva'] or 0):,.0f}",small)]
+    ]
+    tt=Table(totals,colWidths=widths)
+    tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('SPAN',(0,0),(5,0)),('SPAN',(0,1),(7,1)),('SPAN',(0,2),(7,2)),('SPAN',(0,3),(7,3)),('SPAN',(0,4),(2,4)),('SPAN',(3,4),(5,4)),('SPAN',(6,4),(7,4)),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3),('TOPPADDING',(0,0),(-1,-1),2.5),('BOTTOMPADDING',(0,0),(-1,-1),2.5)]));story.append(tt)
+
+    # Bloque CDC/QR como el modelo. QR siempre deriva del dCarQR real guardado en la factura.
+    qr_url=(v['qr_sifen'] if 'qr_sifen' in v.keys() else None) or None
+    qr=_kude_qr_flowable(qr_url,27) if qr_url else None
+    if es_dte and v['cdc']:
+        consulta=(qr_url or '')
+        msg=f"<b>Consulte esta Factura Electrónica con el número impreso abajo:</b><br/>{consulta}<br/><b>CDC: {v['cdc']}</b><br/><br/><b>ESTE DOCUMENTO ES UNA REPRESENTACIÓN GRÁFICA DE UN DOCUMENTO ELECTRÓNICO (XML)</b><br/><font size='6'>Si su documento electrónico presenta algún error, podrá solicitar la modificación/cancelación conforme a las reglas vigentes de SIFEN.</font>"
+    elif v['cdc']:
+        msg=f"<b>CDC DE PRUEBA: {v['cdc']}</b><br/><b>SIFEN TEST · NO APROBADO · SIN VALOR FISCAL</b><br/><font size='6'>Este documento todavía no constituye un DTE aprobado por SIFEN.</font>"
+    else:
+        msg="<b>DOCUMENTO PENDIENTE DE VALIDACIÓN SIFEN</b><br/><font size='6'>El QR y la identificación como KuDE/DTE se habilitan con el CDC y la respuesta correspondiente de SIFEN.</font>"
+    foot=Table([[Paragraph(msg,small),qr or Paragraph('',small)]],colWidths=[165*mm,31*mm])
+    foot.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]));story += [Spacer(1,1.2*mm),foot]
+    if e['pie']: story.append(Paragraph(str(e['pie']),tiny))
+    doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"KuDE_Factura_{v['numero'] or venta_id}.pdf")
 
 
 # ===== V13.6.5: Configuración institucional centralizada =====
