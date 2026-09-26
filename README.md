@@ -10,3 +10,10 @@
 
 
 V13.9.78: Preparación segura SIFEN Producción; activación bloqueada hasta transmisor XMLDSig/SOAP completo.
+
+## V13.9.80 — Generador estructural DE XML V150
+- Generador rDE/DE V150 para FE, NCE y NDE en modo TEST/prevalidación.
+- Composición de CDC y DV, gOpeDE, gTimb, datos generales, emisor/receptor, ítems IVA y documento asociado.
+- Prueba desde Configuración > SIFEN usando la última factura, sin firma ni transmisión.
+- Producción permanece bloqueada hasta validar el XML generado contra los XSD oficiales vigentes de DNIT.
+- No modifica correlativos ni la base persistente existente.

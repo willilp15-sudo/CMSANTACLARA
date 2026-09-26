@@ -3629,12 +3629,118 @@ def _sifen_diagnostico(c,cfg):
     except Exception:
         motor_ok=False
     add('Motor XMLDSig + SOAP',motor_ok,'Motor instalado' if motor_ok else 'Dependencias lxml/signxml no disponibles')
-    # La activación fiscal continúa bloqueada hasta disponer del generador DE completo,
-    # porque firmar/enviar un XML no basta: el DE debe cumplir íntegramente XSD V150.
-    add('Generador DE XML V150',False,'Pendiente completar mapeo fiscal integral del ERP contra XSD V150 antes de Producción')
+    # V13.9.80: generador estructural rDE/DE V150 instalado. Sigue bloqueado para
+    # PRODUCCION hasta validar el XML contra los XSD oficiales vigentes.
+    gen_ok=callable(globals().get('_sifen_generar_de_v150'))
+    add('Generador DE XML V150',gen_ok,'Generador estructural instalado' if gen_ok else 'Generador no disponible')
+    add('Validación XSD V150',False,'Bloqueo de seguridad: falta incorporar/validar contra el paquete XSD oficial vigente antes de PRODUCCIÓN')
     return checks
 
 init_v13978_sifen_produccion()
+
+# ===== V13.9.80: generador estructural DE XML V150 (TEST/prevalidación) =====
+def _sifen_xml_text(parent, tag, value, ns='http://ekuatia.set.gov.py/sifen/xsd'):
+    from lxml import etree
+    if value is None:return None
+    value=str(value).strip()
+    if value=='':return None
+    e=etree.SubElement(parent,'{%s}%s'%(ns,tag));e.text=value;return e
+
+def _sifen_numero_partes(numero):
+    import re
+    m=re.match(r'^\s*(\d{3})-(\d{3})-(\d{1,7})\s*$',str(numero or ''))
+    if not m:raise ValueError('Número fiscal inválido. Use formato 001-001-0000001.')
+    return m.group(1),m.group(2),m.group(3).zfill(7)
+
+def _sifen_cdc_base(cfg,tipo_de,numero,fecha,cod_seg,tipo_emision='1'):
+    # Construye los 43 dígitos previos al DV conforme a la composición CDC V150.
+    # El DV final se calcula con módulo 11 en _sifen_dv_mod11.
+    est,pun,num=_sifen_numero_partes(numero)
+    ruc=_solo_digitos(cfg['ruc'])
+    tim=_solo_digitos(cfg['timbrado'])
+    f=''.join(ch for ch in str(fecha or '')[:10] if ch.isdigit())
+    if len(f)!=8:
+        # fecha ISO yyyy-mm-dd -> yyyymmdd
+        import re
+        z=re.match(r'^(\d{4})-(\d{2})-(\d{2})',str(fecha or ''))
+        f=''.join(z.groups()) if z else ''
+    tc=str(cfg['tipo_contribuyente'] or '2')
+    seg=_solo_digitos(cod_seg).zfill(9)[-9:]
+    base=str(tipo_de)+ruc+str(cfg['dv'] or '')+est+pun+num+tc+f+str(tipo_emision)+seg
+    if len(base)!=43 or not base.isdigit():raise ValueError('No se pudo formar CDC: revise RUC/DV, número, fecha, tipo de contribuyente y código de seguridad.')
+    return base
+
+def _sifen_dv_mod11(base):
+    k=2;total=0
+    for ch in reversed(str(base)):
+        total+=int(ch)*k;k+=1
+        if k>11:k=2
+    r=total%11;dv=11-r
+    return 0 if dv in (10,11) else dv
+
+def _sifen_generar_de_v150(c, doc_tipo, doc_id):
+    """Genera rDE V150 estructural para TEST/prevalidación.
+    No transmite ni declara aprobación. PRODUCCIÓN permanece bloqueada hasta XSD oficial.
+    doc_tipo: FE, NCE, NDE.
+    """
+    from lxml import etree
+    import secrets, datetime
+    NS='http://ekuatia.set.gov.py/sifen/xsd';XSI='http://www.w3.org/2001/XMLSchema-instance'
+    cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    inst=c.execute('select * from institucion_config where id=1').fetchone()
+    if not cfg:raise ValueError('Configuración SIFEN inexistente.')
+    tipo=str(doc_tipo).upper()
+    if tipo=='FE':
+        d=c.execute("select v.*,t.nombre receptor,t.ruc receptor_doc,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.id=?",(doc_id,)).fetchone()
+        if not d:raise ValueError('Factura no encontrada.')
+        items=c.execute("select vi.*,p.codigo,coalesce(p.nombre,vi.descripcion,'Servicio') descripcion from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(doc_id,)).fetchall()
+        ide=1;des='Factura electrónica';fecha=d['fecha'];numero=d['numero'];asoc=None
+    elif tipo=='NCE':
+        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,v.sifen_punto_id,p.timbrado punto_timbrado from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
+        if not d:raise ValueError('Nota de Crédito no encontrada.')
+        items=c.execute("select i.*,p.codigo,coalesce(i.descripcion,p.nombre,'Ítem') descripcion from nota_credito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(doc_id,)).fetchall()
+        ide=5;des='Nota de crédito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
+    elif tipo=='NDE':
+        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,v.sifen_punto_id,p.timbrado punto_timbrado from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
+        if not d:raise ValueError('Nota de Débito no encontrada.')
+        items=c.execute("select * from nota_debito_venta_items where nota_id=? order by id",(doc_id,)).fetchall()
+        ide=6;des='Nota de débito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
+    else:raise ValueError('Tipo de DE no soportado.')
+    est,pun,num=_sifen_numero_partes(numero)
+    cod_seg=str(secrets.randbelow(1000000000)).zfill(9)
+    base=_sifen_cdc_base(cfg,ide,numero,fecha,cod_seg);cdc=base+str(_sifen_dv_mod11(base))
+    root=etree.Element('{%s}rDE'%NS,nsmap={None:NS,'xsi':XSI})
+    root.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
+    _sifen_xml_text(root,'dVerFor','150',NS)
+    de=etree.SubElement(root,'{%s}DE'%NS);de.set('Id',cdc)
+    _sifen_xml_text(de,'dDVId',cdc[-1],NS);_sifen_xml_text(de,'dFecFirma',datetime.datetime.now().replace(microsecond=0).isoformat(),NS);_sifen_xml_text(de,'dSisFact','1',NS)
+    go=etree.SubElement(de,'{%s}gOpeDE'%NS);_sifen_xml_text(go,'iTipEmi','1',NS);_sifen_xml_text(go,'dDesTipEmi','Normal',NS);_sifen_xml_text(go,'dCodSeg',cod_seg,NS)
+    gt=etree.SubElement(de,'{%s}gTimb'%NS);_sifen_xml_text(gt,'iTiDE',ide,NS);_sifen_xml_text(gt,'dDesTiDE',des,NS);_sifen_xml_text(gt,'dNumTim',d['punto_timbrado'] or cfg['timbrado'],NS);_sifen_xml_text(gt,'dEst',est,NS);_sifen_xml_text(gt,'dPunExp',pun,NS);_sifen_xml_text(gt,'dNumDoc',num,NS);_sifen_xml_text(gt,'dFeIniT',cfg['timbrado_desde'],NS)
+    gg=etree.SubElement(de,'{%s}gDatGralOpe'%NS);_sifen_xml_text(gg,'dFeEmiDE',str(fecha)[:10]+'T12:00:00',NS)
+    gc=etree.SubElement(gg,'{%s}gOpeCom'%NS);_sifen_xml_text(gc,'iTipTra','2' if tipo!='FE' else '1',NS);_sifen_xml_text(gc,'dDesTipTra','Prestación de servicios',NS);_sifen_xml_text(gc,'iTImp','1',NS);_sifen_xml_text(gc,'dDesTImp','IVA',NS);_sifen_xml_text(gc,'cMoneOpe',d['moneda'] if 'moneda' in d.keys() and d['moneda'] else 'PYG',NS);_sifen_xml_text(gc,'dDesMoneOpe','Guarani',NS)
+    ge=etree.SubElement(gg,'{%s}gEmis'%NS);_sifen_xml_text(ge,'dRucEm',cfg['ruc'],NS);_sifen_xml_text(ge,'dDVEmi',cfg['dv'],NS);_sifen_xml_text(ge,'iTipCont',cfg['tipo_contribuyente'] or '2',NS);_sifen_xml_text(ge,'dNomEmi',(inst['razon_social'] if 'razon_social' in inst.keys() else inst['nombre']) or 'CENTRO MEDICO SANTA CLARA',NS);_sifen_xml_text(ge,'dNomFanEmi',(inst['nombre_fantasia'] if 'nombre_fantasia' in inst.keys() else inst['nombre']) or '',NS);_sifen_xml_text(ge,'dDirEmi',inst['direccion'] or '',NS);_sifen_xml_text(ge,'dNumCas','0',NS);_sifen_xml_text(ge,'dTelEmi',inst['telefono'] or '',NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
+    gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str(d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
+    _sifen_xml_text(gr,'iNatRec','1',NS);_sifen_xml_text(gr,'iTiOpe','1',NS);_sifen_xml_text(gr,'cPaisRec','PRY',NS);_sifen_xml_text(gr,'dDesPaisRe','Paraguay',NS);_sifen_xml_text(gr,'iTiContRec','2',NS)
+    if rruc.isdigit() and rdv.isdigit() and len(rdv)==1:_sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
+    _sifen_xml_text(gr,'dNomRec',d['receptor'] or 'SIN NOMBRE',NS);_sifen_xml_text(gr,'dCodCliente',str(d['cliente_id'] if 'cliente_id' in d.keys() else doc_id),NS)
+    gd=etree.SubElement(de,'{%s}gDtipDE'%NS)
+    if tipo=='FE':
+        gf=etree.SubElement(gd,'{%s}gCamFE'%NS);_sifen_xml_text(gf,'iIndPres','1',NS);_sifen_xml_text(gf,'dDesIndPres','Operación presencial',NS)
+    else:
+        gn=etree.SubElement(gd,'{%s}gCamNCDE'%NS);_sifen_xml_text(gn,'iMotEmi','1',NS);_sifen_xml_text(gn,'dDesMotEmi','Devolución y ajuste de precios' if tipo=='NCE' else 'Ajuste de precios',NS)
+    total=0.0;iva_total=0.0
+    for ix,it in enumerate(items,1):
+        gi=etree.SubElement(gd,'{%s}gCamItem'%NS);_sifen_xml_text(gi,'dCodInt',it['codigo'] if 'codigo' in it.keys() and it['codigo'] else str(ix),NS);_sifen_xml_text(gi,'dDesProSer',it['descripcion'] if 'descripcion' in it.keys() else 'Ítem',NS);_sifen_xml_text(gi,'cUniMed','77',NS);_sifen_xml_text(gi,'dDesUniMed','UNI',NS);q=float(it['cantidad'] or 1);precio=float(it['precio'] or 0);line=float(it['total'] or q*precio);pct=float(it['iva_pct'] or 0);_sifen_xml_text(gi,'dCantProSer',('%0.4f'%q).rstrip('0').rstrip('.'),NS)
+        gv=etree.SubElement(gi,'{%s}gValorItem'%NS);_sifen_xml_text(gv,'dPUniProSer',str(round(precio,4)),NS);_sifen_xml_text(gv,'dTotBruOpeItem',str(round(line,4)),NS);_sifen_xml_text(gv,'gValorRestaItem',None,NS)
+        giv=etree.SubElement(gi,'{%s}gCamIVA'%NS);af='3' if pct<=0 else '1';_sifen_xml_text(giv,'iAfecIVA',af,NS);_sifen_xml_text(giv,'dDesAfecIVA','Exento' if pct<=0 else 'Gravado IVA',NS);_sifen_xml_text(giv,'dPropIVA','100',NS);_sifen_xml_text(giv,'dTasaIVA',str(int(pct)),NS);baseiva=line/(1+pct/100) if pct>0 else 0;iva=line-baseiva if pct>0 else 0;_sifen_xml_text(giv,'dBasGravIVA',str(round(baseiva,4)),NS);_sifen_xml_text(giv,'dLiqIVAItem',str(round(iva,4)),NS);total+=line;iva_total+=iva
+    if asoc:
+        ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
+    xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    return xml,cdc
+
+def _sifen_guardar_xml_test(tipo,doc_id,xml,cdc):
+    p=Path(_sifen_dir())/'xml_test';p.mkdir(parents=True,exist_ok=True)
+    f=p/(str(tipo).upper()+'_'+str(doc_id)+'_'+str(cdc)+'.xml');f.write_bytes(xml);return str(f)
 
 # ===== V13.9.79: motor SIFEN XMLDSig + SOAP/mTLS =====
 def _sifen_endpoint(cfg, servicio='sync'):
@@ -3799,6 +3905,15 @@ def configuracion_sifen():
                     _sifen_log('CERTIFICADO','OK',f'{subj} | vence {na}');flash('Certificado y clave privada validados e instalados en el almacenamiento persistente protegido. La contraseña no fue guardada.')
                 except Exception as e:
                     _sifen_log('CERTIFICADO','ERROR',e);flash('No se pudo instalar el certificado: '+str(e))
+        elif accion=='generador_autotest':
+            try:
+                v=c.execute("select id from ventas where numero is not null and trim(numero)<>'' order by id desc limit 1").fetchone()
+                if not v: raise ValueError('No hay una factura existente para generar XML de prueba.')
+                xml,cdc=_sifen_generar_de_v150(c,'FE',v['id']);ruta=_sifen_guardar_xml_test('FE',v['id'],xml,cdc)
+                _sifen_log('XML_V150','GENERADO_TEST','FE id %s CDC %s · archivo %s'%(v['id'],cdc,ruta))
+                flash('Generador XML V150 ejecutado sobre la última factura. XML guardado SOLO para TEST/prevalidación; no fue firmado ni enviado a SIFEN.')
+            except Exception as e:
+                _sifen_log('XML_V150','ERROR',e);flash('Generador XML V150: '+str(e))
         elif accion=='motor_autotest':
             cfg=c.execute('select * from sifen_config where id=1').fetchone()
             try:
