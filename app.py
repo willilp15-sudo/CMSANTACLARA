@@ -913,11 +913,15 @@ def api_tc():
 
 @app.route('/pacientes',methods=['GET','POST'])
 def pacientes():
- c=db()
- sincronizar_clientes_pacientes(c)
+ c=db(); sincronizar_clientes_pacientes(c)
  if request.method=='POST':
-  cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,'PYG')",(request.form['documento'],request.form['nombre'],request.form.get('telefono')));tid=cur.lastrowid;c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();return redirect('/clientes')
- rows=c.execute('select * from pacientes order by id desc').fetchall();c.close();return render_template('hospital_patients.html',rows=rows)
+  doc=(request.form.get('documento') or '').strip(); nombre=(request.form.get('nombre') or '').strip()
+  nat=(request.form.get('sifen_naturaleza') or '1').strip(); tiop=(request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')).strip()
+  vals=(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
+  cur=c.execute("""insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",vals)
+  tid=cur.lastrowid
+  c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();c.close();flash('Cliente registrado y preparado para facturación electrónica.');return redirect('/clientes')
+ rows=c.execute("""select p.*,t.ruc,t.email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id order by p.id desc""").fetchall();c.close();return render_template('hospital_patients.html',rows=rows)
 @app.route('/config-sanatorio',methods=['GET','POST'])
 def config_sanatorio():
  c=db()
@@ -1219,10 +1223,14 @@ def anular_venta(i):
 
 @app.route('/editar-paciente/<int:i>',methods=['GET','POST'])
 def editar_paciente(i):
- c=db(); r=c.execute('select * from pacientes where id=?',(i,)).fetchone()
+ c=db(); r=c.execute("""select p.*,t.email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id where p.id=?""",(i,)).fetchone()
+ if not r:c.close();flash('Cliente no encontrado.');return redirect('/clientes')
  if request.method=='POST':
-  antes=snapshot(r); vals=(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i); c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',vals); c.execute('update terceros set ruc=?,nombre=?,telefono=? where id=?',(request.form['documento'],request.form['nombre'],request.form.get('telefono'),r['tercero_id'])); despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone()); audit_change(c,'MODIFICAR','PACIENTES',i,antes,despues,request.form.get('motivo','Corrección')); c.commit(); c.close(); return redirect('/clientes')
- c.close(); return render_template('edit_patient.html',r=r)
+  antes=snapshot(r);doc=(request.form.get('documento') or '').strip();nombre=(request.form.get('nombre') or '').strip();nat=request.form.get('sifen_naturaleza') or '1';tiop=request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')
+  c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i))
+  c.execute("""update terceros set tipo='CLIENTE',ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?""",(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),r['tercero_id']))
+  despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone());audit_change(c,'MODIFICAR','CLIENTES',i,antes,despues,request.form.get('motivo','Actualización'));c.commit();c.close();flash('Cliente actualizado.');return redirect('/clientes')
+ c.close();return render_template('edit_patient.html',r=r)
 
 @app.post('/eliminar-paciente/<int:i>')
 def eliminar_paciente(i):
@@ -3070,7 +3078,7 @@ init_v1364_factura_electronica()
 
 def _factura_venta_data(venta_id):
     c=db()
-    v=c.execute('''select v.*,t.nombre cliente,t.ruc,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos
+    v=c.execute('''select v.*,t.nombre cliente,t.ruc,t.telefono cliente_telefono,t.email cliente_email,t.sifen_direccion cliente_direccion,t.sifen_tipo_operacion,t.sifen_naturaleza,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos
                    from ventas v left join terceros t on t.id=v.cliente_id
                    left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id
                    left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
@@ -3079,7 +3087,7 @@ def _factura_venta_data(venta_id):
     if v and not v['cdc']:
         try:
             cdc=_generar_cdc_test_venta(c,v['id'],v['fecha'],v['numero'])
-            if cdc:c.commit();v=c.execute('''select v.*,t.nombre cliente,t.ruc,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from ventas v left join terceros t on t.id=v.cliente_id left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
+            if cdc:c.commit();v=c.execute('''select v.*,t.nombre cliente,t.ruc,t.telefono cliente_telefono,t.email cliente_email,t.sifen_direccion cliente_direccion,t.sifen_tipo_operacion,t.sifen_naturaleza,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from ventas v left join terceros t on t.id=v.cliente_id left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
         except Exception as ex:
             _sifen_log('CDC_TEST','ERROR',f'Factura {venta_id}: {ex}')
     c.close();return v,items,inst
@@ -3104,9 +3112,18 @@ def factura_venta_pdf(venta_id):
     b=BytesIO();doc=SimpleDocTemplate(b,pagesize=A4,rightMargin=10*mm,leftMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm);st=getSampleStyleSheet();story=[]
     es_dte=bool(v['cdc']) and str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
     _kude_header(story,inst,'FACTURA ELECTRÓNICA' if es_dte else 'FACTURA',v['numero'] or v['id'],'KuDE de Factura Electrónica' if es_dte else 'Comprobante de Factura')
-    cli=[[Paragraph('<b>Nombre o Razón Social:</b> '+str(v['cliente'] or '-'),st['Normal']),Paragraph('<b>Condición de Venta:</b> '+str(v['condicion_venta'] or '-'),st['Normal'])],[Paragraph('<b>RUC/Documento:</b> '+str(v['ruc'] or '-'),st['Normal']),Paragraph('<b>Moneda:</b> '+str(v['moneda'] or 'PYG'),st['Normal'])],[Paragraph('<b>Fecha y hora:</b> '+str(v['fecha']),st['Normal']),Paragraph('<b>Forma de pago:</b> '+str(v['forma_cobro'] or '-'),st['Normal'])]]
+    cuotas='-'
+    try:
+        cc=db(); cuotas=str(cc.execute('select count(*) from venta_cuotas where venta_id=?',(venta_id,)).fetchone()[0] or '-');cc.close()
+    except Exception: cuotas='-'
+    cli=[[Paragraph('<b>Fecha y Hora de Emisión:</b> '+str(v['fecha']),st['Normal']),Paragraph('<b>R.U.C./C.I.:</b> '+str(v['ruc'] or '-'),st['Normal'])],
+         [Paragraph('<b>Condición de Venta:</b> '+str(v['condicion_venta'] or '-'),st['Normal']),Paragraph('<b>Razón Social:</b> '+str(v['cliente'] or '-'),st['Normal'])],
+         [Paragraph('<b>Cuotas:</b> '+cuotas,st['Normal']),Paragraph('<b>Dirección:</b> '+str(v['cliente_direccion'] or '-'),st['Normal'])],
+         [Paragraph('<b>Moneda:</b> '+str(v['moneda'] or 'PYG')+' &nbsp;&nbsp; <b>Tipo de Cambio:</b> '+str(v['tipo_cambio'] or 1),st['Normal']),Paragraph('<b>Teléfono:</b> '+str(v['cliente_telefono'] or '-'),st['Normal'])],
+         [Paragraph('<b>N° Venta:</b> '+str(v['id']),st['Normal']),Paragraph('<b>Correo Electrónico:</b> '+str(v['cliente_email'] or '-'),st['Normal'])],
+         [Paragraph('<b>N° Pedido:</b> -',st['Normal']),Paragraph('<b>Tipo de Transacción:</b> '+('B2B' if str(v['sifen_tipo_operacion'] or '')=='1' else 'B2C' if str(v['sifen_tipo_operacion'] or '')=='2' else 'B2G' if str(v['sifen_tipo_operacion'] or '')=='3' else 'B2F' if str(v['sifen_tipo_operacion'] or '')=='4' else '-'),st['Normal'])]]
     tc=Table(cli,colWidths=[95*mm,91*mm]);tc.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('INNERGRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story += [tc,Spacer(1,2*mm)]
-    data=[['Cod.','Descripción','UNI','Cantidad','Precio Unitario','Descuento','Exentas','5%','10%']]
+    data=[['Código','Descripción','Unidad Medida','Cantidad','Precio Unitario','Descuento','Exentas','5%','10%']]
     ex=iva5=iva10=0
     for x in items:
         pct=float(x['iva_pct'] or 0); total=float(x['total'] or 0); exv=total if pct==0 else 0; v5=total if pct==5 else 0; v10=total if pct==10 else 0; ex+=exv;iva5+=v5;iva10+=v10
@@ -3115,7 +3132,7 @@ def factura_venta_pdf(venta_id):
     t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
     total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
     tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
-    url=('https://ekuatia.set.gov.py/consultas/'+str(v['cdc'])) if es_dte and v['cdc'] else None
+    url=None  # El QR fiscal se imprime solo desde dCarQR firmado; no se fabrica desde el CDC.
     _kude_footer(story,inst,v['cdc'],url,es_dte)
     doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
 
@@ -4046,7 +4063,8 @@ def _sifen_validar_xsd_v150(xml_bytes):
           ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:dTotBruOpeItem','gValorItem/dTotBruOpeItem'),
           ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:gValorRestaItem/s:dTotOpeItem','gValorRestaItem/dTotOpeItem'),
           ('s:DE/s:gDtipDE/s:gCamItem/s:gCamIVA/s:dBasExe','gCamIVA/dBasExe'),
-          ('s:DE/s:gTotSub/s:dTotOpe','gTotSub/dTotOpe'),('s:DE/s:gTotSub/s:dTotGralOpe','gTotSub/dTotGralOpe')]:
+          ('s:DE/s:gTotSub/s:dTotOpe','gTotSub/dTotOpe'),('s:DE/s:gTotSub/s:dTotGralOpe','gTotSub/dTotGralOpe'),
+          ('s:gCamFuFD','gCamFuFD'),('s:gCamFuFD/s:dCarQR','gCamFuFD/dCarQR')]:
             if not doc.xpath(xp,namespaces=ns): falt.append(nombre)
         if falt:
             return False,['Prevalidación V150: faltan grupos/campos: '+', '.join(falt)]
@@ -4104,23 +4122,49 @@ def _sifen_endpoint(cfg, servicio='sync'):
     if servicio not in rutas: raise ValueError('Servicio SIFEN no soportado: '+str(servicio))
     return base+rutas[servicio]
 
+def _sifen_qr_url_rde(root,cfg):
+    """Construye dCarQR V150 con el DigestValue de la firma y CSC configurado."""
+    import hashlib
+    from lxml import etree
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; DS='http://www.w3.org/2000/09/xmldsig#'
+    de=root.find('{%s}DE'%NS)
+    if de is None: raise ValueError('No existe DE para construir QR.')
+    cdc=(de.get('Id') or '').strip(); fec=de.findtext('.//{%s}dFeEmiDE'%NS) or ''
+    rec=de.find('.//{%s}gDatRec'%NS)
+    recid=''
+    if rec is not None: recid=(rec.findtext('{%s}dRucRec'%NS) or rec.findtext('{%s}dNumIDRec'%NS) or '').strip()
+    tot=de.findtext('.//{%s}gTotSub/{%s}dTotGralOpe'%(NS,NS)) or '0'; iva=de.findtext('.//{%s}gTotSub/{%s}dTotIVA'%(NS,NS)) or '0'
+    cant=len(de.findall('.//{%s}gCamItem'%NS))
+    digest=root.findtext('.//{%s}DigestValue'%DS) or ''
+    if not digest: raise ValueError('La firma XMLDSig no contiene DigestValue para generar el QR.')
+    idcsc=str(cfg['csc_id'] or '').strip(); csc=str(cfg['csc'] or '').strip()
+    if not idcsc or not csc: raise ValueError('Falta IdCSC/CSC. Configure el Código de Seguridad del Contribuyente para generar gCamFuFD/dCarQR.')
+    def hx(x): return str(x).encode('utf-8').hex()
+    # MT V150: fecha y DigestValue se representan en hexadecimal.
+    base='nVersion=150&Id='+cdc+'&dFeEmiDE='+hx(fec)+'&dRucRec='+recid+'&dTotGralOpe='+str(tot)+'&dTotIVA='+str(iva)+'&cItems='+str(cant)+'&DigestValue='+hx(digest)+'&IdCSC='+idcsc
+    h=hashlib.sha256((base+csc).encode('utf-8')).hexdigest().lower()
+    pref='https://ekuatia.set.gov.py/consultas/qr?' if str(cfg['ambiente'] or '').upper()=='PRODUCCION' else 'https://ekuatia.set.gov.py/consultas-test/qr?'
+    return pref+base+'&cHashQR='+h
+
 def _sifen_firmar_rde(xml_bytes,cfg):
-    """Firma un rDE V150 ya construido. No inventa campos fiscales faltantes."""
+    """Firma DE y agrega gCamFuFD/dCarQR fuera de la firma, conforme MT V150."""
     from lxml import etree
     from signxml import XMLSigner,methods
     if isinstance(xml_bytes,str): xml_bytes=xml_bytes.encode('utf-8')
     parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
-    root=etree.fromstring(xml_bytes,parser)
-    ns='http://ekuatia.set.gov.py/sifen/xsd'
+    root=etree.fromstring(xml_bytes,parser);ns='http://ekuatia.set.gov.py/sifen/xsd'
     if etree.QName(root).localname!='rDE': raise ValueError('El XML debe tener raíz rDE.')
-    ver=root.find('{%s}dVerFor'%ns)
-    de=root.find('{%s}DE'%ns)
+    ver=root.find('{%s}dVerFor'%ns);de=root.find('{%s}DE'%ns)
     if ver is None or (ver.text or '').strip()!='150': raise ValueError('El DE debe ser versión 150.')
     if de is None or not (de.get('Id') or '').strip(): raise ValueError('El DE no contiene CDC/Id.')
     if not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital no instalado.')
-    cert=Path(cfg['cert_path']).read_bytes(); key=Path(cfg['key_path']).read_bytes()
+    cert=Path(cfg['cert_path']).read_bytes();key=Path(cfg['key_path']).read_bytes()
     signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
     firmado=signer.sign(root,key=key,cert=cert,reference_uri='#'+de.get('Id'),id_attribute='Id')
+    # El grupo J va después de Signature y no forma parte de la firma digital.
+    for viejo in firmado.findall('{%s}gCamFuFD'%ns): firmado.remove(viejo)
+    gf=etree.SubElement(firmado,'{%s}gCamFuFD'%ns)
+    _sifen_xml_text(gf,'dCarQR',_sifen_qr_url_rde(firmado,cfg),ns)
     return etree.tostring(firmado,encoding='UTF-8',xml_declaration=True,pretty_print=False)
 
 def _sifen_enviar_sync(xml_firmado,cfg,timeout=35):
