@@ -3957,6 +3957,18 @@ def init_v13102_produccion_segura():
     c.commit();c.close()
 init_v13102_produccion_segura()
 
+# ===== V13.9.126: reparación segura de geografía SIFEN del emisor =====
+def init_v13126_geo_emisor():
+    c=db(); cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    if cfg:
+        dep=str(cfg['emis_departamento_desc'] or '').upper(); dis=str(cfg['emis_distrito_desc'] or '').upper(); ciu=str(cfg['emis_ciudad_desc'] or '').upper()
+        if 'CANINDEY' in dep and 'NUEVA ESPERANZA' in (dis+' '+ciu):
+            c.execute("update sifen_config set emis_departamento_codigo='18',emis_departamento_desc='CANINDEYU',emis_distrito_codigo='238',emis_distrito_desc='NUEVA ESPERANZA',emis_ciudad_codigo='4603',emis_ciudad_desc='NUEVA ESPERANZA' where id=1")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.126-geo-emisor-dnit',?)",(now(),))
+    c.commit(); c.close()
+init_v13126_geo_emisor()
+
+
 def _sifen_diagnostico(c,cfg):
     import os
     puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 order by establecimiento,punto_expedicion").fetchall()
@@ -4163,7 +4175,15 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     ge=etree.SubElement(gg,'{%s}gEmis'%NS)
     # V13.9.84: TgEmis V150 exige ubicación y teléfono del emisor. Se toman de Configuración SIFEN; no se inventan códigos geográficos.
     dep_cod=str(cfg['emis_departamento_codigo'] or '').strip();dep_desc=str(cfg['emis_departamento_desc'] or '').strip();dis_cod=str(cfg['emis_distrito_codigo'] or '').strip();dis_desc=str(cfg['emis_distrito_desc'] or '').strip();ciu_cod=str(cfg['emis_ciudad_codigo'] or '').strip();ciu_desc=str(cfg['emis_ciudad_desc'] or '').strip();tel=str(cfg['emis_telefono'] or inst['telefono'] or '').strip();dire=str(cfg['emis_direccion'] or inst['direccion'] or '').strip()
-    falt=[n for n,v in [('Departamento código',dep_cod),('Departamento',dep_desc),('Ciudad código',ciu_cod),('Ciudad',ciu_desc),('Teléfono',tel)] if not v]
+    # V13.9.126: normalización geográfica oficial DNIT/SIFEN. Los códigos de SIFEN
+    # NO son los códigos distritales INE (ej. 14/1410). Para Nueva Esperanza,
+    # Canindeyú, el catálogo SIFEN usa Departamento=18, Distrito=238, Ciudad=4603.
+    _geo_name=lambda x: str(x or '').strip().upper().replace('Ú','U').replace('Í','I').replace('É','E').replace('Á','A').replace('Ó','O')
+    if 'CANINDEY' in _geo_name(dep_desc) and 'NUEVA ESPERANZA' in (_geo_name(dis_desc)+' '+_geo_name(ciu_desc)):
+        dep_cod,dep_desc='18','CANINDEYU'
+        dis_cod,dis_desc='238','NUEVA ESPERANZA'
+        ciu_cod,ciu_desc='4603','NUEVA ESPERANZA'
+    falt=[n for n,v in [('Departamento código',dep_cod),('Departamento',dep_desc),('Distrito código',dis_cod),('Distrito',dis_desc),('Ciudad código',ciu_cod),('Ciudad',ciu_desc),('Teléfono',tel)] if not v]
     if falt: raise ValueError('Datos obligatorios del emisor incompletos: '+', '.join(falt)+'. Complete Configuración → SIFEN → Datos del establecimiento emisor.')
     _sifen_xml_text(ge,'dRucEm',cfg['ruc'],NS);_sifen_xml_text(ge,'dDVEmi',cfg['dv'],NS);_sifen_xml_text(ge,'iTipCont',cfg['tipo_contribuyente'] or '2',NS);_sifen_xml_text(ge,'dNomEmi',(inst['razon_social'] if 'razon_social' in inst.keys() else inst['nombre']) or 'CENTRO MEDICO SANTA CLARA',NS);_sifen_xml_text(ge,'dNomFanEmi',(inst['nombre_fantasia'] if 'nombre_fantasia' in inst.keys() else inst['nombre']) or '',NS);_sifen_xml_text(ge,'dDirEmi',dire,NS);_sifen_xml_text(ge,'dNumCas','0',NS);_sifen_xml_text(ge,'cDepEmi',dep_cod,NS);_sifen_xml_text(ge,'dDesDepEmi',dep_desc,NS)
     if dis_cod:_sifen_xml_text(ge,'cDisEmi',dis_cod,NS)
