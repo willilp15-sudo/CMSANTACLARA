@@ -282,7 +282,9 @@ def tipos_cambio():
 @app.route('/terceros',methods=['GET','POST'])
 def terceros():
  c=db()
- if request.method=='POST':c.execute('insert into terceros(tipo,ruc,nombre,telefono,email,moneda) values(?,?,?,?,?,?)',(request.form['tipo'],request.form['ruc'],request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda']));c.commit();return redirect('/terceros')
+ if request.method=='POST':
+  vals=(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
+  c.execute('''insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',vals);c.commit();return redirect('/terceros')
  rows=c.execute('select * from terceros order by nombre').fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('thirdparties.html',rows=rows,mons=mons)
 def init_v1357_codigo_barras():
  c=db()
@@ -300,6 +302,28 @@ def init_v1357_codigo_barras():
   c.close()
 # La migración se ejecuta después de init(), junto con el resto de migraciones.
 
+def init_v13991_maestros_sifen():
+ c=db()
+ try:
+  # Datos fiscales/receptor SIFEN. Migración aditiva: no elimina ni transforma datos existentes.
+  tcols={r['name'] for r in c.execute('pragma table_info(terceros)').fetchall()}
+  for col,typ in [
+   ('sifen_naturaleza',"TEXT DEFAULT '1'"),('sifen_tipo_operacion',"TEXT DEFAULT '1'"),
+   ('sifen_tipo_contribuyente',"TEXT DEFAULT '2'"),('sifen_tipo_documento',"TEXT DEFAULT '1'"),
+   ('sifen_numero_documento','TEXT'),('sifen_pais',"TEXT DEFAULT 'PRY'"),('sifen_pais_desc',"TEXT DEFAULT 'Paraguay'"),
+   ('sifen_direccion','TEXT'),('sifen_numero_casa',"TEXT DEFAULT '0'"),
+   ('sifen_departamento_codigo','TEXT'),('sifen_departamento_desc','TEXT'),
+   ('sifen_distrito_codigo','TEXT'),('sifen_distrito_desc','TEXT'),
+   ('sifen_ciudad_codigo','TEXT'),('sifen_ciudad_desc','TEXT')]:
+   if col not in tcols:c.execute('alter table terceros add column '+col+' '+typ)
+  pcols={r['name'] for r in c.execute('pragma table_info(productos)').fetchall()}
+  for col,typ in [('sifen_unidad_codigo',"TEXT DEFAULT '77'"),('sifen_unidad_desc',"TEXT DEFAULT 'UNI'"),('sifen_descripcion','TEXT')]:
+   if col not in pcols:c.execute('alter table productos add column '+col+' '+typ)
+  c.execute("update terceros set sifen_numero_documento=coalesce(nullif(trim(sifen_numero_documento),''),ruc) where upper(coalesce(tipo,'')) in ('CLIENTE','AMBOS')")
+  c.execute("update productos set sifen_descripcion=coalesce(nullif(trim(sifen_descripcion),''),nullif(trim(nombre),''),'Servicio medico')")
+  c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.91-maestros-sifen',?)",(now(),))
+  c.commit()
+ finally:c.close()
 @app.route('/productos',methods=['GET','POST'])
 def productos():
  c=db()
@@ -307,7 +331,7 @@ def productos():
   try:
    cb=(request.form.get('codigo_barras') or '').strip() or None
    if cb and c.execute('select 1 from productos where codigo_barras=?',(cb,)).fetchone():raise ValueError('Código de barras ya registrado en otro producto.')
-   c.execute('insert into productos(codigo,codigo_barras,nombre,categoria,costo_pyg,precio_pyg,stock,stock_min,iva_pct,resumido,moneda,tipo_producto,presentacion,generico,laboratorio,distribuidora,droga,indicacion,posologia,tipo_controlado,especialidad,clasif_general,clasif_parcial,descripcion,vencimiento_control,lote_control,permitir_salida,activo) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria',''),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('resumido',''),request.form.get('moneda','PYG'),request.form.get('tipo_producto',''),request.form.get('presentacion',''),request.form.get('generico',''),request.form.get('laboratorio',''),request.form.get('distribuidora',''),request.form.get('droga',''),request.form.get('indicacion',''),request.form.get('posologia',''),request.form.get('tipo_controlado',''),request.form.get('especialidad',''),request.form.get('clasif_general',''),request.form.get('clasif_parcial',''),request.form.get('descripcion',''),1 if request.form.get('vencimiento_control') else 0,1 if request.form.get('lote_control') else 0,1 if request.form.get('permitir_salida') else 0,1));c.commit();flash('Producto registrado correctamente.')
+   c.execute('insert into productos(codigo,codigo_barras,nombre,categoria,costo_pyg,precio_pyg,stock,stock_min,iva_pct,resumido,moneda,tipo_producto,presentacion,generico,laboratorio,distribuidora,droga,indicacion,posologia,tipo_controlado,especialidad,clasif_general,clasif_parcial,descripcion,vencimiento_control,lote_control,permitir_salida,activo,sifen_descripcion,sifen_unidad_codigo,sifen_unidad_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria',''),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('resumido',''),request.form.get('moneda','PYG'),request.form.get('tipo_producto',''),request.form.get('presentacion',''),request.form.get('generico',''),request.form.get('laboratorio',''),request.form.get('distribuidora',''),request.form.get('droga',''),request.form.get('indicacion',''),request.form.get('posologia',''),request.form.get('tipo_controlado',''),request.form.get('especialidad',''),request.form.get('clasif_general',''),request.form.get('clasif_parcial',''),request.form.get('descripcion',''),1 if request.form.get('vencimiento_control') else 0,1 if request.form.get('lote_control') else 0,1 if request.form.get('permitir_salida') else 0,1,request.form.get('sifen_descripcion') or request.form['nombre'],request.form.get('sifen_unidad_codigo') or '77',request.form.get('sifen_unidad_desc') or 'UNI'));c.commit();flash('Producto registrado correctamente.')
   except Exception as e:c.rollback();flash('No se pudo registrar el producto: '+str(e))
   c.close();return redirect('/productos')
  rows=c.execute('select * from productos order by nombre').fetchall();c.close();return render_template('products.html',rows=rows)
@@ -2158,6 +2182,7 @@ def iniciar_backup_automatico():
 limpiar_backups_emergencia()
 preparar_actualizacion_segura()
 init()
+init_v13991_maestros_sifen()
 
 def sincronizar_clientes_pacientes(c):
  # En Santa Clara, CLIENTE y PACIENTE representan a la misma persona.
@@ -2228,7 +2253,7 @@ def producto_editar(rid):
     if request.method=='POST':
         cb=(request.form.get('codigo_barras') or '').strip() or None
         if cb and c.execute('select 1 from productos where codigo_barras=? and id<>?',(cb,rid)).fetchone():flash('Código de barras ya registrado en otro producto.');c.close();return redirect(f'/producto/{rid}/editar')
-        c.execute('update productos set codigo=?,codigo_barras=?,nombre=?,categoria=?,costo_pyg=?,precio_pyg=?,stock_min=?,iva_pct=?,tipo_producto=?,clasif_general=? where id=?',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria'),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('tipo_producto') or '',request.form.get('clasif_general') or '',rid));c.commit();c.close();audit('EDITAR_PRODUCTO',str(rid));return redirect('/productos')
+        c.execute('update productos set codigo=?,codigo_barras=?,nombre=?,categoria=?,costo_pyg=?,precio_pyg=?,stock_min=?,iva_pct=?,tipo_producto=?,clasif_general=?,sifen_descripcion=?,sifen_unidad_codigo=?,sifen_unidad_desc=? where id=?',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria'),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('tipo_producto') or '',request.form.get('clasif_general') or '',request.form.get('sifen_descripcion') or request.form['nombre'],request.form.get('sifen_unidad_codigo') or '77',request.form.get('sifen_unidad_desc') or 'UNI',rid));c.commit();c.close();audit('EDITAR_PRODUCTO',str(rid));return redirect('/productos')
     c.close();return render_template('edit_master.html',title='Modificar producto',record=r,kind='producto')
 @app.post('/producto/<int:rid>/eliminar')
 def producto_eliminar(rid):
@@ -2238,7 +2263,7 @@ def producto_eliminar(rid):
 def tercero_editar(rid):
     c=db();r=c.execute('select * from terceros where id=?',(rid,)).fetchone();mons=c.execute('select * from monedas').fetchall()
     if request.method=='POST':
-        c.execute('update terceros set tipo=?,ruc=?,nombre=?,telefono=?,email=?,moneda=? where id=?',(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],rid));c.commit();c.close();audit('EDITAR_TERCERO',str(rid));return redirect('/terceros')
+        c.execute('''update terceros set tipo=?,ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?''',(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),rid));c.commit();c.close();audit('EDITAR_TERCERO',str(rid));return redirect('/terceros')
     c.close();return render_template('edit_master.html',title='Modificar cliente/proveedor',record=r,kind='tercero',mons=mons)
 @app.post('/tercero/<int:rid>/eliminar')
 def tercero_eliminar(rid):
@@ -3802,19 +3827,19 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if not cfg:raise ValueError('Configuración SIFEN inexistente.')
     tipo=str(doc_tipo).upper()
     if tipo=='FE':
-        d=c.execute("select v.*,t.nombre receptor,t.ruc receptor_doc,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.id=?",(doc_id,)).fetchone()
+        d=c.execute("select v.*,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Factura no encontrada.')
-        items=c.execute("select vi.*,p.codigo,coalesce(p.nombre,vi.descripcion,'Servicio') descripcion from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(doc_id,)).fetchall()
+        items=c.execute("select vi.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(p.nombre),''),nullif(trim(vi.descripcion),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(doc_id,)).fetchall()
         ide=1;des='Factura electrónica';fecha=d['fecha'];numero=d['numero'];asoc=None
     elif tipo=='NCE':
-        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,v.sifen_punto_id,p.timbrado punto_timbrado from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
+        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Nota de Crédito no encontrada.')
-        items=c.execute("select i.*,p.codigo,coalesce(i.descripcion,p.nombre,'Ítem') descripcion from nota_credito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(doc_id,)).fetchall()
+        items=c.execute("select i.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(i.descripcion),''),nullif(trim(p.nombre),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from nota_credito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(doc_id,)).fetchall()
         ide=5;des='Nota de crédito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
     elif tipo=='NDE':
-        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,v.sifen_punto_id,p.timbrado punto_timbrado from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
+        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Nota de Débito no encontrada.')
-        items=c.execute("select * from nota_debito_venta_items where nota_id=? order by id",(doc_id,)).fetchall()
+        items=c.execute("select i.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(i.descripcion),''),nullif(trim(p.nombre),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from nota_debito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(doc_id,)).fetchall()
         ide=6;des='Nota de débito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
     else:raise ValueError('Tipo de DE no soportado.')
     est,pun,num=_sifen_numero_partes(numero)
@@ -3838,10 +3863,18 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if dis_cod:_sifen_xml_text(ge,'cDisEmi',dis_cod,NS)
     if dis_desc:_sifen_xml_text(ge,'dDesDisEmi',dis_desc,NS)
     _sifen_xml_text(ge,'cCiuEmi',ciu_cod,NS);_sifen_xml_text(ge,'dDesCiuEmi',ciu_desc,NS);_sifen_xml_text(ge,'dTelEmi',tel,NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
-    gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str(d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
-    _sifen_xml_text(gr,'iNatRec','1',NS);_sifen_xml_text(gr,'iTiOpe','1',NS);_sifen_xml_text(gr,'cPaisRec','PRY',NS);_sifen_xml_text(gr,'dDesPaisRe','Paraguay',NS);_sifen_xml_text(gr,'iTiContRec','2',NS)
-    if rruc.isdigit() and rdv.isdigit() and len(rdv)==1:_sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
-    _sifen_xml_text(gr,'dNomRec',d['receptor'] or 'SIN NOMBRE',NS);_sifen_xml_text(gr,'dCodCliente',str(d['cliente_id'] if 'cliente_id' in d.keys() else doc_id),NS)
+    gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
+    nat=str(d['sifen_naturaleza'] or '1') if 'sifen_naturaleza' in d.keys() else '1';tiop=str(d['sifen_tipo_operacion'] or '1') if 'sifen_tipo_operacion' in d.keys() else '1';pais=str(d['sifen_pais'] or 'PRY') if 'sifen_pais' in d.keys() else 'PRY';paisd=str(d['sifen_pais_desc'] or 'Paraguay') if 'sifen_pais_desc' in d.keys() else 'Paraguay'
+    _sifen_xml_text(gr,'iNatRec',nat,NS);_sifen_xml_text(gr,'iTiOpe',tiop,NS);_sifen_xml_text(gr,'cPaisRec',pais,NS);_sifen_xml_text(gr,'dDesPaisRe',paisd,NS)
+    if nat=='1':
+        _sifen_xml_text(gr,'iTiContRec',str(d['sifen_tipo_contribuyente'] or '2') if 'sifen_tipo_contribuyente' in d.keys() else '2',NS)
+        if rruc.isdigit() and rdv.isdigit() and len(rdv)==1:_sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
+    else:
+        _sifen_xml_text(gr,'iTipIDRec',str(d['sifen_tipo_documento'] or '1') if 'sifen_tipo_documento' in d.keys() else '1',NS);_sifen_xml_text(gr,'dDTipIDRec','Cédula paraguaya',NS);_sifen_xml_text(gr,'dNumIDRec',rdoc,NS)
+    _sifen_xml_text(gr,'dNomRec',d['receptor'] or 'SIN NOMBRE',NS);_sifen_xml_text(gr,'dDirRec',(d['sifen_direccion'] if 'sifen_direccion' in d.keys() else '') or '',NS);_sifen_xml_text(gr,'dNumCasRec',(d['sifen_numero_casa'] if 'sifen_numero_casa' in d.keys() else '') or '0',NS)
+    for tag,key in [('cDepRec','sifen_departamento_codigo'),('dDesDepRec','sifen_departamento_desc'),('cDisRec','sifen_distrito_codigo'),('dDesDisRec','sifen_distrito_desc'),('cCiuRec','sifen_ciudad_codigo'),('dDesCiuRec','sifen_ciudad_desc'),('dTelRec','receptor_tel'),('dEmailRec','receptor_email')]:
+        if key in d.keys() and d[key]:_sifen_xml_text(gr,tag,d[key],NS)
+    _sifen_xml_text(gr,'dCodCliente',str(d['cliente_id'] if 'cliente_id' in d.keys() else doc_id),NS)
     gd=etree.SubElement(de,'{%s}gDtipDE'%NS)
     if tipo=='FE':
         gf=etree.SubElement(gd,'{%s}gCamFE'%NS);_sifen_xml_text(gf,'iIndPres','1',NS);_sifen_xml_text(gf,'dDesIndPres','Operación presencial',NS)
@@ -3854,8 +3887,9 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     for ix,it in enumerate(items,1):
         gi=etree.SubElement(gd,'{%s}gCamItem'%NS)
         _sifen_xml_text(gi,'dCodInt',it['codigo'] if 'codigo' in it.keys() and it['codigo'] else str(ix),NS)
-        _sifen_xml_text(gi,'dDesProSer',it['descripcion'] if 'descripcion' in it.keys() else 'Ítem',NS)
-        _sifen_xml_text(gi,'cUniMed','77',NS);_sifen_xml_text(gi,'dDesUniMed','UNI',NS)
+        desc_item=(str(it['descripcion'] or '').strip() if 'descripcion' in it.keys() else '') or 'Servicio medico'
+        _sifen_xml_text(gi,'dDesProSer',desc_item[:120],NS)
+        _sifen_xml_text(gi,'cUniMed',(it['sifen_unidad_codigo'] if 'sifen_unidad_codigo' in it.keys() else None) or '77',NS);_sifen_xml_text(gi,'dDesUniMed',(it['sifen_unidad_desc'] if 'sifen_unidad_desc' in it.keys() else None) or 'UNI',NS)
         q=float(it['cantidad'] or 1);precio=float(it['precio'] or 0);line=float(it['total'] or q*precio);pct=float(it['iva_pct'] or 0)
         _sifen_xml_text(gi,'dCantProSer',('%0.4f'%q).rstrip('0').rstrip('.'),NS)
         gv=etree.SubElement(gi,'{%s}gValorItem'%NS)
@@ -3911,25 +3945,51 @@ def _sifen_validar_xsd_v150(xml_bytes):
           ('s:DE','DE'),('s:DE/s:gOpeDE','gOpeDE'),('s:DE/s:gTimb','gTimb'),
           ('s:DE/s:gDatGralOpe/s:gEmis','gEmis'),('s:DE/s:gDatGralOpe/s:gDatRec','gDatRec'),
           ('s:DE/s:gDtipDE','gDtipDE'),('s:DE/s:gDtipDE/s:gCamItem','gCamItem'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:dCodInt','gCamItem/dCodInt'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:dDesProSer','gCamItem/dDesProSer'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:cUniMed','gCamItem/cUniMed'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:dDesUniMed','gCamItem/dDesUniMed'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:dCantProSer','gCamItem/dCantProSer'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:dPUniProSer','gValorItem/dPUniProSer'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:dTotBruOpeItem','gValorItem/dTotBruOpeItem'),
           ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:gValorRestaItem/s:dTotOpeItem','gValorRestaItem/dTotOpeItem'),
           ('s:DE/s:gDtipDE/s:gCamItem/s:gCamIVA/s:dBasExe','gCamIVA/dBasExe'),
           ('s:DE/s:gTotSub/s:dTotOpe','gTotSub/dTotOpe'),('s:DE/s:gTotSub/s:dTotGralOpe','gTotSub/dTotGralOpe')]:
             if not root.xpath(xp,namespaces=ns): falt.append(nombre)
         if falt: return False,['Prevalidación V150: faltan grupos/campos: '+', '.join(falt)]
+        for i,item in enumerate(root.xpath('.//s:gCamItem',namespaces=ns),1):
+            for tag in ('dCodInt','dDesProSer','cUniMed','dDesUniMed','dCantProSer'):
+                e=item.find('{http://ekuatia.set.gov.py/sifen/xsd}'+tag)
+                if e is None or not (e.text or '').strip():
+                    return False,['Prevalidación V150: ítem %s con campo obligatorio vacío/faltante: %s.'%(i,tag)]
     except Exception as e:
         return False,['XML V150 no pudo analizarse: '+str(e)]
+    # V13.9.91: validar el XML ORIGINAL directamente contra los XSD incluidos
+    # por pysifen. Evita el ciclo parsear->dataclass->serializar que estaba
+    # provocando falsos 'missing required keyword-only argument' aun cuando la
+    # etiqueta (p.ej. dDesProSer) sí existía en el XML generado.
     try:
-        from pysifen.de.bindings.de_v150.de_v150 import RDe
+        import os, pysifen
+        from lxml import etree
+        schema_dir=os.path.join(os.path.dirname(os.path.abspath(pysifen.__file__)),'de','schemas','v150')
+        preferidos=['siRecepDE_v150.xsd','DE_v150.xsd']
+        archivos=[]
+        for n in preferidos:
+            q=os.path.join(schema_dir,n)
+            if os.path.exists(q):archivos.append(q)
+        archivos += [os.path.join(schema_dir,n) for n in os.listdir(schema_dir) if n.endswith('.xsd') and os.path.join(schema_dir,n) not in archivos]
+        if not archivos:return False,['No se encontraron los XSD V150 instalados con el motor SIFEN.']
+        doc=etree.fromstring(raw);ult=[]
+        for sp in archivos:
+            try:
+                schema=etree.XMLSchema(etree.parse(sp));schema.assertValid(doc);return True,[]
+            except etree.DocumentInvalid as e:
+                ult=[str(x) for x in e.error_log]
+            except Exception:
+                continue
+        return False,ult or ['El XML no pudo validarse contra los XSD V150 instalados.']
     except Exception as e:
-        return False,['Motor XSD V150 no instalado: '+str(e)]
-    try:
-        xml_text=xml_bytes.decode('utf-8') if isinstance(xml_bytes,bytes) else str(xml_bytes)
-        rde=RDe.from_xml(xml_text)
-        errores=rde.validate_xml() or []
-        mensajes=[str(e) for e in errores]
-        return len(mensajes)==0,mensajes
-    except Exception as e:
-        return False,['XML V150 inválido: '+str(e)]
+        return False,['Validación XSD V150 no disponible: '+str(e)]
 
 def _sifen_guardar_xml_test(tipo,doc_id,xml,cdc):
     p=Path(_sifen_dir())/'xml_test';p.mkdir(parents=True,exist_ok=True)
@@ -4270,7 +4330,7 @@ def nota_debito_venta_pdf(nid):
     from reportlab.platypus import Paragraph,Spacer,Table,TableStyle
     c=db();n=c.execute("select n.*,v.numero factura,v.cdc factura_cdc,t.nombre cliente,t.ruc from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where n.id=?",(nid,)).fetchone()
     if not n:c.close();return ('Nota de Débito no encontrada',404)
-    items=c.execute("select * from nota_debito_venta_items where nota_id=? order by id",(nid,)).fetchall();inst=c.execute('select * from institucion_config where id=1').fetchone();c.close()
+    items=c.execute("select i.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(i.descripcion),''),nullif(trim(p.nombre),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from nota_debito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(nid,)).fetchall();inst=c.execute('select * from institucion_config where id=1').fetchone();c.close()
     st=getSampleStyleSheet();small=ParagraphStyle('NDItem',parent=st['Normal'],fontSize=7,leading=9);story=[]
     _kude_header(story,inst,'NOTA DE DÉBITO',n['numero'],'Documento de prueba SIFEN')
     info=[[Paragraph('<b>Cliente:</b> '+str(n['cliente'] or '-'),st['Normal']),Paragraph('<b>RUC/CI:</b> '+str(n['ruc'] or '-'),st['Normal'])],[Paragraph('<b>Fecha:</b> '+str(n['fecha']),st['Normal']),Paragraph('<b>Factura relacionada:</b> '+str(n['factura'] or '-'),st['Normal'])],[Paragraph('<b>Motivo:</b> '+str(n['motivo'] or '-'),st['Normal']),Paragraph('<b>Estado SIFEN:</b> '+str(n['estado_sifen'] or '-'),st['Normal'])]]
