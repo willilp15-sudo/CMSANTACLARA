@@ -4610,9 +4610,23 @@ def _sifen_enviar_lote(xml_firmado,cfg,timeout=35):
     schema_loc=(rde.get('{%s}schemaLocation'%XSI) or '').strip()
     if not schema_loc or 'siRecepDE_v150.xsd' not in schema_loc:
         rde.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
-    # Schema XML 5A: rLoteDE contiene de 1 a 50 rDE firmados del mismo tipo.
-    lote=etree.Element('{%s}rLoteDE'%NS,nsmap={None:NS}); lote.append(rde)
+    # V13.9.121: en el archivo comprimido el CONTENEDOR rLoteDE NO lleva
+    # el namespace SIFEN como namespace por defecto. Cada rDE debe conservar
+    # individualmente su declaración xmlns, tal como exige la guía DNIT para
+    # envíos por lote. Si rLoteDE hereda xmlns=SIFEN, lxml elimina la
+    # declaración individual del rDE y SIFEN termina rechazándolo (0160:
+    # Cannot find the declaration of element 'rDE').
+    lote=etree.Element('rLoteDE')
+    lote.append(rde)
     lote_xml=etree.tostring(lote,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    # Guardia técnica: el lote debe ser raíz sin namespace y el rDE hijo debe
+    # seguir perteneciendo al namespace oficial SIFEN.
+    chk=etree.fromstring(lote_xml,parser)
+    if etree.QName(chk).localname!='rLoteDE' or etree.QName(chk).namespace:
+        raise ValueError('Lote SIFEN inválido: rLoteDE no debe heredar namespace.')
+    hijos=list(chk)
+    if not hijos or etree.QName(hijos[0]).localname!='rDE' or etree.QName(hijos[0]).namespace!=NS:
+        raise ValueError('Lote SIFEN inválido: rDE perdió su namespace individual.')
     # Manual Técnico V150: xDE es un archivo .zip codificado Base64.
     mem=io.BytesIO()
     with zipfile.ZipFile(mem,'w',compression=zipfile.ZIP_DEFLATED) as z:z.writestr('lote.xml',lote_xml)
