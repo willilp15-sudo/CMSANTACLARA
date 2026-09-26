@@ -4396,6 +4396,24 @@ def _sifen_extraer_qr_rde(xml_bytes):
     root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else xml_bytes.encode('utf-8'))
     return (root.findtext('{%s}gCamFuFD/{%s}dCarQR'%(NS,NS)) or '').strip()
 
+def init_v139112_respuesta_sifen_detallada():
+    c=db(); cols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,ddl in [('respuesta_sifen','TEXT'),('sifen_http_status','INTEGER'),('sifen_fecha_respuesta','TEXT')]:
+        if col not in cols: c.execute(f'alter table ventas add column {col} {ddl}')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.112-respuesta-sifen-detallada',?)",(now(),))
+    c.commit();c.close()
+init_v139112_respuesta_sifen_detallada()
+
+def _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr):
+    aprobado=estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
+    codigo=str(parsed.get('codigo') or parsed.get('codigo_lote') or '')
+    mensaje=str(parsed.get('mensaje') or parsed.get('mensaje_lote') or '')
+    raw=(resp.decode('utf-8','replace') if isinstance(resp,(bytes,bytearray)) else str(resp or ''))
+    sql="""update ventas set cdc=?,qr_sifen=?,estado_sifen=?,protocolo_sifen=?,fecha_aprobacion_sifen=?,
+             sifen_codigo_error=?,sifen_mensaje_error=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1,
+             respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=? where id=?"""
+    c.execute(sql,(cdc,qr,estado,parsed.get('protocolo',''),now() if aprobado else None,codigo,mensaje,now(),raw[:50000],status,parsed.get('fecha_proceso') or now(),venta_id))
+
 def _sifen_emitir_factura_automatico(venta_id):
     """Proceso único de emisión FE: CDC -> XML -> firma -> QR -> XSD -> SIFEN (PROD).
     En TEST realiza todo salvo la transmisión fiscal. Devuelve el estado final.
@@ -4418,7 +4436,7 @@ def _sifen_emitir_factura_automatico(venta_id):
             status,resp,url=_sifen_enviar_sync(firmado,cfg)
             parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
             aprobado=estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
-            c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=?,protocolo_sifen=?,fecha_aprobacion_sifen=? where id=?',(cdc,qr,estado,parsed.get('protocolo',''),now() if aprobado else None,venta_id))
+            _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr)
             c.execute('update sifen_config set ultimo_envio_prod=?,ultimo_envio_prod_estado=?,actualizado_en=? where id=1',(now(),estado,now()))
             c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA',estado,f'Factura {venta_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")}'))
         else:
@@ -4471,7 +4489,7 @@ def sifen_enviar_factura(venta_id):
         qr=_sifen_extraer_qr_rde(firmado); _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
         status,resp,url=_sifen_enviar_sync(firmado,cfg)
         parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
-        c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=?,protocolo_sifen=?,fecha_aprobacion_sifen=? where id=?',(cdc,qr,estado,parsed.get('protocolo',''),now() if estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA') else None,venta_id))
+        _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr)
         c.execute('update sifen_config set ultimo_envio_prod=?,ultimo_envio_prod_estado=?,actualizado_en=? where id=1',(now(),estado,now()))
         c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_ENVIO_PRODUCCION',estado,f'Factura {venta_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")}'))
         c.commit()
@@ -4481,6 +4499,12 @@ def sifen_enviar_factura(venta_id):
         c.rollback(); _sifen_log('FE_ENVIO_PRODUCCION','ERROR',f'Factura {venta_id}: {ex}'); flash('Factura NO enviada/aprobada: '+str(ex))
     finally: c.close()
     return redirect(f'/ventas/{venta_id}/factura')
+
+@app.get('/ventas/<int:venta_id>/sifen/detalle')
+def sifen_detalle_factura(venta_id):
+    c=db(); v=c.execute("select v.*,t.nombre cliente,t.ruc cliente_ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(venta_id,)).fetchone(); c.close()
+    if not v:return ('Factura no encontrada',404)
+    return render_template('sifen_invoice_detail.html',v=v)
 
 @app.get('/ventas/<int:venta_id>/sifen/qr.svg')
 def sifen_qr_factura_svg(venta_id):
