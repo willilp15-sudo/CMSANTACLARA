@@ -4123,7 +4123,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
             estado='TEST_GENERADO' if str(cfg['ambiente'] or '').upper()=='TEST' else 'NO_ENVIADO'
             c.execute("update ventas set cdc=?,codigo_seguridad_sifen=?,cdc_ambiente=?,estado_sifen=? where id=?",(cdc,cod_seg,str(cfg['ambiente'] or '').upper(),estado,doc_id))
     root=etree.Element('{%s}rDE'%NS,nsmap={None:NS,'xsi':XSI})
-    root.set('{%s}schemaLocation'%XSI,NS+' DE_v150.xsd')
+    root.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
     _sifen_xml_text(root,'dVerFor','150',NS)
     de=etree.SubElement(root,'{%s}DE'%NS);de.set('Id',cdc)
     _sifen_xml_text(de,'dDVId',cdc[-1],NS);_sifen_xml_text(de,'dFecFirma',datetime.datetime.now().replace(microsecond=0).isoformat(),NS);_sifen_xml_text(de,'dSisFact','1',NS)
@@ -4147,7 +4147,14 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         act_cod=str(act['codigo'] or '').strip(); act_desc=str(act['descripcion'] or '').strip()
         if not act_cod or not act_desc: continue
         gact=etree.SubElement(ge,'{%s}gActEco'%NS);_sifen_xml_text(gact,'cActEco',act_cod,NS);_sifen_xml_text(gact,'dDesActEco',act_desc,NS)
-    gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
+    gr=etree.SubElement(gg,'{%s}gDatRec'%NS)
+    # V13.9.116: para contribuyentes, el RUC/DV sale del RUC del Maestro de Clientes.
+    # sifen_numero_documento queda reservado al documento de identidad de no contribuyentes.
+    ruc_maestro=str(d['receptor_doc'] or '').strip()
+    doc_identidad=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or '').strip()
+    rdoc=ruc_maestro if str(d['sifen_naturaleza'] or '1')=='1' else (doc_identidad or ruc_maestro)
+    rruc=ruc_maestro.split('-')[0].strip() if '-' in ruc_maestro else ruc_maestro
+    rdv=ruc_maestro.split('-')[-1].strip() if '-' in ruc_maestro else ''
     nat=str(d['sifen_naturaleza'] or '1') if 'sifen_naturaleza' in d.keys() else '1';tiop=str(d['sifen_tipo_operacion'] or '1') if 'sifen_tipo_operacion' in d.keys() else '1';pais=str(d['sifen_pais'] or 'PRY') if 'sifen_pais' in d.keys() else 'PRY';paisd=str(d['sifen_pais_desc'] or 'Paraguay') if 'sifen_pais_desc' in d.keys() else 'Paraguay'
     # V13.9.93: prevención del rechazo SIFEN 1300 (naturaleza/tipo de operación).
     if nat=='1' and tiop not in ('1','3'):
@@ -4159,18 +4166,42 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     _sifen_xml_text(gr,'iNatRec',nat,NS);_sifen_xml_text(gr,'iTiOpe',tiop,NS);_sifen_xml_text(gr,'cPaisRec',pais,NS);_sifen_xml_text(gr,'dDesPaisRe',paisd,NS)
     if nat=='1':
         _sifen_xml_text(gr,'iTiContRec',str(d['sifen_tipo_contribuyente'] or '2') if 'sifen_tipo_contribuyente' in d.keys() else '2',NS)
-        if rruc.isdigit() and rdv.isdigit() and len(rdv)==1:_sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
+        if not (rruc.isdigit() and rdv.isdigit() and len(rdv)==1):
+            raise ValueError('Cliente contribuyente sin RUC-DV válido. Complete el Maestro de Clientes con formato RUC-DV antes de emitir el DE.')
+        _sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
     else:
         _sifen_xml_text(gr,'iTipIDRec',str(d['sifen_tipo_documento'] or '1') if 'sifen_tipo_documento' in d.keys() else '1',NS);_sifen_xml_text(gr,'dDTipIDRec','Cédula paraguaya',NS);_sifen_xml_text(gr,'dNumIDRec',rdoc,NS)
     _sifen_xml_text(gr,'dNomRec',d['receptor'] or 'SIN NOMBRE',NS);_sifen_xml_text(gr,'dDirRec',(d['sifen_direccion'] if 'sifen_direccion' in d.keys() else '') or '',NS);_sifen_xml_text(gr,'dNumCasRec',(d['sifen_numero_casa'] if 'sifen_numero_casa' in d.keys() else '') or '0',NS)
     for tag,key in [('cDepRec','sifen_departamento_codigo'),('dDesDepRec','sifen_departamento_desc'),('cDisRec','sifen_distrito_codigo'),('dDesDisRec','sifen_distrito_desc'),('cCiuRec','sifen_ciudad_codigo'),('dDesCiuRec','sifen_ciudad_desc'),('dTelRec','receptor_tel'),('dEmailRec','receptor_email')]:
         if key in d.keys() and d[key]:_sifen_xml_text(gr,tag,d[key],NS)
-    _sifen_xml_text(gr,'dCodCliente',str(d['cliente_id'] if 'cliente_id' in d.keys() else doc_id),NS)
+    _sifen_xml_text(gr,'dCodCliente','CLI'+str(d['cliente_id'] if 'cliente_id' in d.keys() else doc_id).zfill(3),NS)
     gd=etree.SubElement(de,'{%s}gDtipDE'%NS)
     if tipo=='FE':
         gf=etree.SubElement(gd,'{%s}gCamFE'%NS);_sifen_xml_text(gf,'iIndPres','1',NS);_sifen_xml_text(gf,'dDesIndPres','Operación presencial',NS)
     else:
         gn=etree.SubElement(gd,'{%s}gCamNCDE'%NS);_sifen_xml_text(gn,'iMotEmi','1',NS);_sifen_xml_text(gn,'dDesMotEmi','Devolución y ajuste de precios' if tipo=='NCE' else 'Ajuste de precios',NS)
+    # V13.9.116: condición de operación tomada del modelo real de factura.
+    # Para FE, gCamCond es obligatorio: contado incluye la forma/monto de pago;
+    # crédito informa la condición y deja al XSD validar los grupos crediticios aplicables.
+    if tipo=='FE':
+        condicion=str(d['condicion_venta'] or 'CONTADO').upper() if 'condicion_venta' in d.keys() else 'CONTADO'
+        gcond=etree.SubElement(gd,'{%s}gCamCond'%NS)
+        es_contado=(condicion=='CONTADO')
+        _sifen_xml_text(gcond,'iCondOpe','1' if es_contado else '2',NS)
+        _sifen_xml_text(gcond,'dDCondOpe','Contado' if es_contado else 'Crédito',NS)
+        if es_contado:
+            forma=str(d['forma_cobro'] or 'Efectivo').strip() if 'forma_cobro' in d.keys() else 'Efectivo'
+            mapa={'EFECTIVO':('1','Efectivo'),'CHEQUE':('2','Cheque'),'TARJETA DE CRÉDITO':('3','Tarjeta de crédito'),'TARJETA DE CREDITO':('3','Tarjeta de crédito'),'TARJETA DE DÉBITO':('4','Tarjeta de débito'),'TARJETA DE DEBITO':('4','Tarjeta de débito'),'TRANSFERENCIA':('5','Transferencia'),'BANCO':('5','Transferencia'),'POS':('4','Tarjeta de débito')}
+            codp,desp=mapa.get(forma.upper(),('1','Efectivo'))
+            gp=etree.SubElement(gcond,'{%s}gPaConEIni'%NS)
+            _sifen_xml_text(gp,'iTiPago',codp,NS);_sifen_xml_text(gp,'dDesTiPag',desp,NS)
+            _sifen_xml_text(gp,'dMonTiPag',str(round(float(d['total'] or 0),4)),NS)
+            mon=str(d['moneda'] or 'PYG') if 'moneda' in d.keys() else 'PYG'
+            _sifen_xml_text(gp,'cMoneTiPag',mon,NS);_sifen_xml_text(gp,'dDMoneTiPag','Guarani' if mon=='PYG' else mon,NS)
+            if mon!='PYG' and 'tipo_cambio' in d.keys() and d['tipo_cambio']:
+                _sifen_xml_text(gp,'dTiCamTiPag',str(round(float(d['tipo_cambio']),4)),NS)
+    if not items:
+        raise ValueError('La factura no tiene líneas en venta_items. SIFEN exige al menos un gCamItem. Abra/corrija el detalle de esta factura antes de transmitirla; el ERP no inventará productos ni servicios fiscales.')
     # V13.9.89: construcción integral de importes obligatorios V150.
     # TgValorItem exige un grupo gValorRestaItem real (no una etiqueta vacía) y
     # TgCamIVA exige dBasExe incluso cuando el ítem está gravado.
@@ -4258,10 +4289,7 @@ def _sifen_generar_factura_test_autocontenida(c):
 def _sifen_validar_xsd_v150(xml_bytes):
     """Valida un rDE V150 contra el esquema de recepción oficial.
 
-    V13.9.115: rDE pertenece al Schema XML 18 DE_v150.xsd.
-    El schema de recepción siRecepDE_v150.xsd corresponde al request del WS
-    y no debe anunciarse como schemaLocation del documento rDE. Esto evita
-    que el procesador intente resolver rDE contra un XSD que no lo declara.
+    V13.9.116: el rDE conserva el schemaLocation oficial siRecepDE_v150.xsd, como indica la guía DNIT. Para prevalidar el elemento raíz rDE se compila DE_v150.xsd (Schema XML 18) con sus includes/imports.
     """
     try:
         from lxml import etree
@@ -4306,13 +4334,13 @@ def _sifen_validar_xsd_v150(xml_bytes):
         # Buscar el paquete real de esquemas sin asumir una sola ruta interna
         dirs=[]
         for root_dir, subdirs, files in os.walk(base):
-            if 'siRecepDE_v150.xsd' in files:
+            if 'DE_v150.xsd' in files:
                 dirs.append(root_dir)
         if not dirs:
-            return False,['Motor SIFEN instalado, pero no contiene siRecepDE_v150.xsd. No se habilita Producción.']
+            return False,['Motor SIFEN instalado, pero no contiene DE_v150.xsd. No se habilita Producción.']
         errores=[]
         for schema_dir in dirs:
-            schema_path=os.path.join(schema_dir,'siRecepDE_v150.xsd')
+            schema_path=os.path.join(schema_dir,'DE_v150.xsd')
             try:
                 schema_doc=etree.parse(schema_path)
                 schema=etree.XMLSchema(schema_doc)
@@ -4324,7 +4352,7 @@ def _sifen_validar_xsd_v150(xml_bytes):
                 return False,[str(x) for x in e.error_log]
             except (etree.XMLSchemaParseError, etree.XMLSyntaxError, OSError) as e:
                 errores.append(os.path.basename(schema_path)+': '+str(e))
-        return False, errores or ['No fue posible compilar siRecepDE_v150.xsd con sus imports/includes.']
+        return False, errores or ['No fue posible compilar DE_v150.xsd con sus imports/includes.']
     except Exception as e:
         return False,['Validación XSD V150 no disponible: '+str(e)]
 
@@ -4577,12 +4605,11 @@ def _sifen_enviar_lote(xml_firmado,cfg,timeout=35):
     qn=etree.QName(rde)
     if qn.localname!='rDE' or qn.namespace!=NS:
         raise ValueError(f'El documento firmado para lote debe ser {{{NS}}}rDE; recibido {{{qn.namespace}}}{qn.localname}.')
-    # El rDE debe anunciar el XSD del Documento Electrónico (Schema XML 18),
-    # no el XSD del request de recepción. Conservamos el mismo XML/CDC firmado.
+    # V13.9.116: conservar el schemaLocation oficial del rDE indicado por DNIT.
     XSI='http://www.w3.org/2001/XMLSchema-instance'
     schema_loc=(rde.get('{%s}schemaLocation'%XSI) or '').strip()
-    if 'siRecepDE_v150.xsd' in schema_loc:
-        rde.set('{%s}schemaLocation'%XSI,NS+' DE_v150.xsd')
+    if not schema_loc or 'siRecepDE_v150.xsd' not in schema_loc:
+        rde.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
     # Schema XML 5A: rLoteDE contiene de 1 a 50 rDE firmados del mismo tipo.
     lote=etree.Element('{%s}rLoteDE'%NS,nsmap={None:NS}); lote.append(rde)
     lote_xml=etree.tostring(lote,encoding='UTF-8',xml_declaration=True,pretty_print=False)
@@ -5985,8 +6012,13 @@ def init_v13970_llamador():
 init_v13970_llamador()
 
 def _llamador_token_ok():
- esperado=(os.environ.get('LLAMADOR_TOKEN') or '').strip();recibido=(request.headers.get('X-Llamador-Token') or request.args.get('token') or '').strip()
- return bool(esperado) and secrets.compare_digest(esperado,recibido)
+ # Si LLAMADOR_TOKEN está configurado en Render, se exige coincidencia exacta.
+ # Si todavía no fue configurado, el llamador sigue operativo para no bloquear la sala de espera.
+ esperado=(os.environ.get('LLAMADOR_TOKEN') or '').strip()
+ recibido=(request.headers.get('X-Llamador-Token') or request.args.get('token') or '').strip()
+ if not esperado:
+  return True
+ return bool(recibido) and secrets.compare_digest(esperado,recibido)
 
 @app.get('/api/llamador/ping')
 def llamador_api_ping():
@@ -5998,8 +6030,14 @@ def llamador_api_ping():
 def llamador_api_pendientes():
  if not _llamador_token_ok():return jsonify(ok=False,error='Token de llamador inválido'),401
  dispositivo=(request.args.get('dispositivo') or 'LLAMADOR-PRINCIPAL').strip()[:80]
- c=db();r=c.execute("""select l.id,l.fecha_hora,l.texto,p.nombre paciente,m.nombre medico,m.consultorio_numero from llamados_pacientes l join agenda g on g.id=l.agenda_id join pacientes p on p.id=g.paciente_id join medicos m on m.id=l.medico_id where coalesce(l.estado,'PENDIENTE')='PENDIENTE' order by l.id limit 1""").fetchone()
- if r:c.execute("update llamados_pacientes set estado='ENTREGADO',dispositivo=? where id=? and coalesce(estado,'PENDIENTE')='PENDIENTE'",(dispositivo,r['id']));c.commit()
+ c=db()
+ # Recupera también llamadas ENTREGADAS que no fueron confirmadas. Esto evita que una
+ # caída/cierre del monitor después de leer una llamada la deje perdida para siempre.
+ r=c.execute("""select l.id,l.fecha_hora,l.texto,p.nombre paciente,m.nombre medico,m.consultorio_numero
+ from llamados_pacientes l join agenda g on g.id=l.agenda_id join pacientes p on p.id=g.paciente_id join medicos m on m.id=l.medico_id
+ where coalesce(l.estado,'PENDIENTE') in ('PENDIENTE','ENTREGADO') order by l.id limit 1""").fetchone()
+ if r:
+  c.execute("update llamados_pacientes set estado='ENTREGADO',dispositivo=? where id=?",(dispositivo,r['id']));c.commit()
  c.close();return jsonify(ok=True,llamada=dict(r) if r else None)
 
 @app.post('/api/llamador/<int:lid>/confirmar')

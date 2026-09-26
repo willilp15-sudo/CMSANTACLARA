@@ -5,16 +5,17 @@ try:
  import pyttsx3
 except Exception:
  pyttsx3=None
-CONFIG='llamador_config.json'
+BASE_DIR=os.path.dirname(os.path.abspath(__file__))
+CONFIG=os.path.join(BASE_DIR,'llamador_config.json')
 DEFAULT={"url":"https://santa-clara-erp.onrender.com","token":"CAMBIAR_TOKEN","dispositivo":"LLAMADOR-PRINCIPAL","sector":"Sala de espera","intervalo":3}
 if not os.path.exists(CONFIG):
  open(CONFIG,'w',encoding='utf-8').write(json.dumps(DEFAULT,indent=2,ensure_ascii=False))
 cfg=json.load(open(CONFIG,encoding='utf-8'))
 root=tk.Tk();root.title('Llamador Santa Clara');root.attributes('-fullscreen',True);root.configure(bg='white')
 head=tk.Label(root,text='CENTRO MÉDICO SANTA CLARA',font=('Arial',28,'bold'),bg='white');head.pack(pady=30)
-patient=tk.Label(root,text='Esperando llamada...',font=('Arial',42,'bold'),bg='white',wraplength=1200);patient.pack(pady=40)
+patient=tk.Label(root,text='LLAMADA EN ESPERA',font=('Arial',42,'bold'),bg='white',wraplength=1200);patient.pack(pady=40)
 detail=tk.Label(root,text=cfg.get('sector','Sala de espera'),font=('Arial',28),bg='white',wraplength=1200);detail.pack(pady=20)
-status=tk.Label(root,text='Conectando...',font=('Arial',14),bg='white');status.pack(side='bottom',pady=20)
+status=tk.Label(root,text='Conectando con el ERP...',font=('Arial',14),bg='white');status.pack(side='bottom',pady=20)
 root.bind('<Escape>',lambda e: root.attributes('-fullscreen',False))
 engine=pyttsx3.init() if pyttsx3 else None
 
@@ -38,8 +39,8 @@ def ui_call(x):
 def worker():
  while True:
   try:
-   q=urlencode({'dispositivo':cfg['dispositivo'],'sector':cfg.get('sector','Sala de espera')});call('/api/llamador/ping?'+q);r=call('/api/llamador/pendientes?'+urlencode({'dispositivo':cfg['dispositivo']}));root.after(0,lambda:status.config(text='Conectado · '+cfg['dispositivo']))
+   q=urlencode({'dispositivo':cfg['dispositivo'],'sector':cfg.get('sector','Sala de espera')});call('/api/llamador/ping?'+q);r=call('/api/llamador/pendientes?'+urlencode({'dispositivo':cfg['dispositivo']}));root.after(0,lambda:status.config(text='CONECTADO AL ERP · '+cfg['dispositivo']))
    if r.get('llamada'):root.after(0,ui_call,r['llamada'])
-  except Exception as e:root.after(0,lambda e=e:status.config(text='Sin conexión: '+str(e)))
+  except Exception as e:root.after(0,lambda e=e:status.config(text='ERROR DE CONEXIÓN: '+str(e)))
   time.sleep(max(2,int(cfg.get('intervalo',3))))
 threading.Thread(target=worker,daemon=True).start();root.mainloop()
