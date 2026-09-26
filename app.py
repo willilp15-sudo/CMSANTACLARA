@@ -4334,34 +4334,31 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # En particular, dLiqTotIVA5/10 son IVA DEL REDONDEO (F036/F037), no el IVA normal;
     # dComi/dIVAComi sólo corresponden cuando existe comisión. No se crean nodos opcionales
     # artificiales en cero, evitando que el evaluador de reglas procese combinaciones inexistentes.
-    # V13.9.136: grupo F completo para máxima compatibilidad con el evaluador SIFEN.
-    # Los subtotales fiscales se informan siempre, incluso en cero.
-    _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS)
-    _sifen_xml_text(tots,'dSubExo',X(0),NS)
-    _sifen_xml_text(tots,'dSub5',X(sub5),NS)
-    _sifen_xml_text(tots,'dSub10',X(sub10),NS)
+    if sub_exe != 0: _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS)
+    if sub5 != 0: _sifen_xml_text(tots,'dSub5',X(sub5),NS)
+    if sub10 != 0: _sifen_xml_text(tots,'dSub10',X(sub10),NS)
     _sifen_xml_text(tots,'dTotOpe',X(total),NS);_sifen_xml_text(tots,'dTotDesc','0',NS)
     _sifen_xml_text(tots,'dTotDescGlotem','0',NS);_sifen_xml_text(tots,'dTotAntItem','0',NS);_sifen_xml_text(tots,'dTotAnt','0',NS)
     _sifen_xml_text(tots,'dPorcDescTotal','0',NS);_sifen_xml_text(tots,'dDescTotal','0',NS);_sifen_xml_text(tots,'dAnticipo','0',NS)
-    _sifen_xml_text(tots,'dRedon','0',NS)
-    _sifen_xml_text(tots,'dComi','0',NS)
-    _sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
+    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
     # V13.9.133: ORDEN XSD V150 ESTRICTO dentro de gTotSub.
     # El XSD usa xs:sequence: IVA5, IVA10, IVA de redondeo/comisión (si existen),
     # dTotIVA y SOLO DESPUÉS las bases gravadas. No intercalar dBaseGrav5 entre
     # dIVA5 y dTotIVA: SIFEN/XSD lo rechaza como SCHEMAV_ELEMENT_CONTENT.
-    # V13.9.136: completar el bloque de IVA/totales en el orden exacto del XSD.
-    # Esto combina las correcciones acumuladas (orden XSD, PYG y fórmulas) con
-    # presencia explícita de ceros para evitar evaluaciones nulas del motor de reglas.
-    _sifen_xml_text(tots,'dIVA5',X(iva5),NS)
-    _sifen_xml_text(tots,'dIVA10',X(iva10),NS)
-    _sifen_xml_text(tots,'dLiqTotIVA5',X(0),NS)
-    _sifen_xml_text(tots,'dLiqTotIVA10',X(0),NS)
-    _sifen_xml_text(tots,'dIVAComi',X(0),NS)
-    _sifen_xml_text(tots,'dTotIVA',X(iva5+iva10),NS)
-    _sifen_xml_text(tots,'dBaseGrav5',X(base5),NS)
-    _sifen_xml_text(tots,'dBaseGrav10',X(base10),NS)
-    _sifen_xml_text(tots,'dTBasGraIVA',X(base5+base10),NS)
+    if sub5 != 0:
+        _sifen_xml_text(tots,'dIVA5',X(iva5),NS)
+    if sub10 != 0:
+        _sifen_xml_text(tots,'dIVA10',X(iva10),NS)
+    # dLiqTotIVA5/dLiqTotIVA10: únicamente si dRedon != 0 (aquí redondeo=0).
+    # dIVAComi: únicamente si existe comisión (aquí no existe).
+    if sub5 != 0 or sub10 != 0:
+        _sifen_xml_text(tots,'dTotIVA',X(iva5+iva10),NS)
+    if sub5 != 0:
+        _sifen_xml_text(tots,'dBaseGrav5',X(base5),NS)
+    if sub10 != 0:
+        _sifen_xml_text(tots,'dBaseGrav10',X(base10),NS)
+    if sub5 != 0 or sub10 != 0:
+        _sifen_xml_text(tots,'dTBasGraIVA',X(base5+base10),NS)
     if asoc:
         ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
     xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
@@ -6021,6 +6018,53 @@ def sifen_consultar_lote_venta(venta_id):
     except Exception as ex:
         c.rollback();flash('No se pudo consultar el lote SIFEN: '+str(ex))
     finally:c.close()
+    return redirect(f'/ventas/{venta_id}/sifen/detalle')
+
+@app.post('/sifen/monitor/venta/<int:venta_id>/nuevo-cdc-test')
+def sifen_nuevo_cdc_test(venta_id):
+    """V13.9.137: crea un CDC NUEVO sólo en TEST después de un rechazo definitivo.
+
+    Motivo: DNIT permite reutilizar CDC de un DE rechazado, pero su FAQ vigente
+    condiciona esa reutilización a que no se modifique la estructura de datos del DE.
+    Las versiones 132-136 cambiaron estructura/cálculos manteniendo el mismo CDC;
+    por eso este comando corta esa historia y fuerza un DE TEST nuevo sin tocar
+    número, cliente, ítems ni importes comerciales.
+    """
+    import secrets
+    c=db()
+    try:
+        cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
+        if not v: return ('Factura no encontrada',404)
+        if not cfg or str(cfg['ambiente'] or '').upper()!='TEST':
+            flash('Por seguridad, Nuevo CDC sólo está habilitado en ambiente TEST. No se modificó la factura.')
+            return redirect(f'/ventas/{venta_id}/sifen/detalle')
+        estado=str(v['estado_sifen'] or '').upper()
+        if estado not in ('RECHAZADO','RECHAZADA'):
+            flash('Nuevo CDC TEST sólo se permite después de un rechazo definitivo de SIFEN.')
+            return redirect(f'/ventas/{venta_id}/sifen/detalle')
+        anterior=str(v['cdc'] or '')
+        cod_seg=str(secrets.randbelow(1000000000)).zfill(9)
+        base=_sifen_cdc_base(cfg,1,v['numero'],v['fecha'],cod_seg)
+        nuevo=base+str(_sifen_dv_mod11(base))
+        if nuevo==anterior:
+            cod_seg=str((int(cod_seg)+1)%1000000000).zfill(9)
+            base=_sifen_cdc_base(cfg,1,v['numero'],v['fecha'],cod_seg)
+            nuevo=base+str(_sifen_dv_mod11(base))
+        c.execute("""update ventas set cdc=?,codigo_seguridad_sifen=?,cdc_ambiente='TEST',
+                     estado_sifen='TEST_GENERADO',protocolo_sifen=null,qr_sifen=null,
+                     sifen_codigo_error=null,sifen_mensaje_error=null,respuesta_sifen=null,
+                     sifen_http_status=null,sifen_fecha_respuesta=null
+                     where id=?""",(nuevo,cod_seg,venta_id))
+        c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',
+                  (now(),'FE_NUEVO_CDC_TEST','TEST_GENERADO',
+                   f'Factura {venta_id} · CDC anterior {anterior} · CDC nuevo {nuevo} · regeneración posterior a cambio estructural'))
+        c.commit()
+        flash('CDC TEST regenerado. Ahora genere/prevalide el XML y realice UN solo envío. CDC nuevo: '+nuevo)
+    except Exception as ex:
+        c.rollback(); flash('No se pudo regenerar el CDC TEST: '+str(ex))
+    finally:
+        c.close()
     return redirect(f'/ventas/{venta_id}/sifen/detalle')
 
 @app.post('/sifen/monitor/venta/<int:venta_id>/reintentar')
