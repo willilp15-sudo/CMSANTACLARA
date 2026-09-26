@@ -3601,10 +3601,11 @@ SIFEN_XML_VERSION='150'
 
 def init_v13978_sifen_produccion():
     c=db(); cols={r['name'] for r in c.execute('pragma table_info(sifen_config)').fetchall()}
-    for col,ddl in [('timbrado_desde','TEXT'),('xml_version',"TEXT DEFAULT '150'"),('produccion_habilitada','INTEGER DEFAULT 0'),('produccion_activada_en','TEXT')]:
+    for col,ddl in [('timbrado_desde','TEXT'),('xml_version',"TEXT DEFAULT '150'"),('produccion_habilitada','INTEGER DEFAULT 0'),('produccion_activada_en','TEXT'),('emis_departamento_codigo','TEXT'),('emis_departamento_desc','TEXT'),('emis_distrito_codigo','TEXT'),('emis_distrito_desc','TEXT'),('emis_ciudad_codigo','TEXT'),('emis_ciudad_desc','TEXT'),('emis_telefono','TEXT'),('emis_direccion','TEXT')]:
         if col not in cols:c.execute(f'alter table sifen_config add column {col} {ddl}')
     c.execute("update sifen_config set xml_version='150' where xml_version is null or trim(xml_version)=''")
     c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.78-sifen-produccion-segura',?)",(now(),))
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.84-emisor-v150',?)",(now(),))
     c.commit();c.close()
 
 def _sifen_base(cfg):
@@ -3624,6 +3625,10 @@ def _sifen_diagnostico(c,cfg):
     add('Certificado digital',certok,'Instalado en almacenamiento persistente' if certok else 'No instalado o archivo no disponible')
     aut=[p for p in puntos if int(p['autorizado_dnit'] or 0)]
     add('Puntos autorizados',bool(aut),', '.join(str(p['establecimiento'])+'-'+str(p['punto_expedicion']) for p in aut) if aut else 'No hay puntos marcados como autorizados')
+    emis_req=[('Departamento',cfg['emis_departamento_codigo'],cfg['emis_departamento_desc']),('Ciudad',cfg['emis_ciudad_codigo'],cfg['emis_ciudad_desc'])]
+    emis_faltan=[n for n,cod,des in emis_req if not str(cod or '').strip() or not str(des or '').strip()]
+    if not str(cfg['emis_telefono'] or '').strip(): emis_faltan.append('Teléfono')
+    add('Datos emisor XML',not emis_faltan,'Configurados' if not emis_faltan else 'Falta: '+', '.join(emis_faltan))
     # V13.9.79: motor real de firma XMLDSig + transporte SOAP/mTLS instalado.
     try:
         import lxml.etree, signxml
@@ -3764,7 +3769,15 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     gt=etree.SubElement(de,'{%s}gTimb'%NS);_sifen_xml_text(gt,'iTiDE',ide,NS);_sifen_xml_text(gt,'dDesTiDE',des,NS);_sifen_xml_text(gt,'dNumTim',d['punto_timbrado'] or cfg['timbrado'],NS);_sifen_xml_text(gt,'dEst',est,NS);_sifen_xml_text(gt,'dPunExp',pun,NS);_sifen_xml_text(gt,'dNumDoc',num,NS);_sifen_xml_text(gt,'dFeIniT',cfg['timbrado_desde'],NS)
     gg=etree.SubElement(de,'{%s}gDatGralOpe'%NS);_sifen_xml_text(gg,'dFeEmiDE',str(fecha)[:10]+'T12:00:00',NS)
     gc=etree.SubElement(gg,'{%s}gOpeCom'%NS);_sifen_xml_text(gc,'iTipTra','2' if tipo!='FE' else '1',NS);_sifen_xml_text(gc,'dDesTipTra','Prestación de servicios',NS);_sifen_xml_text(gc,'iTImp','1',NS);_sifen_xml_text(gc,'dDesTImp','IVA',NS);_sifen_xml_text(gc,'cMoneOpe',d['moneda'] if 'moneda' in d.keys() and d['moneda'] else 'PYG',NS);_sifen_xml_text(gc,'dDesMoneOpe','Guarani',NS)
-    ge=etree.SubElement(gg,'{%s}gEmis'%NS);_sifen_xml_text(ge,'dRucEm',cfg['ruc'],NS);_sifen_xml_text(ge,'dDVEmi',cfg['dv'],NS);_sifen_xml_text(ge,'iTipCont',cfg['tipo_contribuyente'] or '2',NS);_sifen_xml_text(ge,'dNomEmi',(inst['razon_social'] if 'razon_social' in inst.keys() else inst['nombre']) or 'CENTRO MEDICO SANTA CLARA',NS);_sifen_xml_text(ge,'dNomFanEmi',(inst['nombre_fantasia'] if 'nombre_fantasia' in inst.keys() else inst['nombre']) or '',NS);_sifen_xml_text(ge,'dDirEmi',inst['direccion'] or '',NS);_sifen_xml_text(ge,'dNumCas','0',NS);_sifen_xml_text(ge,'dTelEmi',inst['telefono'] or '',NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
+    ge=etree.SubElement(gg,'{%s}gEmis'%NS)
+    # V13.9.84: TgEmis V150 exige ubicación y teléfono del emisor. Se toman de Configuración SIFEN; no se inventan códigos geográficos.
+    dep_cod=str(cfg['emis_departamento_codigo'] or '').strip();dep_desc=str(cfg['emis_departamento_desc'] or '').strip();dis_cod=str(cfg['emis_distrito_codigo'] or '').strip();dis_desc=str(cfg['emis_distrito_desc'] or '').strip();ciu_cod=str(cfg['emis_ciudad_codigo'] or '').strip();ciu_desc=str(cfg['emis_ciudad_desc'] or '').strip();tel=str(cfg['emis_telefono'] or inst['telefono'] or '').strip();dire=str(cfg['emis_direccion'] or inst['direccion'] or '').strip()
+    falt=[n for n,v in [('Departamento código',dep_cod),('Departamento',dep_desc),('Ciudad código',ciu_cod),('Ciudad',ciu_desc),('Teléfono',tel)] if not v]
+    if falt: raise ValueError('Datos obligatorios del emisor incompletos: '+', '.join(falt)+'. Complete Configuración → SIFEN → Datos del establecimiento emisor.')
+    _sifen_xml_text(ge,'dRucEm',cfg['ruc'],NS);_sifen_xml_text(ge,'dDVEmi',cfg['dv'],NS);_sifen_xml_text(ge,'iTipCont',cfg['tipo_contribuyente'] or '2',NS);_sifen_xml_text(ge,'dNomEmi',(inst['razon_social'] if 'razon_social' in inst.keys() else inst['nombre']) or 'CENTRO MEDICO SANTA CLARA',NS);_sifen_xml_text(ge,'dNomFanEmi',(inst['nombre_fantasia'] if 'nombre_fantasia' in inst.keys() else inst['nombre']) or '',NS);_sifen_xml_text(ge,'dDirEmi',dire,NS);_sifen_xml_text(ge,'dNumCas','0',NS);_sifen_xml_text(ge,'dDepEmi',dep_cod,NS);_sifen_xml_text(ge,'dDesDepEmi',dep_desc,NS)
+    if dis_cod:_sifen_xml_text(ge,'cDisEmi',dis_cod,NS)
+    if dis_desc:_sifen_xml_text(ge,'dDesDisEmi',dis_desc,NS)
+    _sifen_xml_text(ge,'cCiuEmi',ciu_cod,NS);_sifen_xml_text(ge,'dDesCiuEmi',ciu_desc,NS);_sifen_xml_text(ge,'dTelEmi',tel,NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
     gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str(d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
     _sifen_xml_text(gr,'iNatRec','1',NS);_sifen_xml_text(gr,'iTiOpe','1',NS);_sifen_xml_text(gr,'cPaisRec','PRY',NS);_sifen_xml_text(gr,'dDesPaisRe','Paraguay',NS);_sifen_xml_text(gr,'iTiContRec','2',NS)
     if rruc.isdigit() and rdv.isdigit() and len(rdv)==1:_sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
@@ -3947,7 +3960,8 @@ def configuracion_sifen():
         if accion=='guardar':
             vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
             tim_desde=request.form.get('timbrado_desde','').strip()
-            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',actualizado_en=? where id=1",(*vals,tim_desde,now()))
+            emis=[request.form.get(x,'').strip() for x in ('emis_departamento_codigo','emis_departamento_desc','emis_distrito_codigo','emis_distrito_desc','emis_ciudad_codigo','emis_ciudad_desc','emis_telefono','emis_direccion')]
+            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,now()))
             c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN actualizada');flash('Configuración SIFEN guardada. El ambiente no cambia automáticamente.')
         elif accion=='ambiente_test':
             c.execute("update sifen_config set ambiente='TEST',produccion_habilitada=0,actualizado_en=? where id=1",(now(),));c.commit();_sifen_log('AMBIENTE','OK','Ambiente cambiado a TEST');flash('SIFEN quedó en ambiente TEST.')

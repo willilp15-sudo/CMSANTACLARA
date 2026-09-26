@@ -6,6 +6,15 @@
 <label>RUC<input name="ruc" value="{{cfg.ruc or ''}}"></label><label>DV<input name="dv" value="{{cfg.dv or ''}}"></label>
 <label>Timbrado electrónico<input name="timbrado" value="{{cfg.timbrado or ''}}"></label><label>Inicio vigencia timbrado<input type="date" name="timbrado_desde" value="{{cfg.timbrado_desde or ''}}"></label><label>Tipo de contribuyente<select name="tipo_contribuyente"><option value="1" {% if cfg.tipo_contribuyente=='1' %}selected{% endif %}>1 · Persona Física</option><option value="2" {% if cfg.tipo_contribuyente!='1' %}selected{% endif %}>2 · Persona Jurídica</option></select></label><label>ID CSC<input name="csc_id" value="{{cfg.csc_id or ''}}"></label>
 <label style="grid-column:1/-1">CSC (secreto, según ambiente)<input type="password" name="csc" value="{{cfg.csc or ''}}" autocomplete="off"></label>
+<div style="grid-column:1/-1;margin-top:10px"><h3>Datos del establecimiento emisor · XML V150</h3><p><small>Ingrese los códigos y descripciones oficiales correspondientes al domicilio fiscal. El sistema no inventa códigos geográficos.</small></p></div>
+<label>Departamento · código<input name="emis_departamento_codigo" value="{{cfg.emis_departamento_codigo or ''}}" inputmode="numeric" required></label>
+<label>Departamento · descripción<input name="emis_departamento_desc" value="{{cfg.emis_departamento_desc or ''}}" required></label>
+<label>Distrito · código<input name="emis_distrito_codigo" value="{{cfg.emis_distrito_codigo or ''}}" inputmode="numeric"></label>
+<label>Distrito · descripción<input name="emis_distrito_desc" value="{{cfg.emis_distrito_desc or ''}}"></label>
+<label>Ciudad · código<input name="emis_ciudad_codigo" value="{{cfg.emis_ciudad_codigo or ''}}" inputmode="numeric" required></label>
+<label>Ciudad · descripción<input name="emis_ciudad_desc" value="{{cfg.emis_ciudad_desc or ''}}" required></label>
+<label>Teléfono emisor<input name="emis_telefono" value="{{cfg.emis_telefono or ''}}" required></label>
+<label>Dirección emisor<input name="emis_direccion" value="{{cfg.emis_direccion or ''}}"></label>
 </div><button>Guardar configuración</button></form>
 <div class="card" style="margin-top:14px"><h3>Ambiente SIFEN</h3><form method="post" style="display:inline"><input type="hidden" name="accion" value="ambiente_test"><button>🧪 Usar TEST</button></form> <form method="post" style="display:inline" onsubmit="return confirm('¿Intentar activar PRODUCCIÓN? El sistema bloqueará la activación si el diagnóstico técnico no está completo.')"><input type="hidden" name="accion" value="ambiente_produccion"><button>🔴 Activar PRODUCCIÓN</button></form><p><b>XML:</b> versión {{cfg.xml_version or '150'}}</p></div>
 <div class="card" style="margin-top:14px"><h3>Diagnóstico previo a Producción</h3><table><tr><th>Control</th><th>Estado</th><th>Detalle</th></tr>{% for d in diagnostico %}<tr><td>{{d.nombre}}</td><td>{% if d.ok %}✅ OK{% else %}❌ PENDIENTE{% endif %}</td><td>{{d.detalle}}</td></tr>{% endfor %}</table><p><b>Producción permanece bloqueada mientras exista un control pendiente.</b></p></div>
