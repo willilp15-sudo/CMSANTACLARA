@@ -1,0 +1,6 @@
+{% extends 'base.html' %}{% block title %}Proveedores{% endblock %}{% block content %}
+<h2>Proveedores</h2>
+<div class="toolbar"><input placeholder="🔍 Buscar proveedor..." oninput="filtrarTabla(this.value,'tablaProveedores')"><button type="button" onclick="document.getElementById('nuevoProveedor').scrollIntoView()">➕ Nuevo proveedor</button></div>
+<form method="post" class="card grid" id="nuevoProveedor"><label>RUC / Documento<input name="ruc"></label><label>Nombre / Razón social<input name="nombre" required></label><label>Teléfono<input name="telefono"></label><label>Email<input name="email" type="email"></label><label>Moneda habitual<select name="moneda">{% for m in mons %}<option>{{m.codigo}}</option>{% endfor %}</select></label><button>💾 Guardar proveedor</button></form>
+<div class="card table"><table id="tablaProveedores"><tr><th>RUC/Doc.</th><th>Proveedor</th><th>Teléfono</th><th>Email</th><th>Acciones</th></tr>{% for r in rows %}<tr><td>{{r.ruc or '-'}}</td><td>{{r.nombre}}</td><td>{{r.telefono or '-'}}</td><td>{{r.email or '-'}}</td><td><a class="btn small" href="/tercero/{{r.id}}/editar">✏️ Modificar</a><form method="post" action="/tercero/{{r.id}}/eliminar" style="display:inline" onsubmit="return confirm('¿Eliminar proveedor?')"><button class="danger small">🗑 Eliminar</button></form></td></tr>{% endfor %}</table></div>
+{% endblock %}

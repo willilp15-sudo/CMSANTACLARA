@@ -279,13 +279,25 @@ def tipos_cambio():
  c=db()
  if request.method=='POST':c.execute('insert into tipos_cambio(fecha,moneda,tipo,fuente) values(?,?,?,?) on conflict(fecha,moneda) do update set tipo=excluded.tipo,fuente=excluded.fuente',(request.form['fecha'],request.form['moneda'],float(request.form['tipo']),request.form.get('fuente','Manual')));c.commit();audit('TIPO_CAMBIO',request.form['moneda']);return redirect('/tipos-cambio')
  rows=c.execute('select * from tipos_cambio order by fecha desc,moneda').fetchall();mons=c.execute("select * from monedas where codigo<>'PYG'").fetchall();c.close();return render_template('exchange.html',rows=rows,mons=mons)
-@app.route('/terceros',methods=['GET','POST'])
-def terceros():
+@app.route('/proveedores',methods=['GET','POST'])
+def proveedores():
  c=db()
  if request.method=='POST':
-  vals=(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),request.form.get('sifen_barrio_codigo'),request.form.get('sifen_barrio_desc'))
-  c.execute('''insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc,sifen_barrio_codigo,sifen_barrio_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',vals);c.commit();return redirect('/terceros')
- rows=c.execute('select * from terceros order by nombre').fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('thirdparties.html',rows=rows,mons=mons)
+  vals=('PROVEEDOR',request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG')
+  c.execute('insert into terceros(tipo,ruc,nombre,telefono,email,moneda) values(?,?,?,?,?,?)',vals);c.commit();c.close();flash('Proveedor registrado correctamente.');return redirect('/proveedores')
+ rows=c.execute("select * from terceros where upper(coalesce(tipo,''))='PROVEEDOR' order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('providers.html',rows=rows,mons=mons)
+
+@app.route('/terceros',methods=['GET','POST'])
+def terceros():
+ # Compatibilidad con enlaces antiguos: el maestro Terceros deja de exponerse al usuario.
+ return redirect('/proveedores')
+
+@app.route('/clientes',methods=['GET','POST'])
+def clientes():
+ # CLIENTES es el único maestro visible de pacientes/clientes. La tabla pacientes se conserva
+ # internamente para historia clínica, admisiones y compatibilidad de relaciones existentes.
+ return pacientes()
+
 def init_v1357_codigo_barras():
  c=db()
  try:
@@ -904,7 +916,7 @@ def pacientes():
  c=db()
  sincronizar_clientes_pacientes(c)
  if request.method=='POST':
-  cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,'PYG')",(request.form['documento'],request.form['nombre'],request.form.get('telefono')));tid=cur.lastrowid;c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();return redirect('/pacientes')
+  cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,moneda) values('CLIENTE',?,?,?,'PYG')",(request.form['documento'],request.form['nombre'],request.form.get('telefono')));tid=cur.lastrowid;c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();return redirect('/clientes')
  rows=c.execute('select * from pacientes order by id desc').fetchall();c.close();return render_template('hospital_patients.html',rows=rows)
 @app.route('/config-sanatorio',methods=['GET','POST'])
 def config_sanatorio():
@@ -1209,15 +1221,15 @@ def anular_venta(i):
 def editar_paciente(i):
  c=db(); r=c.execute('select * from pacientes where id=?',(i,)).fetchone()
  if request.method=='POST':
-  antes=snapshot(r); vals=(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i); c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',vals); c.execute('update terceros set ruc=?,nombre=?,telefono=? where id=?',(request.form['documento'],request.form['nombre'],request.form.get('telefono'),r['tercero_id'])); despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone()); audit_change(c,'MODIFICAR','PACIENTES',i,antes,despues,request.form.get('motivo','Corrección')); c.commit(); c.close(); return redirect('/pacientes')
+  antes=snapshot(r); vals=(request.form['documento'],request.form['nombre'],request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i); c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',vals); c.execute('update terceros set ruc=?,nombre=?,telefono=? where id=?',(request.form['documento'],request.form['nombre'],request.form.get('telefono'),r['tercero_id'])); despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone()); audit_change(c,'MODIFICAR','PACIENTES',i,antes,despues,request.form.get('motivo','Corrección')); c.commit(); c.close(); return redirect('/clientes')
  c.close(); return render_template('edit_patient.html',r=r)
 
 @app.post('/eliminar-paciente/<int:i>')
 def eliminar_paciente(i):
  c=db(); r=c.execute('select * from pacientes where id=?',(i,)).fetchone(); n=c.execute('select count(*) from admisiones where paciente_id=?',(i,)).fetchone()[0]
- if n: flash('No se puede eliminar: el paciente tiene admisiones. Edite sus datos en su lugar.'); c.close(); return redirect('/pacientes')
+ if n: flash('No se puede eliminar: el paciente tiene admisiones. Edite sus datos en su lugar.'); c.close(); return redirect('/clientes')
  if r: audit_change(c,'ELIMINAR','PACIENTES',i,snapshot(r),{},request.form.get('motivo','Registro erróneo')); c.execute('delete from pacientes where id=?',(i,)); c.execute('delete from terceros where id=?',(r['tercero_id'],)); c.commit()
- c.close(); return redirect('/pacientes')
+ c.close(); return redirect('/clientes')
 
 @app.route('/auditoria-detallada')
 def auditoria_detallada():
@@ -1417,7 +1429,7 @@ def modular_guard():
  reglas={
   'tipos_cambio':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),
   'cotizaciones_dnit':('FINANZAS','EDITAR' if request.method=='POST' else 'VER'),'movimientos_financieros_manuales':('FINANZAS','CREAR' if request.method=='POST' else 'VER'),'diferencia_cambio':('CONTABILIDAD','CREAR' if request.method=='POST' else 'VER'),
-  'terceros':('FINANZAS','CREAR' if request.method=='POST' else 'VER'),
+  'terceros':('COMPRAS','VER'),'proveedores':('COMPRAS','CREAR' if request.method=='POST' else 'VER'),'clientes':('PACIENTES','CREAR' if request.method=='POST' else 'VER'),
   'tercero_editar':('FINANZAS','EDITAR'),'tercero_eliminar':('FINANZAS','ANULAR'),
   'productos':('STOCK','CREAR' if request.method=='POST' else 'VER'),
   'producto_editar':('STOCK','EDITAR'),'producto_eliminar':('STOCK','ANULAR'),
@@ -2277,18 +2289,18 @@ def producto_eliminar(rid):
 def tercero_editar(rid):
     c=db();r=c.execute('select * from terceros where id=?',(rid,)).fetchone();mons=c.execute('select * from monedas').fetchall()
     if request.method=='POST':
-        c.execute('''update terceros set tipo=?,ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?''',(request.form['tipo'],request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),rid));c.commit();c.close();audit('EDITAR_TERCERO',str(rid));return redirect('/terceros')
-    c.close();return render_template('edit_master.html',title='Modificar cliente/proveedor',record=r,kind='tercero',mons=mons)
+        c.execute('''update terceros set tipo=?,ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?''',('PROVEEDOR',request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),rid));c.commit();c.close();audit('EDITAR_TERCERO',str(rid));return redirect('/proveedores')
+    c.close();return render_template('edit_master.html',title='Modificar proveedor',record=r,kind='tercero',mons=mons)
 @app.post('/tercero/<int:rid>/eliminar')
 def tercero_eliminar(rid):
-    ok,msg=_safe_delete_master('terceros',rid,[('compras','proveedor_id'),('ventas','cliente_id'),('cxc','tercero_id'),('cxp','tercero_id'),('pacientes','tercero_id'),('aseguradoras','tercero_id'),('medicos','tercero_id')]);flash(msg);audit('ELIMINAR_TERCERO' if ok else 'BLOQUEO_ELIMINAR_TERCERO',str(rid));return redirect('/terceros')
+    ok,msg=_safe_delete_master('terceros',rid,[('compras','proveedor_id'),('ventas','cliente_id'),('cxc','tercero_id'),('cxp','tercero_id'),('pacientes','tercero_id'),('aseguradoras','tercero_id'),('medicos','tercero_id')]);flash(msg);audit('ELIMINAR_TERCERO' if ok else 'BLOQUEO_ELIMINAR_TERCERO',str(rid));return redirect('/proveedores')
 
 @app.route('/paciente/<int:rid>/eliminar',methods=['POST'])
 def paciente_eliminar(rid):
     c=db();p=c.execute('select * from pacientes where id=?',(rid,)).fetchone()
-    if c.execute('select 1 from admisiones where paciente_id=? limit 1',(rid,)).fetchone():flash('No se puede eliminar un paciente con admisiones o historia relacionada.');c.close();return redirect('/pacientes')
+    if c.execute('select 1 from admisiones where paciente_id=? limit 1',(rid,)).fetchone():flash('No se puede eliminar un paciente con admisiones o historia relacionada.');c.close();return redirect('/clientes')
     if p:c.execute('delete from pacientes where id=?',(rid,));c.execute('delete from terceros where id=?',(p['tercero_id'],));c.commit();audit('ELIMINAR_PACIENTE',str(rid))
-    c.close();return redirect('/pacientes')
+    c.close();return redirect('/clientes')
 
 @app.post('/transaccion/<string:kind>/<int:rid>/anular')
 def transaccion_anular(kind,rid):
@@ -3707,6 +3719,16 @@ def init_v13978_sifen_produccion():
     c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.84-emisor-v150',?)",(now(),))
     c.commit();c.close()
 
+def init_v13996_sifen_emisor_firma():
+    """Completa datos obligatorios del emisor V150 sin inventar información fiscal."""
+    c=db(); cols={r['name'] for r in c.execute('pragma table_info(sifen_config)').fetchall()}
+    for col,ddl in [('emis_actividad_codigo','TEXT'),('emis_actividad_desc','TEXT')]:
+        if col not in cols: c.execute(f'alter table sifen_config add column {col} {ddl}')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.96-sifen-emisor-firma',?)",(now(),))
+    c.commit();c.close()
+
+init_v13996_sifen_emisor_firma()
+
 def _sifen_base(cfg):
     return SIFEN_PROD_BASE if str(cfg['ambiente'] or '').upper()=='PRODUCCION' else SIFEN_TEST_BASE
 
@@ -3728,6 +3750,8 @@ def _sifen_diagnostico(c,cfg):
     emis_faltan=[n for n,cod,des in emis_req if not str(cod or '').strip() or not str(des or '').strip()]
     if not str(cfg['emis_telefono'] or '').strip(): emis_faltan.append('Teléfono')
     add('Datos emisor XML',not emis_faltan,'Configurados' if not emis_faltan else 'Falta: '+', '.join(emis_faltan))
+    act_ok=bool(str(cfg['emis_actividad_codigo'] or '').strip() and str(cfg['emis_actividad_desc'] or '').strip())
+    add('Actividad económica emisor',act_ok,(str(cfg['emis_actividad_codigo'] or '')+' · '+str(cfg['emis_actividad_desc'] or '')) if act_ok else 'Falta código y descripción de actividad económica declarada en el RUC')
     # V13.9.79: motor real de firma XMLDSig + transporte SOAP/mTLS instalado.
     try:
         import lxml.etree, signxml
@@ -3877,6 +3901,9 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if dis_cod:_sifen_xml_text(ge,'cDisEmi',dis_cod,NS)
     if dis_desc:_sifen_xml_text(ge,'dDesDisEmi',dis_desc,NS)
     _sifen_xml_text(ge,'cCiuEmi',ciu_cod,NS);_sifen_xml_text(ge,'dDesCiuEmi',ciu_desc,NS);_sifen_xml_text(ge,'dTelEmi',tel,NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
+    act_cod=str(cfg['emis_actividad_codigo'] or '').strip();act_desc=str(cfg['emis_actividad_desc'] or '').strip()
+    if not act_cod or not act_desc: raise ValueError('Falta la actividad económica del emisor (cActEco/dDesActEco). Complete Configuración → SIFEN con la actividad declarada en el RUC.')
+    gact=etree.SubElement(ge,'{%s}gActEco'%NS);_sifen_xml_text(gact,'cActEco',act_cod,NS);_sifen_xml_text(gact,'dDesActEco',act_desc,NS)
     gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
     nat=str(d['sifen_naturaleza'] or '1') if 'sifen_naturaleza' in d.keys() else '1';tiop=str(d['sifen_tipo_operacion'] or '1') if 'sifen_tipo_operacion' in d.keys() else '1';pais=str(d['sifen_pais'] or 'PRY') if 'sifen_pais' in d.keys() else 'PRY';paisd=str(d['sifen_pais_desc'] or 'Paraguay') if 'sifen_pais_desc' in d.keys() else 'Paraguay'
     # V13.9.93: prevención del rechazo SIFEN 1300 (naturaleza/tipo de operación).
@@ -4177,7 +4204,8 @@ def configuracion_sifen():
             vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
             tim_desde=request.form.get('timbrado_desde','').strip()
             emis=[request.form.get(x,'').strip() for x in ('emis_departamento_codigo','emis_departamento_desc','emis_distrito_codigo','emis_distrito_desc','emis_ciudad_codigo','emis_ciudad_desc','emis_telefono','emis_direccion')]
-            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,now()))
+            act_cod=request.form.get('emis_actividad_codigo','').strip();act_desc=request.form.get('emis_actividad_desc','').strip()
+            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,emis_actividad_codigo=?,emis_actividad_desc=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,act_cod,act_desc,now()))
             c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN actualizada');flash('Configuración SIFEN guardada. El ambiente no cambia automáticamente.')
         elif accion=='ambiente_test':
             c.execute("update sifen_config set ambiente='TEST',produccion_habilitada=0,actualizado_en=? where id=1",(now(),));c.commit();_sifen_log('AMBIENTE','OK','Ambiente cambiado a TEST');flash('SIFEN quedó en ambiente TEST.')
@@ -4205,12 +4233,15 @@ def configuracion_sifen():
             try:
                 v=c.execute("select id from ventas where numero is not null and trim(numero)<>'' order by id desc limit 1").fetchone()
                 if not v: raise ValueError('No hay una factura existente para generar XML de prueba.')
-                xml,cdc=_sifen_generar_de_v150(c,'FE',v['id']);ruta=_sifen_guardar_xml_test('FE',v['id'],xml,cdc)
-                _sifen_log('XML_V150','GENERADO_TEST','FE id %s CDC %s · archivo %s'%(v['id'],cdc,ruta))
-                ok,errores=_sifen_validar_xsd_v150(xml)
+                xml,cdc=_sifen_generar_de_v150(c,'FE',v['id'])
+                cfgx=c.execute('select * from sifen_config where id=1').fetchone()
+                firmado=_sifen_firmar_rde(xml,cfgx)
+                ruta=_sifen_guardar_xml_test('FE',v['id'],firmado,cdc)
+                _sifen_log('XML_V150','GENERADO_FIRMADO_TEST','FE id %s CDC %s · XMLDSig aplicado · archivo %s'%(v['id'],cdc,ruta))
+                ok,errores=_sifen_validar_xsd_v150(firmado)
                 if ok:
-                    _sifen_log('XSD_V150','OK','FE id %s CDC %s validado contra XSD V150'%(v['id'],cdc))
-                    flash('XML V150 generado y validado correctamente contra XSD. No fue firmado ni enviado a SIFEN.')
+                    _sifen_log('XSD_V150','OK','FE id %s CDC %s firmado y validado contra XSD V150'%(v['id'],cdc))
+                    flash('XML V150 generado, firmado con el certificado instalado y validado correctamente contra XSD. No fue enviado a SIFEN.')
                 else:
                     detalle=' | '.join(errores[:8])
                     _sifen_log('XSD_V150','ERROR',detalle)
