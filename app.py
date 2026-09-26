@@ -4334,31 +4334,34 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # En particular, dLiqTotIVA5/10 son IVA DEL REDONDEO (F036/F037), no el IVA normal;
     # dComi/dIVAComi sólo corresponden cuando existe comisión. No se crean nodos opcionales
     # artificiales en cero, evitando que el evaluador de reglas procese combinaciones inexistentes.
-    if sub_exe != 0: _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS)
-    if sub5 != 0: _sifen_xml_text(tots,'dSub5',X(sub5),NS)
-    if sub10 != 0: _sifen_xml_text(tots,'dSub10',X(sub10),NS)
+    # V13.9.136: grupo F completo para máxima compatibilidad con el evaluador SIFEN.
+    # Los subtotales fiscales se informan siempre, incluso en cero.
+    _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS)
+    _sifen_xml_text(tots,'dSubExo',X(0),NS)
+    _sifen_xml_text(tots,'dSub5',X(sub5),NS)
+    _sifen_xml_text(tots,'dSub10',X(sub10),NS)
     _sifen_xml_text(tots,'dTotOpe',X(total),NS);_sifen_xml_text(tots,'dTotDesc','0',NS)
     _sifen_xml_text(tots,'dTotDescGlotem','0',NS);_sifen_xml_text(tots,'dTotAntItem','0',NS);_sifen_xml_text(tots,'dTotAnt','0',NS)
     _sifen_xml_text(tots,'dPorcDescTotal','0',NS);_sifen_xml_text(tots,'dDescTotal','0',NS);_sifen_xml_text(tots,'dAnticipo','0',NS)
-    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
+    _sifen_xml_text(tots,'dRedon','0',NS)
+    _sifen_xml_text(tots,'dComi','0',NS)
+    _sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
     # V13.9.133: ORDEN XSD V150 ESTRICTO dentro de gTotSub.
     # El XSD usa xs:sequence: IVA5, IVA10, IVA de redondeo/comisión (si existen),
     # dTotIVA y SOLO DESPUÉS las bases gravadas. No intercalar dBaseGrav5 entre
     # dIVA5 y dTotIVA: SIFEN/XSD lo rechaza como SCHEMAV_ELEMENT_CONTENT.
-    if sub5 != 0:
-        _sifen_xml_text(tots,'dIVA5',X(iva5),NS)
-    if sub10 != 0:
-        _sifen_xml_text(tots,'dIVA10',X(iva10),NS)
-    # dLiqTotIVA5/dLiqTotIVA10: únicamente si dRedon != 0 (aquí redondeo=0).
-    # dIVAComi: únicamente si existe comisión (aquí no existe).
-    if sub5 != 0 or sub10 != 0:
-        _sifen_xml_text(tots,'dTotIVA',X(iva5+iva10),NS)
-    if sub5 != 0:
-        _sifen_xml_text(tots,'dBaseGrav5',X(base5),NS)
-    if sub10 != 0:
-        _sifen_xml_text(tots,'dBaseGrav10',X(base10),NS)
-    if sub5 != 0 or sub10 != 0:
-        _sifen_xml_text(tots,'dTBasGraIVA',X(base5+base10),NS)
+    # V13.9.136: completar el bloque de IVA/totales en el orden exacto del XSD.
+    # Esto combina las correcciones acumuladas (orden XSD, PYG y fórmulas) con
+    # presencia explícita de ceros para evitar evaluaciones nulas del motor de reglas.
+    _sifen_xml_text(tots,'dIVA5',X(iva5),NS)
+    _sifen_xml_text(tots,'dIVA10',X(iva10),NS)
+    _sifen_xml_text(tots,'dLiqTotIVA5',X(0),NS)
+    _sifen_xml_text(tots,'dLiqTotIVA10',X(0),NS)
+    _sifen_xml_text(tots,'dIVAComi',X(0),NS)
+    _sifen_xml_text(tots,'dTotIVA',X(iva5+iva10),NS)
+    _sifen_xml_text(tots,'dBaseGrav5',X(base5),NS)
+    _sifen_xml_text(tots,'dBaseGrav10',X(base10),NS)
+    _sifen_xml_text(tots,'dTBasGraIVA',X(base5+base10),NS)
     if asoc:
         ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
     xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
