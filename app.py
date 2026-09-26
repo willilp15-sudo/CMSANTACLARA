@@ -4344,7 +4344,13 @@ def _sifen_validar_xsd_v150(xml_bytes):
             try:
                 schema_doc=etree.parse(schema_path)
                 schema=etree.XMLSchema(schema_doc)
-                schema.assertValid(doc)
+                # DE_v150.xsd declara el elemento DE, no el contenedor de recepción rDE.
+                # El rDE es el sobre firmado exigido por siRecepDE; para validar la
+                # estructura fiscal contra DE_v150 se valida su hijo DE.
+                de_doc=doc.find('{%s}DE'%ns_sifen)
+                if de_doc is None:
+                    return False,['El rDE no contiene el elemento DE requerido.']
+                schema.assertValid(de_doc)
                 return True,[]
             except etree.DocumentInvalid as e:
                 # Si el esquema correcto compiló, devolver SUS errores reales y no probar
@@ -6016,6 +6022,10 @@ def _llamador_token_ok():
  # Si todavía no fue configurado, el llamador sigue operativo para no bloquear la sala de espera.
  esperado=(os.environ.get('LLAMADOR_TOKEN') or '').strip()
  recibido=(request.headers.get('X-Llamador-Token') or request.args.get('token') or '').strip()
+ # El monitor web integrado usa la sesión autenticada del ERP; el dispositivo
+ # Windows externo continúa usando LLAMADOR_TOKEN.
+ if session.get('user'):
+  return True
  if not esperado:
   return True
  return bool(recibido) and secrets.compare_digest(esperado,recibido)
@@ -6046,13 +6056,17 @@ def llamador_api_confirmar(lid):
  data=request.get_json(silent=True) or {};disp=str(data.get('dispositivo') or 'LLAMADOR-PRINCIPAL')[:80]
  c=db();c.execute("update llamados_pacientes set estado='REPRODUCIDO',dispositivo=?,reproducido_en=?,confirmado_en=? where id=?",(disp,now(),now(),lid));c.commit();c.close();return jsonify(ok=True)
 
+@app.get('/llamador/monitor')
+def llamador_monitor_web():
+ return render_template('llamador_monitor_web.html')
+
 @app.get('/llamador/historico')
 def llamador_historico():
  fecha=request.args.get('fecha') or datetime.date.today().isoformat();medico_id=request.args.get('medico_id',type=int);c=db();pars=[fecha+'%'];where='l.fecha_hora like ?'
  if medico_id:where+=' and l.medico_id=?';pars.append(medico_id)
  rows=c.execute("""select l.*,p.nombre paciente,m.nombre medico,m.consultorio_numero from llamados_pacientes l join agenda g on g.id=l.agenda_id join pacientes p on p.id=g.paciente_id join medicos m on m.id=l.medico_id where """+where+' order by l.id desc',pars).fetchall();meds=c.execute('select id,nombre from medicos where activo=1 order by nombre').fetchall();c.close();return render_template('llamador_historico.html',rows=rows,fecha=fecha,meds=meds,medico_id=medico_id)
 
-ROUTE_MODULE.update({'llamador_historico':'CONSULTORIO'})
+ROUTE_MODULE.update({'llamador_historico':'CONSULTORIO','llamador_monitor_web':'CONSULTORIO'})
 
 
 
