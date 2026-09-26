@@ -320,7 +320,7 @@ def init_v13991_maestros_sifen():
   # Datos fiscales/receptor SIFEN. Migración aditiva: no elimina ni transforma datos existentes.
   tcols={r['name'] for r in c.execute('pragma table_info(terceros)').fetchall()}
   for col,typ in [
-   ('sifen_naturaleza',"TEXT DEFAULT '1'"),('sifen_tipo_operacion',"TEXT DEFAULT '1'"),
+   ('sifen_naturaleza',"TEXT DEFAULT '1'"),('sifen_tipo_operacion',"TEXT DEFAULT '1'"),('sifen_dv','TEXT'),
    ('sifen_tipo_contribuyente',"TEXT DEFAULT '2'"),('sifen_tipo_documento',"TEXT DEFAULT '1'"),
    ('sifen_numero_documento','TEXT'),('sifen_pais',"TEXT DEFAULT 'PRY'"),('sifen_pais_desc',"TEXT DEFAULT 'Paraguay'"),
    ('sifen_direccion','TEXT'),('sifen_numero_casa',"TEXT DEFAULT '0'"),
@@ -962,12 +962,38 @@ def libros():
 def api_tc():
  c=db();r=c.execute('select tipo from tipos_cambio where fecha=? and moneda=?',(request.args.get('fecha'),request.args.get('moneda'))).fetchone();c.close();return jsonify({'tipo':r['tipo'] if r else None})
 
+def _sifen_ruc_dv_normalizar(valor, dv_separado=''):
+    """Normaliza RUC paraguayo para SIFEN. Acepta 4909510-2, 4909510 + DV o RUC sin DV (calcula módulo 11)."""
+    import re
+    raw=str(valor or '').strip()
+    dv=str(dv_separado or '').strip()
+    if '-' in raw:
+        a,b=raw.rsplit('-',1); raw=a.strip(); dv=dv or b.strip()
+    ruc=re.sub(r'\D','',raw)
+    if not (3 <= len(ruc) <= 8): return '', '', False
+    def calc(num):
+        total=0; factor=2
+        for ch in reversed(num):
+            total += int(ch)*factor
+            factor += 1
+            if factor>11: factor=2
+        x=11-(total%11)
+        return '0' if x in (10,11) else str(x)
+    esperado=calc(ruc)
+    if not dv: dv=esperado
+    dv=re.sub(r'\D','',dv)
+    return ruc,dv,(len(dv)==1 and dv==esperado)
+
 @app.route('/pacientes',methods=['GET','POST'])
 def pacientes():
  c=db(); sincronizar_clientes_pacientes(c)
  if request.method=='POST':
   doc=(request.form.get('documento') or '').strip(); nombre=(request.form.get('nombre') or '').strip()
   nat=(request.form.get('sifen_naturaleza') or '1').strip(); tiop=(request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')).strip()
+  if nat=='1':
+   _r,_dv,_ok=_sifen_ruc_dv_normalizar(doc,request.form.get('sifen_dv'))
+   if not _ok: c.close(); flash('RUC/DV inválido para contribuyente.'); return redirect('/clientes')
+   doc=_r+'-'+_dv
   vals=(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
   cur=c.execute("""insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",vals)
   tid=cur.lastrowid
@@ -1278,6 +1304,10 @@ def editar_paciente(i):
  if not r:c.close();flash('Cliente no encontrado.');return redirect('/clientes')
  if request.method=='POST':
   antes=snapshot(r);doc=(request.form.get('documento') or '').strip();nombre=(request.form.get('nombre') or '').strip();nat=request.form.get('sifen_naturaleza') or '1';tiop=request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')
+  if nat=='1':
+   _r,_dv,_ok=_sifen_ruc_dv_normalizar(doc,request.form.get('sifen_dv'))
+   if not _ok: c.close(); flash('RUC/DV inválido para contribuyente.'); return redirect('/editar-paciente/'+str(i))
+   doc=_r+'-'+_dv
   c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i))
   c.execute("""update terceros set tipo='CLIENTE',ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?""",(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),r['tercero_id']))
   despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone());audit_change(c,'MODIFICAR','CLIENTES',i,antes,despues,request.form.get('motivo','Actualización'));c.commit();c.close();flash('Cliente actualizado.');return redirect('/clientes')
@@ -4109,17 +4139,17 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if not cfg:raise ValueError('Configuración SIFEN inexistente.')
     tipo=str(doc_tipo).upper()
     if tipo=='FE':
-        d=c.execute("select v.*,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.id=?",(doc_id,)).fetchone()
+        d=c.execute("select v.*,t.nombre receptor,t.ruc receptor_doc,t.sifen_dv,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,p.timbrado punto_timbrado from ventas v left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where v.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Factura no encontrada.')
         items=c.execute("select vi.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(p.nombre),''),nullif(trim(vi.descripcion),''),'Servicio medico') sifen_desc_item,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc,p.tipo_producto sifen_tipo_producto,p.clasif_general sifen_clasif_general,p.categoria sifen_categoria from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id",(doc_id,)).fetchall()
         ide=1;des='Factura electrónica';fecha=d['fecha'];numero=d['numero'];asoc=None
     elif tipo=='NCE':
-        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
+        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_dv,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_credito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Nota de Crédito no encontrada.')
         items=c.execute("select i.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(i.descripcion),''),nullif(trim(p.nombre),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from nota_credito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(doc_id,)).fetchall()
         ide=5;des='Nota de crédito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
     elif tipo=='NDE':
-        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
+        d=c.execute("select n.*,v.numero factura_numero,v.cdc factura_cdc,v.cliente_id,t.nombre receptor,t.ruc receptor_doc,t.sifen_dv,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc,t.telefono receptor_tel,t.email receptor_email,v.sifen_punto_id,p.timbrado punto_timbrado from notas_debito_ventas n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id left join sifen_puntos_expedicion p on p.id=v.sifen_punto_id where n.id=?",(doc_id,)).fetchone()
         if not d:raise ValueError('Nota de Débito no encontrada.')
         items=c.execute("select i.*,p.codigo,coalesce(nullif(trim(p.sifen_descripcion),''),nullif(trim(i.descripcion),''),nullif(trim(p.nombre),''),'Servicio medico') descripcion,coalesce(nullif(trim(p.sifen_unidad_codigo),''),'77') sifen_unidad_codigo,coalesce(nullif(trim(p.sifen_unidad_desc),''),'UNI') sifen_unidad_desc from nota_debito_venta_items i left join productos p on p.id=i.producto_id where i.nota_id=? order by i.id",(doc_id,)).fetchall()
         ide=6;des='Nota de débito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
@@ -4217,8 +4247,8 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     ruc_maestro=str(d['receptor_doc'] or '').strip()
     doc_identidad=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or '').strip()
     rdoc=ruc_maestro if str(d['sifen_naturaleza'] or '1')=='1' else (doc_identidad or ruc_maestro)
-    rruc=ruc_maestro.split('-')[0].strip() if '-' in ruc_maestro else ruc_maestro
-    rdv=ruc_maestro.split('-')[-1].strip() if '-' in ruc_maestro else ''
+    _dv_maestro=str(d['sifen_dv'] or '').strip() if 'sifen_dv' in d.keys() else ''
+    rruc,rdv,_ruc_ok=_sifen_ruc_dv_normalizar(ruc_maestro,_dv_maestro)
     nat=str(d['sifen_naturaleza'] or '1') if 'sifen_naturaleza' in d.keys() else '1';tiop=str(d['sifen_tipo_operacion'] or '1') if 'sifen_tipo_operacion' in d.keys() else '1';pais=str(d['sifen_pais'] or 'PRY') if 'sifen_pais' in d.keys() else 'PRY';paisd=str(d['sifen_pais_desc'] or 'Paraguay') if 'sifen_pais_desc' in d.keys() else 'Paraguay'
     # V13.9.93: prevención del rechazo SIFEN 1300 (naturaleza/tipo de operación).
     if nat=='1' and tiop not in ('1','3'):
@@ -4230,8 +4260,8 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     _sifen_xml_text(gr,'iNatRec',nat,NS);_sifen_xml_text(gr,'iTiOpe',tiop,NS);_sifen_xml_text(gr,'cPaisRec',pais,NS);_sifen_xml_text(gr,'dDesPaisRe',paisd,NS)
     if nat=='1':
         _sifen_xml_text(gr,'iTiContRec',str(d['sifen_tipo_contribuyente'] or '2') if 'sifen_tipo_contribuyente' in d.keys() else '2',NS)
-        if not (rruc.isdigit() and rdv.isdigit() and len(rdv)==1):
-            raise ValueError('Cliente contribuyente sin RUC-DV válido. Complete el Maestro de Clientes con formato RUC-DV antes de emitir el DE.')
+        if not _ruc_ok:
+            raise ValueError('Cliente contribuyente con RUC/DV inválido. Revise RUC y DV en el Maestro de Clientes; el sistema acepta RUC-DV o calcula el DV cuando falta.')
         _sifen_xml_text(gr,'dRucRec',rruc,NS);_sifen_xml_text(gr,'dDVRec',rdv,NS)
     else:
         _sifen_xml_text(gr,'iTipIDRec',str(d['sifen_tipo_documento'] or '1') if 'sifen_tipo_documento' in d.keys() else '1',NS);_sifen_xml_text(gr,'dDTipIDRec','Cédula paraguaya',NS);_sifen_xml_text(gr,'dNumIDRec',rdoc,NS)
