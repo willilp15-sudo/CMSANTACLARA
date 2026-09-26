@@ -4274,13 +4274,20 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         af='3' if pct<=0 else '1'
         _sifen_xml_text(giv,'iAfecIVA',af,NS);_sifen_xml_text(giv,'dDesAfecIVA','Exento' if pct<=0 else 'Gravado IVA',NS)
         _sifen_xml_text(giv,'dPropIVA','100',NS);_sifen_xml_text(giv,'dTasaIVA',str(int(pct)),NS)
-        baseiva=line/(1+pct/100) if pct>0 else 0;iva=line-baseiva if pct>0 else 0
-        _sifen_xml_text(giv,'dBasGravIVA',str(round(baseiva,4)),NS);_sifen_xml_text(giv,'dLiqIVAItem',str(round(iva,4)),NS)
+        # SIFEN V150: los totales F015/F016/F017 deben ser la SUMA EXACTA
+        # de E736 (dLiqIVAItem) y las bases F018/F019 la suma de E735.
+        # Por eso primero fijamos a 4 decimales los valores realmente escritos
+        # en cada item y luego acumulamos ESOS mismos valores, evitando diferencias
+        # por redondeo de floats entre detalle y gTotSub (rechazo 2371).
+        baseiva_raw=line/(1+pct/100) if pct>0 else 0
+        iva_raw=line-baseiva_raw if pct>0 else 0
+        baseiva=round(baseiva_raw,4); iva=round(iva_raw,4); line_xml=round(line,4)
+        _sifen_xml_text(giv,'dBasGravIVA',str(baseiva),NS);_sifen_xml_text(giv,'dLiqIVAItem',str(iva),NS)
         _sifen_xml_text(giv,'dBasExe',str(round(line if pct<=0 else 0,4)),NS)
-        total+=line;iva_total+=iva
-        if pct<=0: sub_exe+=line
-        elif abs(pct-5)<0.001: sub5+=line;iva5+=iva;base5+=baseiva
-        else: sub10+=line;iva10+=iva;base10+=baseiva
+        total+=line_xml;iva_total+=iva
+        if pct<=0: sub_exe+=line_xml
+        elif abs(pct-5)<0.001: sub5+=line_xml;iva5+=iva;base5+=baseiva
+        else: sub10+=line_xml;iva10+=iva;base10+=baseiva
 
     # Grupo F / totales. Aunque gTotSub es opcional a nivel de binding, cuando
     # se informa debe contener todos sus campos obligatorios; lo generamos de
@@ -4292,9 +4299,12 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     _sifen_xml_text(tots,'dTotDescGlotem','0',NS);_sifen_xml_text(tots,'dTotAntItem','0',NS);_sifen_xml_text(tots,'dTotAnt','0',NS)
     _sifen_xml_text(tots,'dPorcDescTotal','0',NS);_sifen_xml_text(tots,'dDescTotal','0',NS);_sifen_xml_text(tots,'dAnticipo','0',NS)
     _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',str(round(total,4)),NS)
+    # F015/F016 son la suma de E736 por tasa; F017 = F015 + F016 cuando
+    # dRedon=0. F036/F037 (dLiqTotIVA5/10) NO son el IVA total por tasa:
+    # corresponden exclusivamente al IVA DEL REDONDEO. Como dRedon=0, se omiten.
     _sifen_xml_text(tots,'dIVA5',str(round(iva5,4)),NS);_sifen_xml_text(tots,'dIVA10',str(round(iva10,4)),NS)
-    _sifen_xml_text(tots,'dLiqTotIVA5',str(round(iva5,4)),NS);_sifen_xml_text(tots,'dLiqTotIVA10',str(round(iva10,4)),NS)
-    _sifen_xml_text(tots,'dTotIVA',str(round(iva_total,4)),NS);_sifen_xml_text(tots,'dBaseGrav5',str(round(base5,4)),NS)
+    iva_total=round(iva5+iva10,4)
+    _sifen_xml_text(tots,'dTotIVA',str(iva_total),NS);_sifen_xml_text(tots,'dBaseGrav5',str(round(base5,4)),NS)
     _sifen_xml_text(tots,'dBaseGrav10',str(round(base10,4)),NS);_sifen_xml_text(tots,'dTBasGraIVA',str(round(base5+base10,4)),NS)
     if asoc:
         ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
