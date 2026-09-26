@@ -3834,7 +3834,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     dep_cod=str(cfg['emis_departamento_codigo'] or '').strip();dep_desc=str(cfg['emis_departamento_desc'] or '').strip();dis_cod=str(cfg['emis_distrito_codigo'] or '').strip();dis_desc=str(cfg['emis_distrito_desc'] or '').strip();ciu_cod=str(cfg['emis_ciudad_codigo'] or '').strip();ciu_desc=str(cfg['emis_ciudad_desc'] or '').strip();tel=str(cfg['emis_telefono'] or inst['telefono'] or '').strip();dire=str(cfg['emis_direccion'] or inst['direccion'] or '').strip()
     falt=[n for n,v in [('Departamento código',dep_cod),('Departamento',dep_desc),('Ciudad código',ciu_cod),('Ciudad',ciu_desc),('Teléfono',tel)] if not v]
     if falt: raise ValueError('Datos obligatorios del emisor incompletos: '+', '.join(falt)+'. Complete Configuración → SIFEN → Datos del establecimiento emisor.')
-    _sifen_xml_text(ge,'dRucEm',cfg['ruc'],NS);_sifen_xml_text(ge,'dDVEmi',cfg['dv'],NS);_sifen_xml_text(ge,'iTipCont',cfg['tipo_contribuyente'] or '2',NS);_sifen_xml_text(ge,'dNomEmi',(inst['razon_social'] if 'razon_social' in inst.keys() else inst['nombre']) or 'CENTRO MEDICO SANTA CLARA',NS);_sifen_xml_text(ge,'dNomFanEmi',(inst['nombre_fantasia'] if 'nombre_fantasia' in inst.keys() else inst['nombre']) or '',NS);_sifen_xml_text(ge,'dDirEmi',dire,NS);_sifen_xml_text(ge,'dNumCas','0',NS);_sifen_xml_text(ge,'dDepEmi',dep_cod,NS);_sifen_xml_text(ge,'dDesDepEmi',dep_desc,NS)
+    _sifen_xml_text(ge,'dRucEm',cfg['ruc'],NS);_sifen_xml_text(ge,'dDVEmi',cfg['dv'],NS);_sifen_xml_text(ge,'iTipCont',cfg['tipo_contribuyente'] or '2',NS);_sifen_xml_text(ge,'dNomEmi',(inst['razon_social'] if 'razon_social' in inst.keys() else inst['nombre']) or 'CENTRO MEDICO SANTA CLARA',NS);_sifen_xml_text(ge,'dNomFanEmi',(inst['nombre_fantasia'] if 'nombre_fantasia' in inst.keys() else inst['nombre']) or '',NS);_sifen_xml_text(ge,'dDirEmi',dire,NS);_sifen_xml_text(ge,'dNumCas','0',NS);_sifen_xml_text(ge,'cDepEmi',dep_cod,NS);_sifen_xml_text(ge,'dDesDepEmi',dep_desc,NS)
     if dis_cod:_sifen_xml_text(ge,'cDisEmi',dis_cod,NS)
     if dis_desc:_sifen_xml_text(ge,'dDesDisEmi',dis_desc,NS)
     _sifen_xml_text(ge,'cCiuEmi',ciu_cod,NS);_sifen_xml_text(ge,'dDesCiuEmi',ciu_desc,NS);_sifen_xml_text(ge,'dTelEmi',tel,NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
@@ -3858,48 +3858,21 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     return xml,cdc
 
 def _sifen_validar_xsd_v150(xml_bytes):
-    """Valida un rDE contra los bindings/esquemas SIFEN V150.
-    Devuelve (ok, errores). No altera, firma ni transmite el documento.
+    """Valida rDE V150 con el binding aislado oficial generado desde XSD.
+    V13.9.88 elimina el workaround que quitaba namespaces: el XML se valida tal cual.
     """
     try:
         from pysifen.de.bindings.de_v150.de_v150 import RDe
     except Exception as e:
         return False,['Motor XSD V150 no instalado: '+str(e)]
     try:
-        if isinstance(xml_bytes,bytes): xml_text=xml_bytes.decode('utf-8')
-        else: xml_text=str(xml_bytes)
-        # V13.9.86: pysifen 0.2.0 presenta una incompatibilidad de deserialización
-        # con algunos elementos TgEmis cuando el namespace por defecto viene
-        # expandido como {http://ekuatia.set.gov.py/sifen/xsd}dDepEmi.
-        # Primero intentamos el XML SIFEN normal. Si el binding falla SOLO por
-        # "Unknown property", hacemos una copia exclusivamente para el binding
-        # quitando namespaces de las etiquetas. El XML original NO se modifica:
-        # es el que se guarda, firma y transmite.
-        try:
-            rde=RDe.from_xml(xml_text)
-        except Exception as bind_err:
-            if 'Unknown property' not in str(bind_err):
-                raise
-            from lxml import etree
-            parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
-            compat=etree.fromstring(xml_text.encode('utf-8'),parser)
-            for el in compat.iter():
-                if isinstance(el.tag,str) and el.tag.startswith('{'):
-                    el.tag=el.tag.split('}',1)[1]
-                # schemaLocation no forma parte del modelo DE del binding
-                for ak in list(el.attrib):
-                    if ak.startswith('{http://www.w3.org/2001/XMLSchema-instance}'):
-                        del el.attrib[ak]
-            compat_text=etree.tostring(compat,encoding='unicode')
-            try:
-                rde=RDe.from_xml(compat_text)
-            except Exception as compat_err:
-                return False,['Incompatibilidad del binding XSD V150: '+str(compat_err)]
+        xml_text=xml_bytes.decode('utf-8') if isinstance(xml_bytes,bytes) else str(xml_bytes)
+        rde=RDe.from_xml(xml_text)
         errores=rde.validate_xml() or []
         mensajes=[str(e) for e in errores]
         return len(mensajes)==0,mensajes
     except Exception as e:
-        return False,[str(e)]
+        return False,['XML V150 inválido: '+str(e)]
 
 def _sifen_guardar_xml_test(tipo,doc_id,xml,cdc):
     p=Path(_sifen_dir())/'xml_test';p.mkdir(parents=True,exist_ok=True)

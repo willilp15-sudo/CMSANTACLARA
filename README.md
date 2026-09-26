@@ -25,3 +25,10 @@ V13.9.78: Preparación segura SIFEN Producción; activación bloqueada hasta tra
 - Administración de usuarios permite agregar/quitar varios roles en una sola operación.
 - Los permisos efectivos se obtienen de la unión de los permisos de todos sus roles mediante la tabla usuario_roles existente.
 - No modifica correlativos SIFEN ni datos operativos existentes.
+
+
+## V13.9.88 — Corrección definitiva TgEmis / cDepEmi
+- Corrige el nombre del elemento de departamento del emisor: `cDepEmi` (no `dDepEmi`).
+- Elimina el workaround que quitaba namespaces durante la validación.
+- El XML V150 ahora se entrega al binding de validación conservando el namespace SIFEN original.
+- No altera correlativos, puntos de expedición, depósitos, transferencias, multirroles ni la base persistente.
