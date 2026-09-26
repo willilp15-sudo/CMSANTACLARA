@@ -7,5 +7,11 @@
 <p><b>Protocolo:</b> {{v.protocolo_sifen or '-'}} &nbsp; <b>HTTP:</b> {{v.sifen_http_status or '-'}} &nbsp; <b>Fecha respuesta:</b> {{v.sifen_fecha_respuesta or '-'}}</p>
 <p><b>Intentos:</b> {{v.sifen_intentos or 0}} &nbsp; <b>Último intento:</b> {{v.sifen_ultimo_intento or '-'}}</p></div>
 <details><summary><b>Ver respuesta XML/SOAP completa recibida de SIFEN</b></summary><pre style="white-space:pre-wrap;overflow:auto;max-height:500px;background:#f6f6f6;padding:12px">{{v.respuesta_sifen or 'No hay respuesta XML/SOAP almacenada para esta factura.'}}</pre></details>
-<p style="margin-top:14px"><a class="btn" href="/ventas/{{v.id}}/factura">← Volver a factura</a> <a class="btn" href="/sifen/monitor">Monitor SIFEN</a></p></div>
+<p style="margin-top:14px">
+<a class="btn" href="/ventas/{{v.id}}/factura">← Volver a factura</a>
+<a class="btn" href="/sifen/monitor">Monitor SIFEN</a>
+{% if v.protocolo_sifen and (v.estado_sifen or '')|upper in ['LOTE_RECIBIDO','LOTE_PROCESANDO','RESPUESTA_RECIBIDA'] %}
+<form method="post" action="/sifen/monitor/venta/{{v.id}}/consultar-lote" style="display:inline"><button class="btn" type="submit">🔄 Consultar resultado del lote</button></form>
+{% endif %}
+</p></div>
 {% endblock %}

@@ -4440,8 +4440,14 @@ def _sifen_emitir_factura_automatico(venta_id):
             raise ValueError('Ambiente SIFEN no reconocido: '+ambiente)
         # TEST también debe transmitir: el objetivo del ambiente de pruebas es
         # recibir la validación real de SIFEN (aprobación/rechazo sin valor fiscal).
-        status,resp,url=_sifen_enviar_sync(firmado,cfg)
+        # V13.9.114: el RUC puede no estar habilitado para recepción síncrona (1264).
+        # La FE se transmite por el WS oficial de lote y luego se consulta por protocolo.
+        status,resp,url=_sifen_enviar_lote(firmado,cfg)
         parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+        protocolo=str(parsed.get('lote') or parsed.get('protocolo') or '')
+        if str(parsed.get('codigo') or '')=='0300' and protocolo:
+            estado='LOTE_RECIBIDO'
+            parsed['protocolo']=protocolo;parsed['lote']=protocolo
         _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr)
         if ambiente=='PRODUCCION':
             c.execute('update sifen_config set ultimo_envio_prod=?,ultimo_envio_prod_estado=?,actualizado_en=? where id=1',(now(),estado,now()))
@@ -4560,6 +4566,49 @@ def _sifen_enviar_sync(xml_firmado,cfg,timeout=35):
     r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
     return r.status_code,r.content,url
 
+def _sifen_enviar_lote(xml_firmado,cfg,timeout=35):
+    """Envía un lote SIFEN V150 (1 DE en este flujo) por el WS asíncrono oficial."""
+    import requests,secrets,base64,io,zipfile,re
+    from lxml import etree
+    if not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital no instalado.')
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
+    parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
+    rde=etree.fromstring(xml_firmado if isinstance(xml_firmado,(bytes,bytearray)) else xml_firmado.encode(),parser)
+    if etree.QName(rde).localname!='rDE': raise ValueError('El documento firmado para lote debe tener raíz rDE.')
+    # Schema XML 5A: rLoteDE contiene de 1 a 50 rDE firmados del mismo tipo.
+    lote=etree.Element('{%s}rLoteDE'%NS,nsmap={None:NS}); lote.append(rde)
+    lote_xml=etree.tostring(lote,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    # Manual Técnico V150: xDE es un archivo .zip codificado Base64.
+    mem=io.BytesIO()
+    with zipfile.ZipFile(mem,'w',compression=zipfile.ZIP_DEFLATED) as z:z.writestr('lote.xml',lote_xml)
+    b64=base64.b64encode(mem.getvalue()).decode('ascii')
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP});etree.SubElement(env,'{%s}Header'%SOAP);body=etree.SubElement(env,'{%s}Body'%SOAP)
+    envio=etree.SubElement(body,'{%s}rEnvioLote'%NS,nsmap={None:NS})
+    etree.SubElement(envio,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
+    etree.SubElement(envio,'{%s}xDE'%NS).text=b64
+    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    if re.search(br'<\/?ns\d+:',payload) or re.search(br'xmlns:ns\d+=',payload): raise ValueError('SOAP SIFEN lote inválido: prefijo namespace automático ns0/ns1.')
+    url=_sifen_endpoint(cfg,'lote')
+    r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
+    return r.status_code,r.content,url
+
+def _sifen_consultar_lote(protocolo,cfg,timeout=35):
+    """Consulta el resultado de un lote usando dProtConsLote devuelto por SIFEN."""
+    import requests,secrets,re
+    from lxml import etree
+    protocolo=str(protocolo or '').strip()
+    if not protocolo: raise ValueError('No existe número/protocolo de lote para consultar.')
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP});etree.SubElement(env,'{%s}Header'%SOAP);body=etree.SubElement(env,'{%s}Body'%SOAP)
+    req=etree.SubElement(body,'{%s}rEnviConsLoteDe'%NS,nsmap={None:NS})
+    etree.SubElement(req,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
+    etree.SubElement(req,'{%s}dProtConsLote'%NS).text=protocolo
+    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    if re.search(br'<\/?ns\d+:',payload) or re.search(br'xmlns:ns\d+=',payload): raise ValueError('SOAP consulta lote inválido: prefijo namespace automático ns0/ns1.')
+    url=_sifen_endpoint(cfg,'consulta_lote')
+    r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
+    return r.status_code,r.content,url
+
 def _sifen_parse_respuesta(xml_bytes):
     """Interpreta respuestas SOAP SIFEN sync y consulta de lote sin depender del prefijo XML."""
     from lxml import etree
@@ -4578,7 +4627,11 @@ def _sifen_parse_respuesta(xml_bytes):
             for b in bloques:out['resultados'].append({'cdc':first('id',b),'estado':first('dEstRes',b),'codigo':first('dCodRes',b),'mensaje':first('dMsgRes',b)})
             r=out['resultados'][0];out['cdc']=r['cdc'];out['estado']=r['estado'] or 'RESPUESTA_RECIBIDA';out['codigo']=r['codigo'];out['mensaje']=r['mensaje']
         else:
-            out['estado']=first('dEstRes') or 'RESPUESTA_RECIBIDA';out['codigo']=first('dCodRes');out['mensaje']=first('dMsgRes');out['protocolo']=first('dProtAut');out['cdc']=first('dId') or first('id')
+            out['estado']=first('dEstRes') or 'RESPUESTA_RECIBIDA';out['codigo']=first('dCodRes');out['mensaje']=first('dMsgRes');out['protocolo']=first('dProtAut') or first('dProtConsLote');out['cdc']=first('dId') or first('id')
+            if first('dProtConsLote'):
+                out['lote']=first('dProtConsLote')
+                # 0300 = lote recibido. Todavía no significa aprobación del DE.
+                if out['codigo']=='0300': out['estado']='LOTE_RECIBIDO'
         if not out['mensaje'] and out['mensaje_lote']:out['mensaje']=out['mensaje_lote']
     except Exception as e:out['estado']='ERROR_XML';out['mensaje']=str(e)
     return out
@@ -5703,13 +5756,43 @@ def init_v139113_sifen_test_transmision_real():
     c.commit();c.close()
 init_v139113_sifen_test_transmision_real()
 
+def init_v139114_sifen_lotes():
+    c=db()
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.114-sifen-lote-asincrono',?)",(now(),))
+    c.commit();c.close()
+init_v139114_sifen_lotes()
+
+@app.post('/sifen/monitor/venta/<int:venta_id>/consultar-lote')
+def sifen_consultar_lote_venta(venta_id):
+    c=db();v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone();cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    if not v:c.close();return ('Factura no encontrada',404)
+    protocolo=str((v['protocolo_sifen'] if 'protocolo_sifen' in v.keys() else '') or (v['sifen_lote'] if 'sifen_lote' in v.keys() else '') or '').strip()
+    try:
+        status,resp,url=_sifen_consultar_lote(protocolo,cfg);parsed=_sifen_parse_respuesta(resp)
+        estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+        # 0361 significa que SIFEN todavía procesa el lote; no es rechazo.
+        if str(parsed.get('codigo_lote') or parsed.get('codigo') or '')=='0361': estado='LOTE_PROCESANDO'
+        # Cuando concluye, tomar específicamente el resultado del CDC de esta factura.
+        if parsed.get('resultados'):
+            match=next((x for x in parsed['resultados'] if str(x.get('cdc') or '')==str(v['cdc'] or '')),parsed['resultados'][0])
+            estado=str(match.get('estado') or estado).upper();parsed['codigo']=match.get('codigo','');parsed['mensaje']=match.get('mensaje','');parsed['protocolo']=protocolo;parsed['lote']=protocolo
+        else:
+            parsed['protocolo']=protocolo;parsed['lote']=protocolo
+        _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,v['cdc'],v['qr_sifen'])
+        c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_CONSULTA_LOTE',estado,f'Factura {venta_id} · lote {protocolo} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")}'))
+        c.commit();flash('Consulta de lote procesada. Estado: '+estado+'.')
+    except Exception as ex:
+        c.rollback();flash('No se pudo consultar el lote SIFEN: '+str(ex))
+    finally:c.close()
+    return redirect(f'/ventas/{venta_id}/sifen/detalle')
+
 @app.post('/sifen/monitor/venta/<int:venta_id>/reintentar')
 def sifen_reintentar_venta(venta_id):
     c=db();v=c.execute('select id,numero,estado_sifen from ventas where id=?',(venta_id,)).fetchone();c.close()
     if not v:return ('Factura no encontrada',404)
     try:
         estado=_sifen_emitir_factura_automatico(venta_id)
-        flash('SIFEN procesó el reintento. Estado recibido: '+str(estado)+'. Revise Ver detalle SIFEN para código, mensaje y XML/SOAP.')
+        flash('SIFEN procesó el envío por lote. Estado recibido: '+str(estado)+'. Si figura LOTE_RECIBIDO, consulte el resultado del lote desde el detalle SIFEN.')
     except Exception as ex:
         flash('No se obtuvo una respuesta aprobada/rechazada de SIFEN. Error de envío: '+str(ex))
     return redirect(f'/ventas/{venta_id}/sifen/detalle')
