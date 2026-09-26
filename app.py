@@ -3096,7 +3096,7 @@ def _factura_venta_data(venta_id):
 def factura_venta(venta_id):
     v,items,inst=_factura_venta_data(venta_id)
     if not v: flash('Factura no encontrada.'); return redirect('/ventas/carga')
-    return render_template('invoice_sale.html',v=v,items=items,inst=inst)
+    cc=db(); cfg=cc.execute('select * from sifen_config where id=1').fetchone(); cc.close(); sifen_produccion=bool(cfg and str(cfg['ambiente'] or '').upper()=='PRODUCCION' and int(cfg['produccion_habilitada'] or 0)); return render_template('invoice_sale.html',v=v,items=items,inst=inst,sifen_produccion=sifen_produccion)
 
 @app.get('/ventas/<int:venta_id>/factura/pdf')
 def factura_venta_pdf(venta_id):
@@ -3752,6 +3752,15 @@ init_v13996_sifen_emisor_firma()
 def _sifen_base(cfg):
     return SIFEN_PROD_BASE if str(cfg['ambiente'] or '').upper()=='PRODUCCION' else SIFEN_TEST_BASE
 
+def init_v13102_produccion_segura():
+    c=db(); cols={r['name'] for r in c.execute('pragma table_info(sifen_config)').fetchall()}
+    for col,ddl in [('dnit_habilitado_produccion','INTEGER DEFAULT 0'),('dnit_habilitado_confirmado_en','TEXT'),('ultimo_envio_prod','TEXT'),('ultimo_envio_prod_estado','TEXT')]:
+        if col not in cols: c.execute(f'alter table sifen_config add column {col} {ddl}')
+    c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.102-kude-produccion-segura',?)",(now(),))
+    c.commit();c.close()
+init_v13102_produccion_segura()
+
 def _sifen_diagnostico(c,cfg):
     import os
     puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 order by establecimiento,punto_expedicion").fetchall()
@@ -3766,6 +3775,7 @@ def _sifen_diagnostico(c,cfg):
     add('Certificado digital',certok,'Instalado en almacenamiento persistente' if certok else 'No instalado o archivo no disponible')
     aut=[p for p in puntos if int(p['autorizado_dnit'] or 0)]
     add('Puntos autorizados',bool(aut),', '.join(str(p['establecimiento'])+'-'+str(p['punto_expedicion']) for p in aut) if aut else 'No hay puntos marcados como autorizados')
+    add('Habilitación DNIT para Producción',bool(cfg['dnit_habilitado_produccion'] if 'dnit_habilitado_produccion' in cfg.keys() else 0),'Confirmada por el administrador' if (cfg['dnit_habilitado_produccion'] if 'dnit_habilitado_produccion' in cfg.keys() else 0) else 'Debe confirmar que DNIT habilitó al contribuyente y que el timbrado/puntos corresponden a Producción')
     emis_req=[('Departamento',cfg['emis_departamento_codigo'],cfg['emis_departamento_desc']),('Ciudad',cfg['emis_ciudad_codigo'],cfg['emis_ciudad_desc'])]
     emis_faltan=[n for n,cod,des in emis_req if not str(cod or '').strip() or not str(des or '').strip()]
     if not str(cfg['emis_telefono'] or '').strip(): emis_faltan.append('Teléfono')
@@ -3802,6 +3812,8 @@ def _sifen_diagnostico(c,cfg):
     else:
         xsd_det='Motor XSD V150 instalado. Ejecute “Generar y validar XML V150”.'
     add('Validación XSD V150',xsd_motor_ok and xsd_doc_ok,xsd_det)
+    mtls_ok=str(cfg['ultimo_estado'] or '').upper()=='OK' if 'ultimo_estado' in cfg.keys() else False
+    add('Conexión mTLS SIFEN',mtls_ok,('Última conexión OK: '+str(cfg['ultimo_test'] or '')) if mtls_ok else 'Ejecute y apruebe la prueba de conexión segura antes de Producción')
     return checks
 
 init_v13978_sifen_produccion()
@@ -4207,6 +4219,32 @@ def sifen_preparar_validacion_factura(venta_id):
         c.close()
     return redirect(f'/ventas/{venta_id}/factura')
 
+@app.post('/ventas/<int:venta_id>/sifen/enviar')
+def sifen_enviar_factura(venta_id):
+    c=db()
+    try:
+        cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        if not cfg or str(cfg['ambiente'] or '').upper()!='PRODUCCION' or not int(cfg['produccion_habilitada'] or 0):
+            raise ValueError('Producción SIFEN no está habilitada en el ERP.')
+        checks=_sifen_diagnostico(c,cfg); faltan=[x['nombre'] for x in checks if not x['ok']]
+        if faltan: raise ValueError('Diagnóstico de Producción pendiente: '+', '.join(faltan))
+        xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id); firmado=_sifen_firmar_rde(xml,cfg)
+        ok,detalle=_sifen_validar_xsd_v150(firmado)
+        if not ok: raise ValueError('XSD V150 rechazó el XML: '+str(detalle))
+        qr=_sifen_extraer_qr_rde(firmado); _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
+        status,resp,url=_sifen_enviar_sync(firmado,cfg)
+        parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+        c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=?,protocolo_sifen=?,fecha_aprobacion_sifen=? where id=?',(cdc,qr,estado,parsed.get('protocolo',''),now() if estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA') else None,venta_id))
+        c.execute('update sifen_config set ultimo_envio_prod=?,ultimo_envio_prod_estado=?,actualizado_en=? where id=1',(now(),estado,now()))
+        c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_ENVIO_PRODUCCION',estado,f'Factura {venta_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")}'))
+        c.commit()
+        if estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA'): flash('SIFEN aprobó la factura. El PDF queda habilitado como KuDE con CDC y QR de Producción.')
+        else: flash('SIFEN respondió: '+estado+' · '+str(parsed.get('codigo',''))+' · '+str(parsed.get('mensaje','')))
+    except Exception as ex:
+        c.rollback(); _sifen_log('FE_ENVIO_PRODUCCION','ERROR',f'Factura {venta_id}: {ex}'); flash('Factura NO enviada/aprobada: '+str(ex))
+    finally: c.close()
+    return redirect(f'/ventas/{venta_id}/factura')
+
 @app.get('/ventas/<int:venta_id>/sifen/qr.svg')
 def sifen_qr_factura_svg(venta_id):
     from flask import Response
@@ -4362,6 +4400,11 @@ def configuracion_sifen():
             # Fuente fiscal única: SIFEN gobierna RUC/DV/timbrado/domicilio fiscal. La identidad institucional solo refleja esos datos.
             c.execute("update institucion_config set ruc=?,dv=?,timbrado=?,timbrado_desde=?,direccion=?,telefono=?,departamento=?,ciudad=?,ambiente_sifen=? where id=1",(vals[0],vals[1],vals[2],tim_desde,emis[7],emis[6],emis[1],emis[5],c.execute('select ambiente from sifen_config where id=1').fetchone()[0] or 'TEST'))
             c.commit();_sifen_log('CONFIG','OK','Empresa y Facturación Electrónica actualizadas desde la fuente fiscal única');flash('Datos fiscales guardados. Los campos compartidos se sincronizaron automáticamente.')
+        elif accion=='confirmar_habilitacion_dnit':
+            confirmado=1 if request.form.get('confirmado')=='1' else 0
+            c.execute('update sifen_config set dnit_habilitado_produccion=?,dnit_habilitado_confirmado_en=?,actualizado_en=? where id=1',(confirmado,now() if confirmado else None,now()))
+            c.commit();_sifen_log('HABILITACION_DNIT','OK' if confirmado else 'PENDIENTE','Administrador confirmó habilitación externa DNIT para Producción' if confirmado else 'Confirmación de habilitación DNIT retirada')
+            flash('Confirmación DNIT actualizada. Esta marca no habilita ante DNIT; solo registra que la habilitación externa ya fue obtenida.')
         elif accion=='ambiente_test':
             c.execute("update sifen_config set ambiente='TEST',produccion_habilitada=0,actualizado_en=? where id=1",(now(),));c.commit();_sifen_log('AMBIENTE','OK','Ambiente cambiado a TEST');flash('SIFEN quedó en ambiente TEST.')
         elif accion=='ambiente_produccion':
