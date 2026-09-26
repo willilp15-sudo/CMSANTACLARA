@@ -3749,6 +3749,33 @@ def init_v13996_sifen_emisor_firma():
 
 init_v13996_sifen_emisor_firma()
 
+# ===== V13.9.105: múltiples actividades económicas del emisor =====
+def init_v13105_actividades_economicas():
+    c=db()
+    c.execute("""CREATE TABLE IF NOT EXISTS sifen_actividades_economicas(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT NOT NULL,
+        descripcion TEXT NOT NULL,
+        principal INTEGER DEFAULT 0,
+        activo INTEGER DEFAULT 1,
+        creado_en TEXT,
+        actualizado_en TEXT,
+        UNIQUE(codigo)
+    )""")
+    cfg=c.execute('select * from sifen_config where id=1').fetchone()
+    if cfg:
+        cod=str(cfg['emis_actividad_codigo'] or '').strip(); des=str(cfg['emis_actividad_desc'] or '').strip()
+        if cod and des:
+            existe=c.execute('select id from sifen_actividades_economicas where codigo=?',(cod,)).fetchone()
+            if not existe:
+                c.execute('insert into sifen_actividades_economicas(codigo,descripcion,principal,activo,creado_en,actualizado_en) values(?,?,?,?,?,?)',(cod,des,1,1,now(),now()))
+    if c.execute('select count(*) from sifen_actividades_economicas where activo=1 and principal=1').fetchone()[0]==0:
+        primero=c.execute('select id from sifen_actividades_economicas where activo=1 order by id limit 1').fetchone()
+        if primero:c.execute('update sifen_actividades_economicas set principal=1 where id=?',(primero['id'],))
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.105-actividades-economicas-multiples',?)",(now(),))
+    c.commit();c.close()
+init_v13105_actividades_economicas()
+
 def _sifen_base(cfg):
     return SIFEN_PROD_BASE if str(cfg['ambiente'] or '').upper()=='PRODUCCION' else SIFEN_TEST_BASE
 
@@ -3780,8 +3807,9 @@ def _sifen_diagnostico(c,cfg):
     emis_faltan=[n for n,cod,des in emis_req if not str(cod or '').strip() or not str(des or '').strip()]
     if not str(cfg['emis_telefono'] or '').strip(): emis_faltan.append('Teléfono')
     add('Datos emisor XML',not emis_faltan,'Configurados' if not emis_faltan else 'Falta: '+', '.join(emis_faltan))
-    act_ok=bool(str(cfg['emis_actividad_codigo'] or '').strip() and str(cfg['emis_actividad_desc'] or '').strip())
-    add('Actividad económica emisor',act_ok,(str(cfg['emis_actividad_codigo'] or '')+' · '+str(cfg['emis_actividad_desc'] or '')) if act_ok else 'Falta código y descripción de actividad económica declarada en el RUC')
+    acts=c.execute("select codigo,descripcion,principal from sifen_actividades_economicas where activo=1 order by principal desc,id").fetchall()
+    act_ok=bool(acts)
+    add('Actividades económicas emisor',act_ok,(', '.join(str(a['codigo'])+' · '+str(a['descripcion']) for a in acts)) if acts else 'Falta al menos una actividad económica activa declarada en el RUC')
     # V13.9.79: motor real de firma XMLDSig + transporte SOAP/mTLS instalado.
     try:
         import lxml.etree, signxml
@@ -3943,9 +3971,13 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if dis_cod:_sifen_xml_text(ge,'cDisEmi',dis_cod,NS)
     if dis_desc:_sifen_xml_text(ge,'dDesDisEmi',dis_desc,NS)
     _sifen_xml_text(ge,'cCiuEmi',ciu_cod,NS);_sifen_xml_text(ge,'dDesCiuEmi',ciu_desc,NS);_sifen_xml_text(ge,'dTelEmi',tel,NS);_sifen_xml_text(ge,'dEmailE',inst['email'] or '',NS)
-    act_cod=str(cfg['emis_actividad_codigo'] or '').strip();act_desc=str(cfg['emis_actividad_desc'] or '').strip()
-    if not act_cod or not act_desc: raise ValueError('Falta la actividad económica del emisor (cActEco/dDesActEco). Complete Configuración → SIFEN con la actividad declarada en el RUC.')
-    gact=etree.SubElement(ge,'{%s}gActEco'%NS);_sifen_xml_text(gact,'cActEco',act_cod,NS);_sifen_xml_text(gact,'dDesActEco',act_desc,NS)
+    actividades=c.execute("select codigo,descripcion from sifen_actividades_economicas where activo=1 order by principal desc,id").fetchall()
+    if not actividades:
+        raise ValueError('Falta al menos una actividad económica activa del emisor. Complete Empresa y Facturación Electrónica → Actividades económicas.')
+    for act in actividades:
+        act_cod=str(act['codigo'] or '').strip(); act_desc=str(act['descripcion'] or '').strip()
+        if not act_cod or not act_desc: continue
+        gact=etree.SubElement(ge,'{%s}gActEco'%NS);_sifen_xml_text(gact,'cActEco',act_cod,NS);_sifen_xml_text(gact,'dDesActEco',act_desc,NS)
     gr=etree.SubElement(gg,'{%s}gDatRec'%NS);rdoc=str((d['sifen_numero_documento'] if 'sifen_numero_documento' in d.keys() else None) or d['receptor_doc'] or '').strip();rruc=rdoc.split('-')[0] if '-' in rdoc else rdoc;rdv=rdoc.split('-')[-1] if '-' in rdoc else ''
     nat=str(d['sifen_naturaleza'] or '1') if 'sifen_naturaleza' in d.keys() else '1';tiop=str(d['sifen_tipo_operacion'] or '1') if 'sifen_tipo_operacion' in d.keys() else '1';pais=str(d['sifen_pais'] or 'PRY') if 'sifen_pais' in d.keys() else 'PRY';paisd=str(d['sifen_pais_desc'] or 'Paraguay') if 'sifen_pais_desc' in d.keys() else 'Paraguay'
     # V13.9.93: prevención del rechazo SIFEN 1300 (naturaleza/tipo de operación).
@@ -4354,6 +4386,12 @@ def configuracion_sifen():
                 est=_solo_digitos(request.form.get('p_establecimiento'))[-3:].zfill(3);pex=_solo_digitos(request.form.get('p_punto'))[-3:].zfill(3)
                 if not est or not pex: raise ValueError('Establecimiento y punto son obligatorios.')
                 pid=int(request.form.get('p_id') or 0);pred=1 if request.form.get('p_predeterminado') else 0
+                # V13.9.104: si el usuario carga una combinación ya existente sin p_id,
+                # tratarla como edición del maestro en vez de intentar INSERT y disparar UNIQUE.
+                # Esto mantiene un solo registro por establecimiento+punto y evita duplicados.
+                if not pid:
+                    existente=c.execute('select id from sifen_puntos_expedicion where establecimiento=? and punto_expedicion=?',(est,pex)).fetchone()
+                    if existente: pid=int(existente['id'])
                 descripcion=(request.form.get('p_descripcion') or '').strip();timbrado=(request.form.get('p_timbrado') or '').strip()
                 fe=1 if request.form.get('p_factura') else 0;nc=1 if request.form.get('p_nc') else 0;nd=1 if request.form.get('p_nd') else 0
                 autorizado=1 if request.form.get('p_autorizado') else 0;activo=1 if request.form.get('p_activo') else 0
@@ -4375,16 +4413,54 @@ def configuracion_sifen():
                         raise ValueError('El correlativo de un punto que ya emitió documentos es automático y está protegido; no puede modificarse manualmente.')
                     if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0 where id<>?',(pid,))
                     c.execute('update sifen_puntos_expedicion set establecimiento=?,punto_expedicion=?,descripcion=?,timbrado=?,factura_electronica=?,nota_credito_electronica=?,nota_debito_electronica=?,autorizado_dnit=?,activo=?,predeterminado=?,proximo_numero_factura=?,actualizado_en=? where id=?',(est,pex,descripcion,timbrado,fe,nc,nd,autorizado,activo,pred,solicitado,now(),pid))
-                    flash('Punto de expedición actualizado correctamente.')
+                    # Mantener la configuración institucional alineada con el punto
+                    # predeterminado para que los formularios/KuDE no muestren datos antiguos.
+                    if pred:
+                        c.execute('update institucion_config set establecimiento=?,punto_expedicion=?,timbrado=coalesce(nullif(?,''),timbrado) where id=1',(est,pex,timbrado))
+                    flash('Punto de expedición actualizado correctamente. Los próximos documentos usarán estos datos; los documentos ya emitidos conservan su numeración histórica.')
                 else:
                     if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0')
                     c.execute('insert into sifen_puntos_expedicion(establecimiento,punto_expedicion,descripcion,timbrado,factura_electronica,nota_credito_electronica,nota_debito_electronica,autorizado_dnit,activo,predeterminado,proximo_numero_factura,creado_en,actualizado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(est,pex,descripcion,timbrado,fe,nc,nd,autorizado,activo,pred,solicitado,now(),now()))
+                    if pred:
+                        c.execute('update institucion_config set establecimiento=?,punto_expedicion=?,timbrado=coalesce(nullif(?,''),timbrado) where id=1',(est,pex,timbrado))
                     flash('Punto de expedición registrado. Use únicamente códigos previamente autorizados por DNIT.')
                 c.commit()
             except Exception as e:c.rollback();flash('No se pudo guardar el punto: '+str(e))
             c.close();return redirect('/configuracion/sifen')
         elif accion=='punto_predeterminado':
             pid=int(request.form.get('p_id') or 0);c.execute('update sifen_puntos_expedicion set predeterminado=0');c.execute('update sifen_puntos_expedicion set predeterminado=1,activo=1 where id=?',(pid,));c.commit();c.close();return redirect('/configuracion/sifen')
+        if accion=='actividad_guardar':
+            aid=int(request.form.get('actividad_id') or 0); cod=request.form.get('actividad_codigo','').strip(); des=request.form.get('actividad_descripcion','').strip(); principal=1 if request.form.get('actividad_principal') else 0; activo=1 if request.form.get('actividad_activo') else 0
+            try:
+                if not cod or not des: raise ValueError('Código y descripción son obligatorios.')
+                if principal and not activo: raise ValueError('La actividad principal debe estar activa.')
+                dup=c.execute('select id from sifen_actividades_economicas where codigo=? and id<>?',(cod,aid)).fetchone()
+                if dup: raise ValueError('Ya existe una actividad económica con el código '+cod+'.')
+                if principal:c.execute('update sifen_actividades_economicas set principal=0')
+                if aid:
+                    c.execute('update sifen_actividades_economicas set codigo=?,descripcion=?,principal=?,activo=?,actualizado_en=? where id=?',(cod,des,principal,activo,now(),aid))
+                else:
+                    c.execute('insert into sifen_actividades_economicas(codigo,descripcion,principal,activo,creado_en,actualizado_en) values(?,?,?,?,?,?)',(cod,des,principal,activo,now(),now()))
+                    aid=c.execute('select last_insert_rowid()').fetchone()[0]
+                if activo and c.execute('select count(*) from sifen_actividades_economicas where activo=1 and principal=1').fetchone()[0]==0:
+                    c.execute('update sifen_actividades_economicas set principal=1 where id=?',(aid,))
+                pr=c.execute('select * from sifen_actividades_economicas where activo=1 order by principal desc,id limit 1').fetchone()
+                if pr:c.execute('update sifen_config set emis_actividad_codigo=?,emis_actividad_desc=?,actualizado_en=? where id=1',(pr['codigo'],pr['descripcion'],now()))
+                c.commit(); flash('Actividad económica guardada correctamente.')
+            except Exception as e:c.rollback();flash('No se pudo guardar la actividad económica: '+str(e))
+            c.close();return redirect('/configuracion/sifen#actividades')
+        elif accion=='actividad_principal':
+            aid=int(request.form.get('actividad_id') or 0); a=c.execute('select * from sifen_actividades_economicas where id=?',(aid,)).fetchone()
+            if a:
+                c.execute('update sifen_actividades_economicas set principal=0');c.execute('update sifen_actividades_economicas set principal=1,activo=1,actualizado_en=? where id=?',(now(),aid));c.execute('update sifen_config set emis_actividad_codigo=?,emis_actividad_desc=?,actualizado_en=? where id=1',(a['codigo'],a['descripcion'],now()));c.commit();flash('Actividad principal actualizada.')
+            c.close();return redirect('/configuracion/sifen#actividades')
+        elif accion=='actividad_estado':
+            aid=int(request.form.get('actividad_id') or 0); a=c.execute('select * from sifen_actividades_economicas where id=?',(aid,)).fetchone()
+            if a:
+                nuevo=0 if int(a['activo'] or 0) else 1
+                if int(a['principal'] or 0) and not nuevo: flash('No puede desactivar la actividad principal. Seleccione primero otra actividad principal.')
+                else: c.execute('update sifen_actividades_economicas set activo=?,actualizado_en=? where id=?',(nuevo,now(),aid));c.commit();flash('Estado de actividad actualizado.')
+            c.close();return redirect('/configuracion/sifen#actividades')
         if accion=='guardar_empresa':
             campos=['razon_social','nombre_fantasia','direccion','telefono','whatsapp','email','web','pie_documento']
             vals=[request.form.get(x,'').strip() for x in campos]
@@ -4408,8 +4484,7 @@ def configuracion_sifen():
             vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
             tim_desde=request.form.get('timbrado_desde','').strip()
             emis=[request.form.get(x,'').strip() for x in ('emis_departamento_codigo','emis_departamento_desc','emis_distrito_codigo','emis_distrito_desc','emis_ciudad_codigo','emis_ciudad_desc','emis_telefono','emis_direccion')]
-            act_cod=request.form.get('emis_actividad_codigo','').strip();act_desc=request.form.get('emis_actividad_desc','').strip()
-            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,emis_actividad_codigo=?,emis_actividad_desc=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,act_cod,act_desc,now()))
+            c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,now()))
             # Fuente fiscal única: SIFEN gobierna RUC/DV/timbrado/domicilio fiscal. La identidad institucional solo refleja esos datos.
             c.execute("update institucion_config set ruc=?,dv=?,timbrado=?,timbrado_desde=?,direccion=?,telefono=?,departamento=?,ciudad=?,ambiente_sifen=? where id=1",(vals[0],vals[1],vals[2],tim_desde,emis[7],emis[6],emis[1],emis[5],c.execute('select ambiente from sifen_config where id=1').fetchone()[0] or 'TEST'))
             c.commit();_sifen_log('CONFIG','OK','Empresa y Facturación Electrónica actualizadas desde la fuente fiscal única');flash('Datos fiscales guardados. Los campos compartidos se sincronizaron automáticamente.')
@@ -4479,8 +4554,8 @@ def configuracion_sifen():
             except Exception as e:
                 detalle=str(e);c.execute("update sifen_config set ultimo_test=?,ultimo_estado='ERROR',ultimo_detalle=? where id=1",(now(),detalle));c.commit();_sifen_log('CONEXION_MTLS','ERROR',detalle);flash('Prueba de conexión fallida: '+detalle)
         c.close();return redirect('/configuracion/sifen')
-    cfg=c.execute('select * from sifen_config where id=1').fetchone();inst=c.execute('select * from institucion_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();diagnostico=_sifen_diagnostico(c,cfg);base_actual=_sifen_base(cfg);c.close()
-    return render_template('sifen_config.html',cfg=cfg,inst=inst,logs=logs,puntos=puntos,test_base=SIFEN_TEST_BASE,prod_base=SIFEN_PROD_BASE,base_actual=base_actual,diagnostico=diagnostico)
+    cfg=c.execute('select * from sifen_config where id=1').fetchone();inst=c.execute('select * from institucion_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();actividades=c.execute('select * from sifen_actividades_economicas order by principal desc,activo desc,codigo').fetchall();diagnostico=_sifen_diagnostico(c,cfg);base_actual=_sifen_base(cfg);c.close()
+    return render_template('sifen_config.html',cfg=cfg,inst=inst,logs=logs,puntos=puntos,actividades=actividades,test_base=SIFEN_TEST_BASE,prod_base=SIFEN_PROD_BASE,base_actual=base_actual,diagnostico=diagnostico)
 
 ROUTE_MODULE.update({'configuracion_sifen':'CONFIG_SANATORIO'})
 
