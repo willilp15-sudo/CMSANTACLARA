@@ -4154,7 +4154,16 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     _sifen_xml_text(de,'dFecFirma',fec_firma.isoformat(),NS);_sifen_xml_text(de,'dSisFact','1',NS)
     go=etree.SubElement(de,'{%s}gOpeDE'%NS);_sifen_xml_text(go,'iTipEmi','1',NS);_sifen_xml_text(go,'dDesTipEmi','Normal',NS);_sifen_xml_text(go,'dCodSeg',cod_seg,NS)
     gt=etree.SubElement(de,'{%s}gTimb'%NS);_sifen_xml_text(gt,'iTiDE',ide,NS);_sifen_xml_text(gt,'dDesTiDE',des,NS);_sifen_xml_text(gt,'dNumTim',d['punto_timbrado'] or cfg['timbrado'],NS);_sifen_xml_text(gt,'dEst',est,NS);_sifen_xml_text(gt,'dPunExp',pun,NS);_sifen_xml_text(gt,'dNumDoc',num,NS);_sifen_xml_text(gt,'dFeIniT',cfg['timbrado_desde'],NS)
-    gg=etree.SubElement(de,'{%s}gDatGralOpe'%NS);_sifen_xml_text(gg,'dFeEmiDE',str(fecha)[:10]+'T12:00:00',NS)
+    gg=etree.SubElement(de,'{%s}gDatGralOpe'%NS)
+    # V13.9.130: fecha/hora de emisión coherente con la firma. Para documentos del día
+    # usamos el mismo reloj America/Asuncion; para históricos conservamos la fecha y 12:00.
+    try:
+        _fdoc=str(fecha)[:10]
+        _hoy=fec_firma.date().isoformat()
+        _fec_emi=(fec_firma+datetime.timedelta(seconds=1)).replace(microsecond=0).isoformat() if _fdoc==_hoy else _fdoc+'T12:00:00'
+    except Exception:
+        _fec_emi=str(fecha)[:10]+'T12:00:00'
+    _sifen_xml_text(gg,'dFeEmiDE',_fec_emi,NS)
     # V13.9.125: iTipTra y dDesTipTra deben ser una pareja exacta del catálogo SIFEN V150.
     # Detectamos el contenido real de la factura: servicios=2, mercaderías=1, mixto=3.
     # En versiones anteriores FE enviaba iTipTra=1 con la descripción 'Prestación de servicios',
@@ -4163,8 +4172,11 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     for _it in items:
         _pid=_it['producto_id'] if 'producto_id' in _it.keys() else None
         _pr=c.execute("select tipo_producto,clasif_general,categoria from productos where id=?",(_pid,)).fetchone() if _pid else None
-        if _pr is not None and _producto_es_servicio(_pr): tiene_servicio=True
-        else: tiene_mercaderia=True
+        _desc_clas=str((_it['descripcion'] if 'descripcion' in _it.keys() else '') or '').upper()
+        if (_pr is not None and _producto_es_servicio(_pr)) or any(k in _desc_clas for k in ('SERVICIO','CONSULTA','PROCEDIMIENTO','HONORARIO','ESTUDIO','ANALISIS','ANÁLISIS')):
+            tiene_servicio=True
+        else:
+            tiene_mercaderia=True
     if tiene_servicio and tiene_mercaderia:
         tip_tra,des_tip_tra='3','Mixto (Venta de mercadería y servicios)'
     elif tiene_servicio:
@@ -4307,12 +4319,16 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         else: raise ValueError('Tasa IVA SIFEN no soportada: %s. Use 0, 5 o 10.'%pct)
 
     tots=etree.SubElement(de,'{%s}gTotSub'%NS)
-    _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS);_sifen_xml_text(tots,'dSub5',X(sub5),NS);_sifen_xml_text(tots,'dSub10',X(sub10),NS)
+    # V13.9.130: completar explícitamente los operandos opcionales usados por el
+    # evaluador aritmético de SIFEN. Con cero redondeo/comisión su valor correcto es 0.
+    # Esto evita que la regla interna calculo-coincide-info-xml opere con NULL.
+    _sifen_xml_text(tots,'dSubExe',X(sub_exe),NS);_sifen_xml_text(tots,'dSubExo','0',NS);_sifen_xml_text(tots,'dSub5',X(sub5),NS);_sifen_xml_text(tots,'dSub10',X(sub10),NS)
     _sifen_xml_text(tots,'dTotOpe',X(total),NS);_sifen_xml_text(tots,'dTotDesc','0',NS)
     _sifen_xml_text(tots,'dTotDescGlotem','0',NS);_sifen_xml_text(tots,'dTotAntItem','0',NS);_sifen_xml_text(tots,'dTotAnt','0',NS)
     _sifen_xml_text(tots,'dPorcDescTotal','0',NS);_sifen_xml_text(tots,'dDescTotal','0',NS);_sifen_xml_text(tots,'dAnticipo','0',NS)
-    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
+    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dComi','0',NS);_sifen_xml_text(tots,'dTotGralOpe',X(total),NS)
     _sifen_xml_text(tots,'dIVA5',X(iva5),NS);_sifen_xml_text(tots,'dIVA10',X(iva10),NS)
+    _sifen_xml_text(tots,'dLiqTotIVA5','0',NS);_sifen_xml_text(tots,'dLiqTotIVA10','0',NS);_sifen_xml_text(tots,'dIVAComi','0',NS)
     _sifen_xml_text(tots,'dTotIVA',X(iva5+iva10),NS);_sifen_xml_text(tots,'dBaseGrav5',X(base5),NS)
     _sifen_xml_text(tots,'dBaseGrav10',X(base10),NS);_sifen_xml_text(tots,'dTBasGraIVA',X(base5+base10),NS)
     if asoc:
