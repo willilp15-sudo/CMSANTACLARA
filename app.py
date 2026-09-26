@@ -3053,7 +3053,7 @@ def _kude_footer(story,inst,cdc=None,consulta_url=None,es_dte=False):
     from reportlab.lib.units import mm
     from reportlab.platypus import Table,TableStyle,Paragraph,Spacer
     from reportlab.lib.styles import getSampleStyleSheet
-    st=getSampleStyleSheet(); e=_kude_empresa(inst); qr=_kude_qr_flowable(consulta_url) if (es_dte and consulta_url) else None
+    st=getSampleStyleSheet(); e=_kude_empresa(inst); qr=_kude_qr_flowable(consulta_url) if consulta_url else None
     if es_dte and cdc:
         txt=f"<b>Consulte este Documento Electrónico con el CDC:</b><br/>{cdc}<br/><b>ESTE DOCUMENTO ES UNA REPRESENTACIÓN GRÁFICA DE UN DOCUMENTO ELECTRÓNICO (XML)</b>"
     elif cdc:
@@ -3068,7 +3068,7 @@ def _kude_footer(story,inst,cdc=None,consulta_url=None,es_dte=False):
 def init_v1364_factura_electronica():
     c=db()
     cols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
-    for col,defn in [('cdc','TEXT'),('estado_sifen',"TEXT DEFAULT 'NO_ENVIADO'"),('protocolo_sifen','TEXT'),('fecha_aprobacion_sifen','TEXT')]:
+    for col,defn in [('cdc','TEXT'),('estado_sifen',"TEXT DEFAULT 'NO_ENVIADO'"),('protocolo_sifen','TEXT'),('fecha_aprobacion_sifen','TEXT'),('qr_sifen','TEXT')]:
         if col not in cols:
             c.execute(f'alter table ventas add column {col} {defn}')
     c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
@@ -3132,7 +3132,7 @@ def factura_venta_pdf(venta_id):
     t=Table(data,colWidths=[14*mm,48*mm,10*mm,16*mm,25*mm,19*mm,18*mm,18*mm,18*mm],repeatRows=1);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('ALIGN',(2,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t]
     total=float(v['total'] or 0); totals=[['Sub Total:','','',f"{total:,.0f}"],['Descuento global:','','','0'],['Total a pagar:',monto_letras(total),'',f"{total:,.0f}"],['Liquidación IVA',f"5%: {float(v['iva_5'] or 0):,.0f}",f"10%: {float(v['iva_10'] or 0):,.0f}",f"Total IVA: {float(v['iva'] or 0):,.0f}"]]
     tt=Table(totals,colWidths=[35*mm,80*mm,35*mm,36*mm]);tt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('ALIGN',(-1,0),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5)]));story.append(tt)
-    url=None  # El QR fiscal se imprime solo desde dCarQR firmado; no se fabrica desde el CDC.
+    url=(v['qr_sifen'] if 'qr_sifen' in v.keys() else None) or None  # dCarQR real extraído del rDE firmado; nunca se fabrica solo desde el CDC.
     _kude_footer(story,inst,v['cdc'],url,es_dte)
     doc.build(story);b.seek(0);return send_file(b,mimetype='application/pdf',as_attachment=False,download_name=f"Factura_{v['numero'] or venta_id}.pdf")
 
@@ -3901,8 +3901,18 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         ide=6;des='Nota de débito electrónica';fecha=d['fecha'];numero=d['numero'];asoc=d['factura_cdc']
     else:raise ValueError('Tipo de DE no soportado.')
     est,pun,num=_sifen_numero_partes(numero)
-    cod_seg=str(secrets.randbelow(1000000000)).zfill(9)
-    base=_sifen_cdc_base(cfg,ide,numero,fecha,cod_seg);cdc=base+str(_sifen_dv_mod11(base))
+    # V13.9.101: FE debe conservar un único CDC/código de seguridad. El XML, QR y factura
+    # impresa tienen que referirse al mismo identificador; no se regenera un CDC al validar.
+    cdc_guardado=str(d['cdc'] or '').strip() if tipo=='FE' and 'cdc' in d.keys() else ''
+    cod_guardado=str(d['codigo_seguridad_sifen'] or '').strip() if tipo=='FE' and 'codigo_seguridad_sifen' in d.keys() else ''
+    if tipo=='FE' and len(cdc_guardado)==44 and cdc_guardado.isdigit() and len(cod_guardado)==9 and cod_guardado.isdigit():
+        cdc=cdc_guardado; cod_seg=cod_guardado
+    else:
+        cod_seg=str(secrets.randbelow(1000000000)).zfill(9)
+        base=_sifen_cdc_base(cfg,ide,numero,fecha,cod_seg);cdc=base+str(_sifen_dv_mod11(base))
+        if tipo=='FE':
+            estado='TEST_GENERADO' if str(cfg['ambiente'] or '').upper()=='TEST' else 'NO_ENVIADO'
+            c.execute("update ventas set cdc=?,codigo_seguridad_sifen=?,cdc_ambiente=?,estado_sifen=? where id=?",(cdc,cod_seg,str(cfg['ambiente'] or '').upper(),estado,doc_id))
     root=etree.Element('{%s}rDE'%NS,nsmap={None:NS,'xsi':XSI})
     root.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
     _sifen_xml_text(root,'dVerFor','150',NS)
@@ -4166,6 +4176,49 @@ def _sifen_firmar_rde(xml_bytes,cfg):
     gf=etree.SubElement(firmado,'{%s}gCamFuFD'%ns)
     _sifen_xml_text(gf,'dCarQR',_sifen_qr_url_rde(firmado,cfg),ns)
     return etree.tostring(firmado,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+
+def _sifen_extraer_qr_rde(xml_bytes):
+    from lxml import etree
+    NS='http://ekuatia.set.gov.py/sifen/xsd'
+    root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else xml_bytes.encode('utf-8'))
+    return (root.findtext('{%s}gCamFuFD/{%s}dCarQR'%(NS,NS)) or '').strip()
+
+@app.post('/ventas/<int:venta_id>/sifen/preparar-validacion')
+def sifen_preparar_validacion_factura(venta_id):
+    c=db()
+    try:
+        cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        if not cfg: raise ValueError('Configuración SIFEN inexistente.')
+        xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
+        firmado=_sifen_firmar_rde(xml,cfg)
+        ok,detalle=_sifen_validar_xsd_v150(firmado)
+        if not ok: raise ValueError('El XML firmado no pasó XSD V150: '+str(detalle))
+        qr=_sifen_extraer_qr_rde(firmado)
+        if not qr: raise ValueError('El rDE firmado no contiene dCarQR.')
+        estado_actual=c.execute('select estado_sifen from ventas where id=?',(venta_id,)).fetchone()
+        ea=str(estado_actual['estado_sifen'] or '').upper() if estado_actual else ''
+        nuevo=ea if ea in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA') else 'TEST_VALIDADO_XSD'
+        c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=? where id=?',(cdc,qr,nuevo,venta_id))
+        c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_PREVALIDACION','OK',f'Factura {venta_id} · CDC {cdc} · QR generado desde dCarQR del XML firmado · XSD V150 OK'))
+        c.commit();flash('CDC y QR generados desde el XML firmado. XSD V150: OK. El QR queda en la factura para validación; esto no equivale a aprobación SIFEN.')
+    except Exception as ex:
+        c.rollback();_sifen_log('FE_PREVALIDACION','ERROR',f'Factura {venta_id}: {ex}');flash('No se pudo generar CDC/QR para validación: '+str(ex))
+    finally:
+        c.close()
+    return redirect(f'/ventas/{venta_id}/factura')
+
+@app.get('/ventas/<int:venta_id>/sifen/qr.svg')
+def sifen_qr_factura_svg(venta_id):
+    from flask import Response
+    from reportlab.graphics.barcode import qr
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderSVG
+    c=db();r=c.execute('select qr_sifen from ventas where id=?',(venta_id,)).fetchone();c.close()
+    texto=(r['qr_sifen'] if r and 'qr_sifen' in r.keys() else '') or ''
+    if not texto:return Response('QR SIFEN no generado',status=404,mimetype='text/plain')
+    q=qr.QrCodeWidget(texto);b=q.getBounds();w=b[2]-b[0];h=b[3]-b[1];size=180
+    d=Drawing(size,size,transform=[size/w,0,0,size/h,0,0]);d.add(q)
+    return Response(renderSVG.drawToString(d),mimetype='image/svg+xml')
 
 def _sifen_enviar_sync(xml_firmado,cfg,timeout=35):
     """Transmite un rDE firmado por recepción sincrónica SIFEN usando mTLS."""
