@@ -4261,7 +4261,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
             # V13.9.128: el monto de pago debe coincidir con el total matemático de los ítems, no con un total histórico potencialmente desfasado.
             from decimal import Decimal, ROUND_HALF_UP
             _pay_total=sum((Decimal(str(x['cantidad'] or 1))*Decimal(str(x['precio'] or 0)) for x in items), Decimal('0'))
-            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),'f'),NS)
+            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP),'f'),NS)
             mon=str(d['moneda'] or 'PYG') if 'moneda' in d.keys() else 'PYG'
             _sifen_xml_text(gp,'cMoneTiPag',mon,NS);_sifen_xml_text(gp,'dDMoneTiPag','Guarani' if mon=='PYG' else mon,NS)
             if mon!='PYG' and 'tipo_cambio' in d.keys() and d['tipo_cambio']:
@@ -4271,11 +4271,14 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # V13.9.89: construcción integral de importes obligatorios V150.
     # TgValorItem exige un grupo gValorRestaItem real (no una etiqueta vacía) y
     # TgCamIVA exige dBasExe incluso cuando el ítem está gravado.
+    # V13.9.134: motor aritmético SIFEN con Decimal y escala monetaria canónica de 4 decimales.
+    # El XSD permite hasta 8, pero los ejemplos/interoperabilidad SIFEN usan 4 y evitamos
+    # residuos periódicos a 8 decimales que disparan el evaluador calculo-coincide-info-xml.
     # V13.9.128: motor aritmético SIFEN con Decimal. La regla de SIFEN evalúa
     # los valores escritos en XML; por ello precio*cantidad, dTotOpeItem, base e IVA
     # se derivan de una única fuente y con redondeo HALF_UP uniforme.
     from decimal import Decimal, ROUND_HALF_UP
-    Q4=Decimal('0.00000001')
+    Q4=Decimal('0.0001')
     def D(v, default='0'):
         try: return Decimal(str(v if v not in (None,'') else default))
         except Exception: return Decimal(default)
