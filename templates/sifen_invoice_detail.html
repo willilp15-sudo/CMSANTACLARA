@@ -3,7 +3,7 @@
 <p><b>Factura:</b> {{v.numero}} &nbsp; <b>Cliente:</b> {{v.cliente or '-'}} &nbsp; <b>CDC:</b> {{v.cdc or '-'}}</p>
 <div style="padding:14px;border:1px solid #ddd;border-radius:8px;margin:12px 0">
 <p><b>Estado:</b> {{v.estado_sifen or 'NO ENVIADO'}}</p><p><b>Código SIFEN:</b> {{v.sifen_codigo_error or '-'}}</p>
-<p><b>Motivo / mensaje:</b> {{v.sifen_mensaje_error or 'SIFEN todavía no devolvió un motivo para este documento.'}}</p>
+<p><b>Motivo / mensaje:</b> {{v.sifen_mensaje_error or ('No existe respuesta de SIFEN para este documento.' if (v.sifen_intentos or 0)==0 else 'El intento no devolvió un mensaje interpretable de SIFEN.')}}</p>
 <p><b>Protocolo:</b> {{v.protocolo_sifen or '-'}} &nbsp; <b>HTTP:</b> {{v.sifen_http_status or '-'}} &nbsp; <b>Fecha respuesta:</b> {{v.sifen_fecha_respuesta or '-'}}</p>
 <p><b>Intentos:</b> {{v.sifen_intentos or 0}} &nbsp; <b>Último intento:</b> {{v.sifen_ultimo_intento or '-'}}</p></div>
 <details><summary><b>Ver respuesta XML/SOAP completa recibida de SIFEN</b></summary><pre style="white-space:pre-wrap;overflow:auto;max-height:500px;background:#f6f6f6;padding:12px">{{v.respuesta_sifen or 'No hay respuesta XML/SOAP almacenada para esta factura.'}}</pre></details>

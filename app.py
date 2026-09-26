@@ -4415,13 +4415,15 @@ def _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr):
     c.execute(sql,(cdc,qr,estado,parsed.get('protocolo',''),now() if aprobado else None,codigo,mensaje,now(),raw[:50000],status,parsed.get('fecha_proceso') or now(),venta_id))
 
 def _sifen_emitir_factura_automatico(venta_id):
-    """Proceso único de emisión FE: CDC -> XML -> firma -> QR -> XSD -> SIFEN (PROD).
-    En TEST realiza todo salvo la transmisión fiscal. Devuelve el estado final.
+    """Proceso único FE: CDC -> XML -> firma -> QR -> XSD -> WS SIFEN.
+    TEST transmite al WS TEST para obtener el resultado real de validación, sin valor fiscal.
+    PRODUCCION transmite solo cuando la habilitación segura está activa.
     """
     c=db()
     try:
         cfg=c.execute('select * from sifen_config where id=1').fetchone()
         if not cfg: raise ValueError('Configuración SIFEN inexistente.')
+        ambiente=str(cfg['ambiente'] or 'TEST').upper()
         xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
         firmado=_sifen_firmar_rde(xml,cfg)
         ok,detalle=_sifen_validar_xsd_v150(firmado)
@@ -4429,24 +4431,34 @@ def _sifen_emitir_factura_automatico(venta_id):
         qr=_sifen_extraer_qr_rde(firmado)
         if not qr: raise ValueError('El XML firmado no contiene dCarQR.')
         _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
-        prod=str(cfg['ambiente'] or '').upper()=='PRODUCCION' and int(cfg['produccion_habilitada'] or 0)==1
-        if prod:
+        if ambiente=='PRODUCCION':
+            if not int(cfg['produccion_habilitada'] or 0):
+                raise ValueError('Producción SIFEN no está habilitada en el ERP.')
             checks=_sifen_diagnostico(c,cfg); faltan=[x['nombre'] for x in checks if not x['ok']]
             if faltan: raise ValueError('Diagnóstico de Producción pendiente: '+', '.join(faltan))
-            status,resp,url=_sifen_enviar_sync(firmado,cfg)
-            parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
-            aprobado=estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
-            _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr)
+        elif ambiente!='TEST':
+            raise ValueError('Ambiente SIFEN no reconocido: '+ambiente)
+        # TEST también debe transmitir: el objetivo del ambiente de pruebas es
+        # recibir la validación real de SIFEN (aprobación/rechazo sin valor fiscal).
+        status,resp,url=_sifen_enviar_sync(firmado,cfg)
+        parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+        _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr)
+        if ambiente=='PRODUCCION':
             c.execute('update sifen_config set ultimo_envio_prod=?,ultimo_envio_prod_estado=?,actualizado_en=? where id=1',(now(),estado,now()))
-            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA',estado,f'Factura {venta_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")}'))
-        else:
-            estado='TEST_VALIDADO_XSD'
-            c.execute('update ventas set cdc=?,qr_sifen=?,estado_sifen=? where id=?',(cdc,qr,estado,venta_id))
-            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA',estado,f'Factura {venta_id} · CDC {cdc} · QR/XML firmado · XSD V150 OK · ambiente TEST, sin transmisión fiscal'))
+        c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA_'+ambiente,estado,f'Factura {venta_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")} · {url}'))
         c.commit()
         return estado
-    except Exception:
-        c.rollback(); raise
+    except Exception as ex:
+        c.rollback()
+        # Un fallo local/de conexión NO es un rechazo SIFEN. Se conserva el
+        # motivo técnico y se permite reintentar sin alterar número/CDC/importe.
+        try:
+            c.execute("update ventas set estado_sifen='ERROR_ENVIO',sifen_codigo_error='',sifen_mensaje_error=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1,sifen_fecha_respuesta=null where id=?",(str(ex)[:3000],now(),venta_id))
+            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'FE_EMISION_AUTOMATICA','ERROR_ENVIO',f'Factura {venta_id}: {ex}'))
+            c.commit()
+        except Exception:
+            c.rollback()
+        raise
     finally:
         c.close()
 
@@ -5678,6 +5690,29 @@ def sifen_corregir_documento(tipo,doc_id):
             c.commit(); flash('Corrección guardada. El documento quedó PENDIENTE_REENVIO. Debe regenerarse/firmarse/transmitirse con el transmisor SIFEN real antes de considerarlo aceptado.'); c.close(); return redirect('/sifen/monitor')
         except Exception as e:c.rollback();flash(str(e))
     c.close(); return render_template('sifen_correct_document.html',doc=doc,tipo=tipo)
+
+def init_v139113_sifen_test_transmision_real():
+    c=db()
+    # Versiones previas podían mostrar RECHAZADO aunque nunca hubiera existido
+    # intento ni respuesta SOAP. Esos casos se reclasifican sin tocar el DE.
+    c.execute("""update ventas set estado_sifen='NO_ENVIADO',sifen_mensaje_error='Documento generado anteriormente sin transmisión a SIFEN. Use Reintentar para enviarlo al ambiente configurado.'
+                 where upper(coalesce(estado_sifen,''))='RECHAZADO'
+                   and coalesce(sifen_intentos,0)=0
+                   and coalesce(respuesta_sifen,'')=''""")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.113-sifen-test-transmision-real',?)",(now(),))
+    c.commit();c.close()
+init_v139113_sifen_test_transmision_real()
+
+@app.post('/sifen/monitor/venta/<int:venta_id>/reintentar')
+def sifen_reintentar_venta(venta_id):
+    c=db();v=c.execute('select id,numero,estado_sifen from ventas where id=?',(venta_id,)).fetchone();c.close()
+    if not v:return ('Factura no encontrada',404)
+    try:
+        estado=_sifen_emitir_factura_automatico(venta_id)
+        flash('SIFEN procesó el reintento. Estado recibido: '+str(estado)+'. Revise Ver detalle SIFEN para código, mensaje y XML/SOAP.')
+    except Exception as ex:
+        flash('No se obtuvo una respuesta aprobada/rechazada de SIFEN. Error de envío: '+str(ex))
+    return redirect(f'/ventas/{venta_id}/sifen/detalle')
 
 @app.post('/sifen/monitor/nd/<int:nid>/reintentar')
 def sifen_reintentar_nd(nid):
