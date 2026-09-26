@@ -4143,7 +4143,23 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     go=etree.SubElement(de,'{%s}gOpeDE'%NS);_sifen_xml_text(go,'iTipEmi','1',NS);_sifen_xml_text(go,'dDesTipEmi','Normal',NS);_sifen_xml_text(go,'dCodSeg',cod_seg,NS)
     gt=etree.SubElement(de,'{%s}gTimb'%NS);_sifen_xml_text(gt,'iTiDE',ide,NS);_sifen_xml_text(gt,'dDesTiDE',des,NS);_sifen_xml_text(gt,'dNumTim',d['punto_timbrado'] or cfg['timbrado'],NS);_sifen_xml_text(gt,'dEst',est,NS);_sifen_xml_text(gt,'dPunExp',pun,NS);_sifen_xml_text(gt,'dNumDoc',num,NS);_sifen_xml_text(gt,'dFeIniT',cfg['timbrado_desde'],NS)
     gg=etree.SubElement(de,'{%s}gDatGralOpe'%NS);_sifen_xml_text(gg,'dFeEmiDE',str(fecha)[:10]+'T12:00:00',NS)
-    gc=etree.SubElement(gg,'{%s}gOpeCom'%NS);_sifen_xml_text(gc,'iTipTra','2' if tipo!='FE' else '1',NS);_sifen_xml_text(gc,'dDesTipTra','Prestación de servicios',NS);_sifen_xml_text(gc,'iTImp','1',NS);_sifen_xml_text(gc,'dDesTImp','IVA',NS);_sifen_xml_text(gc,'cMoneOpe',d['moneda'] if 'moneda' in d.keys() and d['moneda'] else 'PYG',NS);_sifen_xml_text(gc,'dDesMoneOpe','Guarani',NS)
+    # V13.9.125: iTipTra y dDesTipTra deben ser una pareja exacta del catálogo SIFEN V150.
+    # Detectamos el contenido real de la factura: servicios=2, mercaderías=1, mixto=3.
+    # En versiones anteriores FE enviaba iTipTra=1 con la descripción 'Prestación de servicios',
+    # lo que provocaba el rechazo SIFEN 1203.
+    tiene_servicio=False; tiene_mercaderia=False
+    for _it in items:
+        _pid=_it['producto_id'] if 'producto_id' in _it.keys() else None
+        _pr=c.execute("select tipo_producto,clasif_general,categoria from productos where id=?",(_pid,)).fetchone() if _pid else None
+        if _pr is not None and _producto_es_servicio(_pr): tiene_servicio=True
+        else: tiene_mercaderia=True
+    if tiene_servicio and tiene_mercaderia:
+        tip_tra,des_tip_tra='3','Mixto (Venta de mercadería y servicios)'
+    elif tiene_servicio:
+        tip_tra,des_tip_tra='2','Prestación de servicios'
+    else:
+        tip_tra,des_tip_tra='1','Venta de mercadería'
+    gc=etree.SubElement(gg,'{%s}gOpeCom'%NS);_sifen_xml_text(gc,'iTipTra',tip_tra,NS);_sifen_xml_text(gc,'dDesTipTra',des_tip_tra,NS);_sifen_xml_text(gc,'iTImp','1',NS);_sifen_xml_text(gc,'dDesTImp','IVA',NS);_sifen_xml_text(gc,'cMoneOpe',d['moneda'] if 'moneda' in d.keys() and d['moneda'] else 'PYG',NS);_sifen_xml_text(gc,'dDesMoneOpe','Guarani',NS)
     ge=etree.SubElement(gg,'{%s}gEmis'%NS)
     # V13.9.84: TgEmis V150 exige ubicación y teléfono del emisor. Se toman de Configuración SIFEN; no se inventan códigos geográficos.
     dep_cod=str(cfg['emis_departamento_codigo'] or '').strip();dep_desc=str(cfg['emis_departamento_desc'] or '').strip();dis_cod=str(cfg['emis_distrito_codigo'] or '').strip();dis_desc=str(cfg['emis_distrito_desc'] or '').strip();ciu_cod=str(cfg['emis_ciudad_codigo'] or '').strip();ciu_desc=str(cfg['emis_ciudad_desc'] or '').strip();tel=str(cfg['emis_telefono'] or inst['telefono'] or '').strip();dire=str(cfg['emis_direccion'] or inst['direccion'] or '').strip()
