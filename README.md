@@ -19,3 +19,10 @@ V13.9.124: dFecFirma corregida para America/Asuncion en Render; margen técnico 
 
 
 V13.9.131: corrige clasificación iTipTra usando aliases únicos del maestro y la descripción SIFEN final; evita colisión de columna descripcion proveniente de vi.*.
+
+
+V13.9.135 SIFEN PYG SCALE 0
+- Importes monetarios PYG se generan a 0 decimales.
+- Base IVA e IVA por item se redondean HALF_UP a guaranies enteros; IVA se deriva como total gravado - base para conservar identidad.
+- Otras monedas mantienen 4 decimales.
+- Pago contado usa la misma escala monetaria que el DE.

@@ -4185,7 +4185,8 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         tip_tra,des_tip_tra='2','Prestación de servicios'
     else:
         tip_tra,des_tip_tra='1','Venta de mercadería'
-    gc=etree.SubElement(gg,'{%s}gOpeCom'%NS);_sifen_xml_text(gc,'iTipTra',tip_tra,NS);_sifen_xml_text(gc,'dDesTipTra',des_tip_tra,NS);_sifen_xml_text(gc,'iTImp','1',NS);_sifen_xml_text(gc,'dDesTImp','IVA',NS);_sifen_xml_text(gc,'cMoneOpe',d['moneda'] if 'moneda' in d.keys() and d['moneda'] else 'PYG',NS);_sifen_xml_text(gc,'dDesMoneOpe','Guarani',NS)
+    mon_ope=str(d['moneda'] if 'moneda' in d.keys() and d['moneda'] else 'PYG').upper().strip()
+    gc=etree.SubElement(gg,'{%s}gOpeCom'%NS);_sifen_xml_text(gc,'iTipTra',tip_tra,NS);_sifen_xml_text(gc,'dDesTipTra',des_tip_tra,NS);_sifen_xml_text(gc,'iTImp','1',NS);_sifen_xml_text(gc,'dDesTImp','IVA',NS);_sifen_xml_text(gc,'cMoneOpe',mon_ope,NS);_sifen_xml_text(gc,'dDesMoneOpe','Guarani' if mon_ope=='PYG' else mon_ope,NS)
     ge=etree.SubElement(gg,'{%s}gEmis'%NS)
     # V13.9.84: TgEmis V150 exige ubicación y teléfono del emisor. Se toman de Configuración SIFEN; no se inventan códigos geográficos.
     dep_cod=str(cfg['emis_departamento_codigo'] or '').strip();dep_desc=str(cfg['emis_departamento_desc'] or '').strip();dis_cod=str(cfg['emis_distrito_codigo'] or '').strip();dis_desc=str(cfg['emis_distrito_desc'] or '').strip();ciu_cod=str(cfg['emis_ciudad_codigo'] or '').strip();ciu_desc=str(cfg['emis_ciudad_desc'] or '').strip();tel=str(cfg['emis_telefono'] or inst['telefono'] or '').strip();dire=str(cfg['emis_direccion'] or inst['direccion'] or '').strip()
@@ -4261,8 +4262,9 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
             # V13.9.128: el monto de pago debe coincidir con el total matemático de los ítems, no con un total histórico potencialmente desfasado.
             from decimal import Decimal, ROUND_HALF_UP
             _pay_total=sum((Decimal(str(x['cantidad'] or 1))*Decimal(str(x['precio'] or 0)) for x in items), Decimal('0'))
-            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP),'f'),NS)
-            mon=str(d['moneda'] or 'PYG') if 'moneda' in d.keys() else 'PYG'
+            _pay_q=Decimal('1') if mon_ope=='PYG' else Decimal('0.0001')
+            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(_pay_q, rounding=ROUND_HALF_UP),'f'),NS)
+            mon=mon_ope
             _sifen_xml_text(gp,'cMoneTiPag',mon,NS);_sifen_xml_text(gp,'dDMoneTiPag','Guarani' if mon=='PYG' else mon,NS)
             if mon!='PYG' and 'tipo_cambio' in d.keys() and d['tipo_cambio']:
                 _sifen_xml_text(gp,'dTiCamTiPag',str(round(float(d['tipo_cambio']),4)),NS)
@@ -4271,19 +4273,20 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # V13.9.89: construcción integral de importes obligatorios V150.
     # TgValorItem exige un grupo gValorRestaItem real (no una etiqueta vacía) y
     # TgCamIVA exige dBasExe incluso cuando el ítem está gravado.
-    # V13.9.134: motor aritmético SIFEN con Decimal y escala monetaria canónica de 4 decimales.
-    # El XSD permite hasta 8, pero los ejemplos/interoperabilidad SIFEN usan 4 y evitamos
-    # residuos periódicos a 8 decimales que disparan el evaluador calculo-coincide-info-xml.
+    # V13.9.135: escala monetaria dependiente de la moneda.
+    # Para PYG se calculan/escriben importes monetarios a 0 decimales. Esto evita que
+    # el evaluador de reglas SIFEN recalcule el IVA en guaraníes a escala 0 mientras
+    # el XML trae base/IVA fraccionarios. Para otras monedas conservamos 4 decimales.
     # V13.9.128: motor aritmético SIFEN con Decimal. La regla de SIFEN evalúa
     # los valores escritos en XML; por ello precio*cantidad, dTotOpeItem, base e IVA
     # se derivan de una única fuente y con redondeo HALF_UP uniforme.
     from decimal import Decimal, ROUND_HALF_UP
-    Q4=Decimal('0.0001')
+    QM=Decimal('1') if mon_ope=='PYG' else Decimal('0.0001')
     def D(v, default='0'):
         try: return Decimal(str(v if v not in (None,'') else default))
         except Exception: return Decimal(default)
     def X(v):
-        v=D(v).quantize(Q4, rounding=ROUND_HALF_UP)
+        v=D(v).quantize(QM, rounding=ROUND_HALF_UP)
         return format(v,'f')
     total=Decimal('0'); sub_exe=Decimal('0'); sub5=Decimal('0'); sub10=Decimal('0')
     iva5=Decimal('0'); iva10=Decimal('0'); base5=Decimal('0'); base10=Decimal('0')
@@ -4295,7 +4298,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         _sifen_xml_text(gi,'cUniMed',(it['sifen_unidad_codigo'] if 'sifen_unidad_codigo' in it.keys() else None) or '77',NS);_sifen_xml_text(gi,'dDesUniMed',(it['sifen_unidad_desc'] if 'sifen_unidad_desc' in it.keys() else None) or 'UNI',NS)
         q=D(it['cantidad'], '1'); precio=D(it['precio']); pct=D(it['iva_pct'])
         # E727 = E721 * E711; EA008 coincide con E727 cuando no hay descuentos/anticipos.
-        bruto=(q*precio).quantize(Q4, rounding=ROUND_HALF_UP)
+        bruto=(q*precio).quantize(QM, rounding=ROUND_HALF_UP)
         ope=bruto
         _sifen_xml_text(gi,'dCantProSer',format(q.normalize(),'f'),NS)
         gv=etree.SubElement(gi,'{%s}gValorItem'%NS)
@@ -4310,9 +4313,11 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         _sifen_xml_text(giv,'dPropIVA','100',NS);_sifen_xml_text(giv,'dTasaIVA',str(int(pct)),NS)
         if pct>0:
             divisor=Decimal('1')+(pct/Decimal('100'))
-            base=(ope/divisor).quantize(Q4, rounding=ROUND_HALF_UP)
-            # E736 = E735 * E734 / 100, exactamente como define V150.
-            iva=(base*(pct/Decimal('100'))).quantize(Q4, rounding=ROUND_HALF_UP)
+            base=(ope/divisor).quantize(QM, rounding=ROUND_HALF_UP)
+            # E736: en PYG el motor usa escala 0; derivamos el impuesto como diferencia
+            # entre la porción gravada y la base ya redondeada para conservar identidad monetaria.
+            gravada=(ope*(Decimal('100')/Decimal('100'))).quantize(QM, rounding=ROUND_HALF_UP)
+            iva=(gravada-base).quantize(QM, rounding=ROUND_HALF_UP)
         else:
             base=Decimal('0'); iva=Decimal('0')
         _sifen_xml_text(giv,'dBasGravIVA',X(base),NS);_sifen_xml_text(giv,'dLiqIVAItem',X(iva),NS)
