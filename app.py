@@ -3142,6 +3142,9 @@ init_v1365_empresa_config()
 
 @app.route('/configuracion-empresa',methods=['GET','POST'])
 def configuracion_empresa():
+    # V13.9.99: Empresa e Identidad se unifica con Facturación Electrónica.
+    # Se conserva esta URL solo como compatibilidad con marcadores/enlaces antiguos.
+    return redirect('/configuracion/sifen#empresa')
     if not (user_has('USUARIOS','ADMINISTRAR') or user_has('CONFIG_SANATORIO','EDITAR')):
         flash('No tiene permiso para modificar la configuración de la empresa.'); return redirect('/')
     c=db()
@@ -3978,6 +3981,40 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
     return xml,cdc
 
+def _sifen_generar_factura_test_autocontenida(c):
+    """Genera una FE TEST completa sin depender de ventas históricas.
+
+    Los registros se crean dentro de un SAVEPOINT y se revierten siempre; no
+    quedan clientes, productos, ventas ni ítems de prueba en la base.
+    """
+    import datetime
+    sp='sifen_autotest_fixture'
+    c.execute('SAVEPOINT '+sp)
+    try:
+        # Receptor B2C de prueba: evita depender del maestro de clientes.
+        cur=c.execute("insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      ('CLIENTE','1234567','CONSUMIDOR FINAL TEST','','','PYG','2','2','2','1','1234567','PRY','Paraguay','Domicilio TEST','0'))
+        tid=cur.lastrowid
+        cur=c.execute("insert into productos(codigo,nombre,categoria,costo_pyg,precio_pyg,stock,stock_min,iva_pct,sifen_descripcion,sifen_unidad_codigo,sifen_unidad_desc) values(?,?,?,?,?,?,?,?,?,?,?)",
+                      ('SIFEN-TEST','Servicio medico TEST','SERVICIO',0,11000,0,0,10,'Servicio medico TEST','77','UNI'))
+        pid=cur.lastrowid
+        # Número reservado únicamente dentro del SAVEPOINT. No consume correlativos.
+        cur=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,estado) values(?,?,?,?,?,?,?,?,?,?,?)",
+                      (datetime.date.today().isoformat(),tid,'001-001-0000001','PYG',1,10000,1000,0,11000,11000,'TEST_SIFEN'))
+        vid=cur.lastrowid
+        cols={r['name'] for r in c.execute('pragma table_info(venta_items)').fetchall()}
+        if 'descripcion' in cols:
+            c.execute("insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)",
+                      (vid,pid,1,11000,11000,11000,0,10,'Servicio medico TEST'))
+        else:
+            c.execute("insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)",
+                      (vid,pid,1,11000,11000,11000,0,10))
+        xml,cdc=_sifen_generar_de_v150(c,'FE',vid)
+        return xml,cdc,vid
+    finally:
+        c.execute('ROLLBACK TO '+sp)
+        c.execute('RELEASE '+sp)
+
 def _sifen_validar_xsd_v150(xml_bytes):
     """Valida un rDE V150 contra el esquema de recepción oficial.
 
@@ -4200,13 +4237,34 @@ def configuracion_sifen():
             c.close();return redirect('/configuracion/sifen')
         elif accion=='punto_predeterminado':
             pid=int(request.form.get('p_id') or 0);c.execute('update sifen_puntos_expedicion set predeterminado=0');c.execute('update sifen_puntos_expedicion set predeterminado=1,activo=1 where id=?',(pid,));c.commit();c.close();return redirect('/configuracion/sifen')
-        if accion=='guardar':
+        if accion=='guardar_empresa':
+            campos=['razon_social','nombre_fantasia','direccion','telefono','whatsapp','email','web','pie_documento']
+            vals=[request.form.get(x,'').strip() for x in campos]
+            c.execute('update institucion_config set '+','.join(f'{x}=?' for x in campos)+' where id=1',vals)
+            logo=request.files.get('logo')
+            if logo and logo.filename:
+                ext=Path(logo.filename).suffix.lower()
+                if ext in ('.png','.jpg','.jpeg','.webp'):
+                    try:
+                        from PIL import Image as PILImage
+                        logo.stream.seek(0);imagen=PILImage.open(logo.stream);imagen.verify();logo.stream.seek(0)
+                        nombre='logo_empresa'+ext;destino=os.path.join(BRANDING_DIR,nombre)
+                        for anterior in Path(BRANDING_DIR).glob('logo_empresa.*'):
+                            try: anterior.unlink()
+                            except OSError: pass
+                        logo.save(destino);c.execute('update institucion_config set logo_archivo=? where id=1',(nombre,))
+                    except Exception: flash('Logo no actualizado: el archivo no es una imagen válida.')
+                else: flash('Logo no actualizado: use PNG, JPG, JPEG o WEBP.')
+            c.commit();audit('CONFIG_EMPRESA','Actualización desde Empresa y Facturación Electrónica');flash('Datos de empresa e identidad guardados.')
+        elif accion=='guardar':
             vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
             tim_desde=request.form.get('timbrado_desde','').strip()
             emis=[request.form.get(x,'').strip() for x in ('emis_departamento_codigo','emis_departamento_desc','emis_distrito_codigo','emis_distrito_desc','emis_ciudad_codigo','emis_ciudad_desc','emis_telefono','emis_direccion')]
             act_cod=request.form.get('emis_actividad_codigo','').strip();act_desc=request.form.get('emis_actividad_desc','').strip()
             c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,emis_actividad_codigo=?,emis_actividad_desc=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,act_cod,act_desc,now()))
-            c.commit();_sifen_log('CONFIG','OK','Configuración SIFEN actualizada');flash('Configuración SIFEN guardada. El ambiente no cambia automáticamente.')
+            # Fuente fiscal única: SIFEN gobierna RUC/DV/timbrado/domicilio fiscal. La identidad institucional solo refleja esos datos.
+            c.execute("update institucion_config set ruc=?,dv=?,timbrado=?,timbrado_desde=?,direccion=?,telefono=?,departamento=?,ciudad=?,ambiente_sifen=? where id=1",(vals[0],vals[1],vals[2],tim_desde,emis[7],emis[6],emis[1],emis[5],c.execute('select ambiente from sifen_config where id=1').fetchone()[0] or 'TEST'))
+            c.commit();_sifen_log('CONFIG','OK','Empresa y Facturación Electrónica actualizadas desde la fuente fiscal única');flash('Datos fiscales guardados. Los campos compartidos se sincronizaron automáticamente.')
         elif accion=='ambiente_test':
             c.execute("update sifen_config set ambiente='TEST',produccion_habilitada=0,actualizado_en=? where id=1",(now(),));c.commit();_sifen_log('AMBIENTE','OK','Ambiente cambiado a TEST');flash('SIFEN quedó en ambiente TEST.')
         elif accion=='ambiente_produccion':
@@ -4231,16 +4289,16 @@ def configuracion_sifen():
                     _sifen_log('CERTIFICADO','ERROR',e);flash('No se pudo instalar el certificado: '+str(e))
         elif accion in ('generador_autotest','xsd_autotest'):
             try:
-                v=c.execute("select id from ventas where numero is not null and trim(numero)<>'' order by id desc limit 1").fetchone()
-                if not v: raise ValueError('No hay una factura existente para generar XML de prueba.')
-                xml,cdc=_sifen_generar_de_v150(c,'FE',v['id'])
+                # V13.9.98: autoprueba autocontenida. No depende de facturas históricas
+                # ni deja registros TEST en la base; el SAVEPOINT se revierte al terminar.
+                xml,cdc,test_vid=_sifen_generar_factura_test_autocontenida(c)
                 cfgx=c.execute('select * from sifen_config where id=1').fetchone()
                 firmado=_sifen_firmar_rde(xml,cfgx)
-                ruta=_sifen_guardar_xml_test('FE',v['id'],firmado,cdc)
-                _sifen_log('XML_V150','GENERADO_FIRMADO_TEST','FE id %s CDC %s · XMLDSig aplicado · archivo %s'%(v['id'],cdc,ruta))
+                ruta=_sifen_guardar_xml_test('FE',0,firmado,cdc)
+                _sifen_log('XML_V150','GENERADO_FIRMADO_TEST','FE autocontenida CDC %s · XMLDSig aplicado · archivo %s'%(cdc,ruta))
                 ok,errores=_sifen_validar_xsd_v150(firmado)
                 if ok:
-                    _sifen_log('XSD_V150','OK','FE id %s CDC %s firmado y validado contra XSD V150'%(v['id'],cdc))
+                    _sifen_log('XSD_V150','OK','FE autocontenida CDC %s firmada y validada contra XSD V150'%cdc)
                     flash('XML V150 generado, firmado con el certificado instalado y validado correctamente contra XSD. No fue enviado a SIFEN.')
                 else:
                     detalle=' | '.join(errores[:8])
@@ -4268,8 +4326,8 @@ def configuracion_sifen():
             except Exception as e:
                 detalle=str(e);c.execute("update sifen_config set ultimo_test=?,ultimo_estado='ERROR',ultimo_detalle=? where id=1",(now(),detalle));c.commit();_sifen_log('CONEXION_MTLS','ERROR',detalle);flash('Prueba de conexión fallida: '+detalle)
         c.close();return redirect('/configuracion/sifen')
-    cfg=c.execute('select * from sifen_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();diagnostico=_sifen_diagnostico(c,cfg);base_actual=_sifen_base(cfg);c.close()
-    return render_template('sifen_config.html',cfg=cfg,logs=logs,puntos=puntos,test_base=SIFEN_TEST_BASE,prod_base=SIFEN_PROD_BASE,base_actual=base_actual,diagnostico=diagnostico)
+    cfg=c.execute('select * from sifen_config where id=1').fetchone();inst=c.execute('select * from institucion_config where id=1').fetchone();logs=c.execute('select * from sifen_eventos order by id desc limit 30').fetchall();puntos=c.execute('select * from sifen_puntos_expedicion order by establecimiento,punto_expedicion').fetchall();diagnostico=_sifen_diagnostico(c,cfg);base_actual=_sifen_base(cfg);c.close()
+    return render_template('sifen_config.html',cfg=cfg,inst=inst,logs=logs,puntos=puntos,test_base=SIFEN_TEST_BASE,prod_base=SIFEN_PROD_BASE,base_actual=base_actual,diagnostico=diagnostico)
 
 ROUTE_MODULE.update({'configuracion_sifen':'CONFIG_SANATORIO'})
 
