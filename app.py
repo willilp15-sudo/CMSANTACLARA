@@ -3673,21 +3673,47 @@ def _sifen_numero_partes(numero):
     return m.group(1),m.group(2),m.group(3).zfill(7)
 
 def _sifen_cdc_base(cfg,tipo_de,numero,fecha,cod_seg,tipo_emision='1'):
-    # Construye los 43 dígitos previos al DV conforme a la composición CDC V150.
-    # El DV final se calcula con módulo 11 en _sifen_dv_mod11.
+    # CDC V150: 43 dígitos base + DV módulo 11 = 44.
+    # Normaliza cada componente y devuelve un error específico si un dato no cumple.
+    import re, datetime as _dt
     est,pun,num=_sifen_numero_partes(numero)
+    tipo=_solo_digitos(tipo_de).zfill(2)
     ruc=_solo_digitos(cfg['ruc'])
-    tim=_solo_digitos(cfg['timbrado'])
-    f=''.join(ch for ch in str(fecha or '')[:10] if ch.isdigit())
-    if len(f)!=8:
-        # fecha ISO yyyy-mm-dd -> yyyymmdd
-        import re
-        z=re.match(r'^(\d{4})-(\d{2})-(\d{2})',str(fecha or ''))
-        f=''.join(z.groups()) if z else ''
-    tc=str(cfg['tipo_contribuyente'] or '2')
-    seg=_solo_digitos(cod_seg).zfill(9)[-9:]
-    base=str(tipo_de)+ruc+str(cfg['dv'] or '')+est+pun+num+tc+f+str(tipo_emision)+seg
-    if len(base)!=43 or not base.isdigit():raise ValueError('No se pudo formar CDC: revise RUC/DV, número, fecha, tipo de contribuyente y código de seguridad.')
+    dv=_solo_digitos(cfg['dv'])
+    tc=_solo_digitos(cfg['tipo_contribuyente'] or '2')
+    emi=_solo_digitos(tipo_emision or '1')
+    seg=_solo_digitos(cod_seg)
+
+    fs=str(fecha or '').strip()
+    f=''
+    for fmt in ('%Y-%m-%d','%d/%m/%Y','%Y-%m-%d %H:%M:%S','%Y-%m-%dT%H:%M:%S'):
+        try:
+            f=_dt.datetime.strptime(fs[:19] if 'H' not in fmt and fmt.endswith('%S') else fs,fmt).strftime('%Y%m%d');break
+        except Exception: pass
+    if not f:
+        digs=_solo_digitos(fs)
+        if len(digs)>=8:
+            cand=digs[:8]
+            try:_dt.datetime.strptime(cand,'%Y%m%d');f=cand
+            except Exception:pass
+
+    errores=[]
+    if len(tipo)!=2 or not tipo.isdigit(): errores.append('tipo de documento debe tener 2 dígitos')
+    if len(ruc)!=8: errores.append('RUC debe tener 8 dígitos (actual: %s)'%len(ruc))
+    if len(dv)!=1: errores.append('DV debe tener 1 dígito')
+    if len(est)!=3: errores.append('establecimiento debe tener 3 dígitos')
+    if len(pun)!=3: errores.append('punto de expedición debe tener 3 dígitos')
+    if len(num)!=7: errores.append('número debe tener 7 dígitos')
+    if len(tc)!=1 or tc not in ('1','2'): errores.append('tipo de contribuyente debe ser 1 o 2')
+    if len(f)!=8: errores.append('fecha inválida; se requiere AAAAMMDD')
+    if len(emi)!=1: errores.append('tipo de emisión debe tener 1 dígito')
+    if len(seg)>9: errores.append('código de seguridad supera 9 dígitos')
+    seg=seg.zfill(9)
+    if len(seg)!=9: errores.append('código de seguridad debe tener 9 dígitos')
+    if errores: raise ValueError('CDC inválido: '+'; '.join(errores)+'.')
+    base=tipo+ruc+dv+est+pun+num+tc+f+emi+seg
+    if len(base)!=43 or not base.isdigit():
+        raise ValueError('CDC base inválido: se obtuvieron %s caracteres en vez de 43.'%len(base))
     return base
 
 def _sifen_dv_mod11(base):
