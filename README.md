@@ -41,3 +41,9 @@ V13.9.138 - Motor SIFEN alineado con MT150/NT13 y Guía DNIT:
 - El XML consume resultados del motor fiscal; ya no recalcula IVA por caminos distintos.
 - Se mantienen XSD, firma, QR, transmisión y auditoría existentes mientras se desacoplan progresivamente.
 - Esta entrega no declara aprobación SIFEN: la aprobación solo existe cuando SIFEN responde aprobado.
+
+
+## V13.9.141 - corrección XSD dTasaIVA
+- dTasaIVA (E734) se serializa como entero: 0, 5 o 10.
+- Se conserva precisión decimal de hasta 8 posiciones para dPropIVA, dBasGravIVA y dLiqIVAItem.
+- Corrige el rechazo local XSD tdTasaIVA causado por `5.00000000`.

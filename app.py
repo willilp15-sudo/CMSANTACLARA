@@ -4326,7 +4326,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         giv=etree.SubElement(gi,'{%s}gCamIVA'%NS)
         _sifen_xml_text(giv,'iAfecIVA',str(fx['affectation']),NS)
         _sifen_xml_text(giv,'dDesAfecIVA','Exento' if fx['affectation']==3 else 'Gravado IVA',NS)
-        _sifen_xml_text(giv,'dPropIVA',fmt(fx['prop']),NS); _sifen_xml_text(giv,'dTasaIVA',fmt(fx['rate']),NS)
+        _sifen_xml_text(giv,'dPropIVA',fmt(fx['prop']),NS); _sifen_xml_text(giv,'dTasaIVA',str(int(fx['rate'])),NS)
         _sifen_xml_text(giv,'dBasGravIVA',fmt(fx['base']),NS); _sifen_xml_text(giv,'dLiqIVAItem',fmt(fx['iva']),NS)
         _sifen_xml_text(giv,'dBasExe',fmt(fx['base_exempt'] if fx['affectation']==4 else 0),NS)
 
