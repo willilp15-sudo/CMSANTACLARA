@@ -5780,3 +5780,74 @@ def intercambio_transacciones_plantilla(tipo):
 ROUTE_MODULE.update({'intercambio_transacciones':'COMPRAS','intercambio_transacciones_plantilla':'COMPRAS'})
 
 ROUTE_MODULE.update({'sifen_corregir_documento':'FACTURACION','sifen_reintentar_nd':'FACTURACION'})
+
+
+# ===== V13.9.87: Transferencias entre cuentas + Libro de Bancos =====
+def init_v13987_transferencias_bancarias():
+    c=db()
+    c.execute('''CREATE TABLE IF NOT EXISTS transferencias_bancarias(
+      id INTEGER PRIMARY KEY, fecha TEXT NOT NULL, cuenta_origen_id INTEGER NOT NULL,
+      cuenta_destino_id INTEGER NOT NULL, moneda_origen TEXT NOT NULL, moneda_destino TEXT NOT NULL,
+      tipo_cambio_origen REAL NOT NULL DEFAULT 1, tipo_cambio_destino REAL NOT NULL DEFAULT 1,
+      importe_origen REAL NOT NULL, importe_destino REAL NOT NULL, importe_origen_pyg REAL NOT NULL,
+      importe_destino_pyg REAL NOT NULL, referencia TEXT, concepto TEXT, observaciones TEXT,
+      estado TEXT NOT NULL DEFAULT 'CONFIRMADA', movimiento_origen_id INTEGER, movimiento_destino_id INTEGER,
+      asiento_id INTEGER, creado_por TEXT, creado_en TEXT, anulado_por TEXT, anulado_en TEXT
+    )''')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.87-transferencias-libro-bancos',?)",(now(),))
+    c.commit();c.close()
+init_v13987_transferencias_bancarias()
+
+@app.route('/bancos/transferencias',methods=['GET','POST'])
+def transferencias_bancarias():
+    c=db()
+    if request.method=='POST':
+        try:
+            f=request.form; fecha=f['fecha']; origen=int(f['cuenta_origen_id']); destino=int(f['cuenta_destino_id'])
+            if origen==destino: raise ValueError('La cuenta de origen y la cuenta de destino deben ser diferentes.')
+            bo=c.execute('select * from cuentas_bancarias where id=? and activo=1',(origen,)).fetchone();bd=c.execute('select * from cuentas_bancarias where id=? and activo=1',(destino,)).fetchone()
+            if not bo or not bd: raise ValueError('La cuenta bancaria de origen o destino no existe o está inactiva.')
+            if not bo['cuenta_contable'] or not bd['cuenta_contable']: raise ValueError('Ambas cuentas bancarias deben tener una cuenta contable vinculada.')
+            mo=(bo['moneda'] or 'PYG').upper();md=(bd['moneda'] or 'PYG').upper();io=float(f.get('importe_origen') or 0);idest=float(f.get('importe_destino') or io)
+            if io<=0 or idest<=0: raise ValueError('Los importes deben ser mayores a cero.')
+            tco=tc_fecha(c,fecha,mo,f.get('tipo_cambio_origen'));tcd=tc_fecha(c,fecha,md,f.get('tipo_cambio_destino'));pyo=io*tco;pyd=idest*tcd
+            ref=(f.get('referencia') or '').strip();concepto=(f.get('concepto') or 'Transferencia entre cuentas').strip();obs=(f.get('observaciones') or '').strip()
+            cur=c.execute('''insert into transferencias_bancarias(fecha,cuenta_origen_id,cuenta_destino_id,moneda_origen,moneda_destino,tipo_cambio_origen,tipo_cambio_destino,importe_origen,importe_destino,importe_origen_pyg,importe_destino_pyg,referencia,concepto,observaciones,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CONFIRMADA',?,?)''',(fecha,origen,destino,mo,md,tco,tcd,io,idest,pyo,pyd,ref,concepto,obs,session.get('user'),now()));tid=cur.lastrowid
+            m1=c.execute("insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,'EGRESO','TRANSFERENCIA_INTERNA',?,?,?,?,?,'TRANSFERENCIA_BANCARIA',?,?)",(fecha,mo,tco,io,pyo,concepto,tid,origen)).lastrowid
+            m2=c.execute("insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,'INGRESO','TRANSFERENCIA_INTERNA',?,?,?,?,?,'TRANSFERENCIA_BANCARIA',?,?)",(fecha,md,tcd,idest,pyd,concepto,tid,destino)).lastrowid
+            lineas=[(bd['cuenta_contable'],pyd,0,idest,'Ingreso por transferencia'),(bo['cuenta_contable'],0,pyo,io,'Salida por transferencia')]
+            dif=pyo-pyd
+            if abs(dif)>.5:
+                lineas.append(('4.2.01',0,dif,0,'Ganancia por diferencia de cambio') if dif>0 else ('5.2.01',-dif,0,0,'Pérdida por diferencia de cambio'))
+            aid=asiento(c,fecha,concepto,'TRANSFERENCIA_BANCARIA',tid,'PYG',1,lineas)
+            c.execute('update transferencias_bancarias set movimiento_origen_id=?,movimiento_destino_id=?,asiento_id=? where id=?',(m1,m2,aid,tid));c.commit();c.close();audit('TRANSFERENCIA_BANCARIA',f'{tid}: cuenta {origen} -> {destino}');flash('Transferencia registrada y reflejada en Contabilidad y Libro de Bancos.');return redirect('/bancos/transferencias')
+        except Exception as ex:
+            c.rollback();c.close();flash('No se pudo registrar la transferencia: '+str(ex));return redirect('/bancos/transferencias')
+    rows=c.execute('''select t.*,bo.banco banco_origen,bo.alias alias_origen,bo.numero_cuenta numero_origen,bd.banco banco_destino,bd.alias alias_destino,bd.numero_cuenta numero_destino from transferencias_bancarias t join cuentas_bancarias bo on bo.id=t.cuenta_origen_id join cuentas_bancarias bd on bd.id=t.cuenta_destino_id order by t.fecha desc,t.id desc limit 300''').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();c.close()
+    return render_template('bank_transfers.html',rows=rows,cuentas=cuentas)
+
+@app.post('/bancos/transferencias/<int:tid>/anular')
+def transferencia_bancaria_anular(tid):
+    c=db();t=c.execute('select * from transferencias_bancarias where id=?',(tid,)).fetchone()
+    if not t:c.close();flash('Transferencia no encontrada.');return redirect('/bancos/transferencias')
+    if t['estado']=='ANULADA':c.close();flash('La transferencia ya está anulada.');return redirect('/bancos/transferencias')
+    if t['movimiento_origen_id']:c.execute('delete from caja_banco where id=?',(t['movimiento_origen_id'],))
+    if t['movimiento_destino_id']:c.execute('delete from caja_banco where id=?',(t['movimiento_destino_id'],))
+    if t['asiento_id']:c.execute("update asientos set estado='ANULADO' where id=?",(t['asiento_id'],))
+    c.execute("update transferencias_bancarias set estado='ANULADA',anulado_por=?,anulado_en=? where id=?",(session.get('user'),now(),tid));c.commit();c.close();audit('ANULAR_TRANSFERENCIA_BANCARIA',str(tid));flash('Transferencia anulada con reversión bancaria y contable.');return redirect('/bancos/transferencias')
+
+@app.get('/bancos/libro')
+def libro_bancos():
+    c=db();desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();cuenta=request.args.get('cuenta_bancaria_id') or ''
+    cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();rows=[];saldo_anterior=0.0;saldo=0.0
+    if cuenta:
+        cid=int(cuenta);b=c.execute('select * from cuentas_bancarias where id=?',(cid,)).fetchone()
+        saldo_anterior=float(c.execute("select coalesce(sum(case when tipo='INGRESO' then importe else -importe end),0) from caja_banco where cuenta_bancaria_id=? and fecha<?",(cid,desde)).fetchone()[0] or 0);saldo=saldo_anterior
+        raw=c.execute('select * from caja_banco where cuenta_bancaria_id=? and fecha between ? and ? order by fecha,id',(cid,desde,hasta)).fetchall()
+        for r in raw:
+            saldo += float(r['importe'] or 0) if r['tipo']=='INGRESO' else -float(r['importe'] or 0)
+            d=dict(r);d['saldo_acumulado']=saldo;rows.append(d)
+    else:b=None
+    c.close();return render_template('bank_book.html',rows=rows,cuentas=cuentas,cuenta_sel=cuenta,banco=b,desde=desde,hasta=hasta,saldo_anterior=saldo_anterior,saldo_final=saldo)
+
+ROUTE_MODULE.update({'transferencias_bancarias':'FINANZAS','transferencia_bancaria_anular':'FINANZAS','libro_bancos':'FINANZAS'})
