@@ -10,6 +10,8 @@
 <p style="margin-top:14px">
 <a class="btn" href="/ventas/{{v.id}}/factura">← Volver a factura</a>
 <a class="btn" href="/sifen/monitor">Monitor SIFEN</a>
+<a class="btn" href="/ventas/{{v.id}}/sifen/xml-enviado">⬇ XML enviado</a>
+<a class="btn" href="/ventas/{{v.id}}/sifen/diagnostico-calculo">🧮 Diagnóstico cálculo</a>
 {% if v.protocolo_sifen and (v.estado_sifen or '')|upper in ['LOTE_RECIBIDO','LOTE_PROCESANDO','RESPUESTA_RECIBIDA'] %}
 <form method="post" action="/sifen/monitor/venta/{{v.id}}/consultar-lote" style="display:inline"><button class="btn" type="submit">🔄 Consultar resultado del lote</button></form>
 {% endif %}

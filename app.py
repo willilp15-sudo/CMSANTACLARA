@@ -4247,7 +4247,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
             # V13.9.128: el monto de pago debe coincidir con el total matemático de los ítems, no con un total histórico potencialmente desfasado.
             from decimal import Decimal, ROUND_HALF_UP
             _pay_total=sum((Decimal(str(x['cantidad'] or 1))*Decimal(str(x['precio'] or 0)) for x in items), Decimal('0'))
-            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP),'f'),NS)
+            _sifen_xml_text(gp,'dMonTiPag',format(_pay_total.quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP),'f'),NS)
             mon=str(d['moneda'] or 'PYG') if 'moneda' in d.keys() else 'PYG'
             _sifen_xml_text(gp,'cMoneTiPag',mon,NS);_sifen_xml_text(gp,'dDMoneTiPag','Guarani' if mon=='PYG' else mon,NS)
             if mon!='PYG' and 'tipo_cambio' in d.keys() and d['tipo_cambio']:
@@ -4261,7 +4261,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     # los valores escritos en XML; por ello precio*cantidad, dTotOpeItem, base e IVA
     # se derivan de una única fuente y con redondeo HALF_UP uniforme.
     from decimal import Decimal, ROUND_HALF_UP
-    Q4=Decimal('0.0001')
+    Q4=Decimal('0.00000001')
     def D(v, default='0'):
         try: return Decimal(str(v if v not in (None,'') else default))
         except Exception: return Decimal(default)
@@ -5889,6 +5889,57 @@ def init_v139114_sifen_lotes():
     c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.114-sifen-lote-asincrono',?)",(now(),))
     c.commit();c.close()
 init_v139114_sifen_lotes()
+
+
+
+# ===== V13.9.129: auditoría matemática y XML exacto enviado a SIFEN =====
+def _sifen_ultimo_xml_factura(venta_id):
+    p=Path(_sifen_dir())/'xml_test'
+    candidatos=sorted(p.glob('FE_'+str(venta_id)+'_*.xml'), key=lambda x:x.stat().st_mtime, reverse=True) if p.exists() else []
+    return candidatos[0] if candidatos else None
+
+def _sifen_diagnostico_matematico_xml(xml_bytes):
+    from lxml import etree
+    from decimal import Decimal, InvalidOperation
+    NS='http://ekuatia.set.gov.py/sifen/xsd'
+    root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else xml_bytes.encode('utf-8'))
+    de=root.find('{%s}DE'%NS)
+    if de is None: raise ValueError('XML sin DE.')
+    def dec(txt):
+        try:return Decimal(str(txt or '0'))
+        except InvalidOperation:return Decimal('0')
+    filas=[]; sum_total=Decimal('0'); sum5=sum10=Decimal('0'); b5=b10=Decimal('0')
+    for n,it in enumerate(de.findall('.//{%s}gCamItem'%NS),1):
+        def ft(path): return it.findtext(path) or '0'
+        q=dec(ft('{%s}dCantProSer'%NS)); pu=dec(ft('{%s}gValorItem/{%s}dPUniProSer'%(NS,NS)))
+        bruto=dec(ft('{%s}gValorItem/{%s}dTotBruOpeItem'%(NS,NS)))
+        ope=dec(ft('{%s}gValorItem/{%s}gValorRestaItem/{%s}dTotOpeItem'%(NS,NS,NS)))
+        tasa=dec(ft('{%s}gCamIVA/{%s}dTasaIVA'%(NS,NS))); prop=dec(ft('{%s}gCamIVA/{%s}dPropIVA'%(NS,NS)))
+        base=dec(ft('{%s}gCamIVA/{%s}dBasGravIVA'%(NS,NS))); iva=dec(ft('{%s}gCamIVA/{%s}dLiqIVAItem'%(NS,NS)))
+        exp_bruto=q*pu
+        exp_base=(Decimal('100')*ope*prop)/(Decimal('10000')+(tasa*prop)) if tasa>0 else Decimal('0')
+        exp_iva=base*(tasa/Decimal('100')) if tasa>0 else Decimal('0')
+        filas.append({'item':n,'cantidad':str(q),'precio':str(pu),'bruto_xml':str(bruto),'bruto_calc':str(exp_bruto),'dif_bruto':str(bruto-exp_bruto),'total_item':str(ope),'tasa':str(tasa),'prop':str(prop),'base_xml':str(base),'base_calc':str(exp_base),'dif_base':str(base-exp_base),'iva_xml':str(iva),'iva_calc':str(exp_iva),'dif_iva':str(iva-exp_iva)})
+        sum_total+=ope
+        if tasa==5: sum5+=iva;b5+=base
+        elif tasa==10: sum10+=iva;b10+=base
+    gt=de.find('.//{%s}gTotSub'%NS)
+    def g(name): return dec(gt.findtext('{%s}%s'%(NS,name)) if gt is not None else '0')
+    tot={'dTotOpe':str(g('dTotOpe')),'calc_dTotOpe':str(sum_total),'dIVA5':str(g('dIVA5')),'calc_dIVA5':str(sum5),'dIVA10':str(g('dIVA10')),'calc_dIVA10':str(sum10),'dTotIVA':str(g('dTotIVA')),'calc_dTotIVA':str(sum5+sum10),'dBaseGrav5':str(g('dBaseGrav5')),'calc_dBaseGrav5':str(b5),'dBaseGrav10':str(g('dBaseGrav10')),'calc_dBaseGrav10':str(b10),'dTBasGraIVA':str(g('dTBasGraIVA')),'calc_dTBasGraIVA':str(b5+b10),'dTotGralOpe':str(g('dTotGralOpe'))}
+    return filas,tot
+
+@app.get('/ventas/<int:venta_id>/sifen/xml-enviado')
+def sifen_descargar_xml_enviado(venta_id):
+    f=_sifen_ultimo_xml_factura(venta_id)
+    if not f:return ('No existe XML firmado guardado para esta factura.',404)
+    return send_file(str(f),as_attachment=True,download_name=f.name,mimetype='application/xml')
+
+@app.get('/ventas/<int:venta_id>/sifen/diagnostico-calculo')
+def sifen_diagnostico_calculo(venta_id):
+    f=_sifen_ultimo_xml_factura(venta_id)
+    if not f:return ('No existe XML firmado guardado para esta factura.',404)
+    filas,tot=_sifen_diagnostico_matematico_xml(f.read_bytes())
+    return render_template('sifen_math_diagnostic.html',venta_id=venta_id,archivo=f.name,filas=filas,tot=tot)
 
 @app.post('/sifen/monitor/venta/<int:venta_id>/consultar-lote')
 def sifen_consultar_lote_venta(venta_id):
