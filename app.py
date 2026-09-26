@@ -4123,7 +4123,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
             estado='TEST_GENERADO' if str(cfg['ambiente'] or '').upper()=='TEST' else 'NO_ENVIADO'
             c.execute("update ventas set cdc=?,codigo_seguridad_sifen=?,cdc_ambiente=?,estado_sifen=? where id=?",(cdc,cod_seg,str(cfg['ambiente'] or '').upper(),estado,doc_id))
     root=etree.Element('{%s}rDE'%NS,nsmap={None:NS,'xsi':XSI})
-    root.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
+    root.set('{%s}schemaLocation'%XSI,NS+' DE_v150.xsd')
     _sifen_xml_text(root,'dVerFor','150',NS)
     de=etree.SubElement(root,'{%s}DE'%NS);de.set('Id',cdc)
     _sifen_xml_text(de,'dDVId',cdc[-1],NS);_sifen_xml_text(de,'dFecFirma',datetime.datetime.now().replace(microsecond=0).isoformat(),NS);_sifen_xml_text(de,'dSisFact','1',NS)
@@ -4258,10 +4258,10 @@ def _sifen_generar_factura_test_autocontenida(c):
 def _sifen_validar_xsd_v150(xml_bytes):
     """Valida un rDE V150 contra el esquema de recepción oficial.
 
-    V13.9.94: el Manual Técnico V150 referencia siRecepDE_v150.xsd desde rDE.
-    DE_v150.xsd define la estructura del DE y es importado/incluido por el
-    esquema de recepción; validarlo directamente como documento raíz puede
-    producir SCHEMAV_CVC_ELT_1 (rDE sin declaración global).
+    V13.9.115: rDE pertenece al Schema XML 18 DE_v150.xsd.
+    El schema de recepción siRecepDE_v150.xsd corresponde al request del WS
+    y no debe anunciarse como schemaLocation del documento rDE. Esto evita
+    que el procesador intente resolver rDE contra un XSD que no lo declara.
     """
     try:
         from lxml import etree
@@ -4574,7 +4574,15 @@ def _sifen_enviar_lote(xml_firmado,cfg,timeout=35):
     NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
     parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
     rde=etree.fromstring(xml_firmado if isinstance(xml_firmado,(bytes,bytearray)) else xml_firmado.encode(),parser)
-    if etree.QName(rde).localname!='rDE': raise ValueError('El documento firmado para lote debe tener raíz rDE.')
+    qn=etree.QName(rde)
+    if qn.localname!='rDE' or qn.namespace!=NS:
+        raise ValueError(f'El documento firmado para lote debe ser {{{NS}}}rDE; recibido {{{qn.namespace}}}{qn.localname}.')
+    # El rDE debe anunciar el XSD del Documento Electrónico (Schema XML 18),
+    # no el XSD del request de recepción. Conservamos el mismo XML/CDC firmado.
+    XSI='http://www.w3.org/2001/XMLSchema-instance'
+    schema_loc=(rde.get('{%s}schemaLocation'%XSI) or '').strip()
+    if 'siRecepDE_v150.xsd' in schema_loc:
+        rde.set('{%s}schemaLocation'%XSI,NS+' DE_v150.xsd')
     # Schema XML 5A: rLoteDE contiene de 1 a 50 rDE firmados del mismo tipo.
     lote=etree.Element('{%s}rLoteDE'%NS,nsmap={None:NS}); lote.append(rde)
     lote_xml=etree.tostring(lote,encoding='UTF-8',xml_declaration=True,pretty_print=False)
