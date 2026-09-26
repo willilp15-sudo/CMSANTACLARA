@@ -9,3 +9,4 @@ xlrd==2.0.2
 
 signxml==4.2.0
 lxml==6.0.2
+sifen==0.2.0

@@ -3635,7 +3635,25 @@ def _sifen_diagnostico(c,cfg):
     # PRODUCCION hasta validar el XML contra los XSD oficiales vigentes.
     gen_ok=callable(globals().get('_sifen_generar_de_v150'))
     add('Generador DE XML V150',gen_ok,'Generador estructural instalado' if gen_ok else 'Generador no disponible')
-    add('Validación XSD V150',False,'Bloqueo de seguridad: falta incorporar/validar contra el paquete XSD oficial vigente antes de PRODUCCIÓN')
+    # V13.9.82: validación real contra los XSD V150 empaquetados por pysifen,
+    # bindings generados desde los esquemas oficiales SIFEN. PRODUCCIÓN exige que
+    # el motor esté instalado Y que exista al menos una validación exitosa reciente.
+    try:
+        from pysifen.de.bindings.de_v150.de_v150 import RDe as _RDeV150
+        xsd_motor_ok=True
+    except Exception:
+        xsd_motor_ok=False
+    ult_xsd=c.execute("select estado,detalle,fecha from sifen_eventos where tipo='XSD_V150' order by id desc limit 1").fetchone()
+    xsd_doc_ok=bool(ult_xsd and str(ult_xsd['estado'] or '').upper()=='OK')
+    if not xsd_motor_ok:
+        xsd_det='Motor XSD no disponible. Verifique dependencia sifen==0.2.0 en Render.'
+    elif xsd_doc_ok:
+        xsd_det='Motor XSD V150 instalado · última validación OK: '+str(ult_xsd['fecha'] or '')
+    elif ult_xsd:
+        xsd_det='Motor instalado · última validación falló: '+str(ult_xsd['detalle'] or '')[:260]
+    else:
+        xsd_det='Motor XSD V150 instalado. Ejecute “Generar y validar XML V150”.'
+    add('Validación XSD V150',xsd_motor_ok and xsd_doc_ok,xsd_det)
     return checks
 
 init_v13978_sifen_produccion()
@@ -3739,6 +3757,26 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
     xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
     return xml,cdc
+
+def _sifen_validar_xsd_v150(xml_bytes):
+    """Valida un rDE contra los bindings/esquemas SIFEN V150.
+    Devuelve (ok, errores). No altera, firma ni transmite el documento.
+    """
+    try:
+        from pysifen.de.bindings.de_v150.de_v150 import RDe
+    except Exception as e:
+        return False,['Motor XSD V150 no instalado: '+str(e)]
+    try:
+        if isinstance(xml_bytes,bytes): xml_text=xml_bytes.decode('utf-8')
+        else: xml_text=str(xml_bytes)
+        rde=RDe.from_xml(xml_text)
+        errores=rde.validate_xml() or []
+        mensajes=[]
+        for e in errores:
+            mensajes.append(str(e))
+        return len(mensajes)==0,mensajes
+    except Exception as e:
+        return False,[str(e)]
 
 def _sifen_guardar_xml_test(tipo,doc_id,xml,cdc):
     p=Path(_sifen_dir())/'xml_test';p.mkdir(parents=True,exist_ok=True)
@@ -3907,15 +3945,22 @@ def configuracion_sifen():
                     _sifen_log('CERTIFICADO','OK',f'{subj} | vence {na}');flash('Certificado y clave privada validados e instalados en el almacenamiento persistente protegido. La contraseña no fue guardada.')
                 except Exception as e:
                     _sifen_log('CERTIFICADO','ERROR',e);flash('No se pudo instalar el certificado: '+str(e))
-        elif accion=='generador_autotest':
+        elif accion in ('generador_autotest','xsd_autotest'):
             try:
                 v=c.execute("select id from ventas where numero is not null and trim(numero)<>'' order by id desc limit 1").fetchone()
                 if not v: raise ValueError('No hay una factura existente para generar XML de prueba.')
                 xml,cdc=_sifen_generar_de_v150(c,'FE',v['id']);ruta=_sifen_guardar_xml_test('FE',v['id'],xml,cdc)
                 _sifen_log('XML_V150','GENERADO_TEST','FE id %s CDC %s · archivo %s'%(v['id'],cdc,ruta))
-                flash('Generador XML V150 ejecutado sobre la última factura. XML guardado SOLO para TEST/prevalidación; no fue firmado ni enviado a SIFEN.')
+                ok,errores=_sifen_validar_xsd_v150(xml)
+                if ok:
+                    _sifen_log('XSD_V150','OK','FE id %s CDC %s validado contra XSD V150'%(v['id'],cdc))
+                    flash('XML V150 generado y validado correctamente contra XSD. No fue firmado ni enviado a SIFEN.')
+                else:
+                    detalle=' | '.join(errores[:8])
+                    _sifen_log('XSD_V150','ERROR',detalle)
+                    flash('El XML fue generado, pero NO pasó XSD V150. Revise el Registro técnico: '+detalle[:500])
             except Exception as e:
-                _sifen_log('XML_V150','ERROR',e);flash('Generador XML V150: '+str(e))
+                _sifen_log('XSD_V150','ERROR',e);flash('Validación XSD V150: '+str(e))
         elif accion=='motor_autotest':
             cfg=c.execute('select * from sifen_config where id=1').fetchone()
             try:
