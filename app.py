@@ -3952,15 +3952,22 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     return xml,cdc
 
 def _sifen_validar_xsd_v150(xml_bytes):
-    """Valida rDE V150 con preflight estructural + binding V150.
-    V13.9.89 revisa de una vez los grupos obligatorios que el generador utiliza,
-    para no avanzar error por error en cada despliegue.
+    """Valida un rDE V150 contra el esquema de recepción oficial.
+
+    V13.9.94: el Manual Técnico V150 referencia siRecepDE_v150.xsd desde rDE.
+    DE_v150.xsd define la estructura del DE y es importado/incluido por el
+    esquema de recepción; validarlo directamente como documento raíz puede
+    producir SCHEMAV_CVC_ELT_1 (rDE sin declaración global).
     """
     try:
         from lxml import etree
-        raw=xml_bytes if isinstance(xml_bytes,bytes) else str(xml_bytes).encode('utf-8')
-        root=etree.fromstring(raw)
-        ns={'s':'http://ekuatia.set.gov.py/sifen/xsd'}
+        raw = xml_bytes if isinstance(xml_bytes, bytes) else str(xml_bytes).encode('utf-8')
+        doc = etree.fromstring(raw)
+        qn = etree.QName(doc)
+        ns_sifen = 'http://ekuatia.set.gov.py/sifen/xsd'
+        if qn.localname != 'rDE' or qn.namespace != ns_sifen:
+            return False, [f'Raíz/namespace inválido: {{{qn.namespace}}}{qn.localname}. Se requiere {{{ns_sifen}}}rDE.']
+        ns={'s':ns_sifen}
         falt=[]
         for xp,nombre in [
           ('s:DE','DE'),('s:DE/s:gOpeDE','gOpeDE'),('s:DE/s:gTimb','gTimb'),
@@ -3976,45 +3983,43 @@ def _sifen_validar_xsd_v150(xml_bytes):
           ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:gValorRestaItem/s:dTotOpeItem','gValorRestaItem/dTotOpeItem'),
           ('s:DE/s:gDtipDE/s:gCamItem/s:gCamIVA/s:dBasExe','gCamIVA/dBasExe'),
           ('s:DE/s:gTotSub/s:dTotOpe','gTotSub/dTotOpe'),('s:DE/s:gTotSub/s:dTotGralOpe','gTotSub/dTotGralOpe')]:
-            if not root.xpath(xp,namespaces=ns): falt.append(nombre)
-        if falt: return False,['Prevalidación V150: faltan grupos/campos: '+', '.join(falt)]
-        for i,item in enumerate(root.xpath('.//s:gCamItem',namespaces=ns),1):
+            if not doc.xpath(xp,namespaces=ns): falt.append(nombre)
+        if falt:
+            return False,['Prevalidación V150: faltan grupos/campos: '+', '.join(falt)]
+        for i,item in enumerate(doc.xpath('.//s:gCamItem',namespaces=ns),1):
             for tag in ('dCodInt','dDesProSer','cUniMed','dDesUniMed','dCantProSer'):
-                e=item.find('{http://ekuatia.set.gov.py/sifen/xsd}'+tag)
+                e=item.find('{%s}%s'%(ns_sifen,tag))
                 if e is None or not (e.text or '').strip():
                     return False,['Prevalidación V150: ítem %s con campo obligatorio vacío/faltante: %s.'%(i,tag)]
     except Exception as e:
         return False,['XML V150 no pudo analizarse: '+str(e)]
-    # V13.9.91: validar el XML ORIGINAL directamente contra los XSD incluidos
-    # por pysifen. Evita el ciclo parsear->dataclass->serializar que estaba
-    # provocando falsos 'missing required keyword-only argument' aun cuando la
-    # etiqueta (p.ej. dDesProSer) sí existía en el XML generado.
+
     try:
         import os, pysifen
         from lxml import etree
-        schema_dir=os.path.join(os.path.dirname(os.path.abspath(pysifen.__file__)),'de','schemas','v150')
-        preferidos=['siRecepDE_v150.xsd','DE_v150.xsd']
-        archivos=[]
-        for n in preferidos:
-            q=os.path.join(schema_dir,n)
-            if os.path.exists(q):archivos.append(q)
-        archivos += [os.path.join(schema_dir,n) for n in os.listdir(schema_dir) if n.endswith('.xsd') and os.path.join(schema_dir,n) not in archivos]
-        if not archivos:return False,['No se encontraron los XSD V150 instalados con el motor SIFEN.']
-        doc=etree.fromstring(raw);ult=[]
-        root_name=etree.QName(doc).localname
-        # V13.9.93: DE_v150.xsd es el esquema del Documento Electrónico; rDE es su raíz.
-        # No validar rDE contra esquemas SOAP/recepción.
-        if root_name!='rDE': return False,[f'Raíz XML inesperada: {root_name}. Para DE V150 se requiere rDE.']
-        de_schema=os.path.join(schema_dir,'DE_v150.xsd'); candidatos=[]
-        if os.path.exists(de_schema):
-            try:candidatos.append((de_schema,etree.parse(de_schema)))
-            except Exception as e:ult=[f'DE_v150.xsd: {e}']
-        if not candidatos:return False,['No se encontró DE_v150.xsd en el motor SIFEN instalado.']
-        for sp,xt in candidatos:
-            try:etree.XMLSchema(xt).assertValid(doc);return True,[]
-            except etree.DocumentInvalid as e:ult=[str(x) for x in e.error_log]
-            except Exception as e:ult=[f'{os.path.basename(sp)}: {e}']
-        return False,ult or ['El XML rDE no pasó DE_v150.xsd.']
+        base=os.path.dirname(os.path.abspath(pysifen.__file__))
+        # Buscar el paquete real de esquemas sin asumir una sola ruta interna
+        dirs=[]
+        for root_dir, subdirs, files in os.walk(base):
+            if 'siRecepDE_v150.xsd' in files:
+                dirs.append(root_dir)
+        if not dirs:
+            return False,['Motor SIFEN instalado, pero no contiene siRecepDE_v150.xsd. No se habilita Producción.']
+        errores=[]
+        for schema_dir in dirs:
+            schema_path=os.path.join(schema_dir,'siRecepDE_v150.xsd')
+            try:
+                schema_doc=etree.parse(schema_path)
+                schema=etree.XMLSchema(schema_doc)
+                schema.assertValid(doc)
+                return True,[]
+            except etree.DocumentInvalid as e:
+                # Si el esquema correcto compiló, devolver SUS errores reales y no probar
+                # DE_v150.xsd como raíz alternativa.
+                return False,[str(x) for x in e.error_log]
+            except (etree.XMLSchemaParseError, etree.XMLSyntaxError, OSError) as e:
+                errores.append(os.path.basename(schema_path)+': '+str(e))
+        return False, errores or ['No fue posible compilar siRecepDE_v150.xsd con sus imports/includes.']
     except Exception as e:
         return False,['Validación XSD V150 no disponible: '+str(e)]
 
@@ -6090,3 +6095,108 @@ def sifen_importar_respuesta():
     finally:c.close()
     return redirect('/sifen/monitor')
 ROUTE_MODULE.update({'sifen_importar_respuesta':'FACTURACION'})
+
+# ===== V13.9.95: Puesta en marcha limpia + importación maestra + control SIFEN =====
+def init_v13995_puesta_marcha():
+ c=db();c.execute("CREATE TABLE IF NOT EXISTS puesta_marcha_importaciones(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT,archivo TEXT,registros INTEGER DEFAULT 0,usuario TEXT,estado TEXT,detalle TEXT)");c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.95-puesta-marcha',?)",(now(),));c.commit();c.close()
+init_v13995_puesta_marcha()
+
+def _admin_total(): return str(session.get('rol') or '').upper()=='ADMIN' or user_has('USUARIOS','ADMINISTRAR')
+
+def _leer_importacion_maestra(f):
+ nombre=(f.filename or '').lower();raw=f.read()
+ if nombre.endswith('.xlsx'):
+  import openpyxl
+  wb=openpyxl.load_workbook(io.BytesIO(raw),read_only=True,data_only=True);ws=wb.active;filas=list(ws.iter_rows(values_only=True))
+  if not filas:return []
+  heads=[str(x or '').strip().lower() for x in filas[0]]
+  return [{heads[i]:(r[i] if i<len(r) else None) for i in range(len(heads))} for r in filas[1:] if any(x not in (None,'') for x in r)]
+ import csv
+ txt=raw.decode('utf-8-sig','replace')
+ try:dialect=csv.Sniffer().sniff(txt[:4096],delimiters=';,\t,')
+ except Exception:dialect=csv.excel
+ return [dict(r) for r in csv.DictReader(io.StringIO(txt),dialect=dialect)]
+
+def _v(row,*names,default=''):
+ norm={str(k or '').strip().lower().replace('_',' ').replace('-',' '):v for k,v in row.items()}
+ for n in names:
+  k=str(n).strip().lower().replace('_',' ').replace('-',' ')
+  if k in norm and norm[k] not in (None,''):return str(norm[k]).strip()
+ return default
+
+@app.get('/administracion/puesta-en-marcha')
+def puesta_en_marcha():
+ if not _admin_total():flash('Acceso exclusivo de Administración.');return redirect('/')
+ c=db();counts={}
+ for t in ('terceros','pacientes','productos','servicios','medicos','aseguradoras','habitaciones','camas','ventas','compras','admisiones'):
+  try:counts[t]=c.execute('select count(*) from '+t).fetchone()[0]
+  except Exception:counts[t]=0
+ imports=c.execute('select * from puesta_marcha_importaciones order by id desc limit 20').fetchall();c.close();return render_template('startup_center.html',counts=counts,imports=imports)
+
+@app.post('/administracion/puesta-en-marcha/restablecer')
+def puesta_marcha_reset():
+ if not _admin_total():flash('Acceso exclusivo de Administración.');return redirect('/')
+ if (request.form.get('confirmacion') or '').strip().upper()!='BORRAR TODO':flash('Restablecimiento cancelado. Debe escribir exactamente BORRAR TODO.');return redirect('/administracion/puesta-en-marcha')
+ backup=os.path.join(DATA_DIR,'pre_reset_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')+'.db');shutil.copy2(DB,backup)
+ c=db();c.execute('PRAGMA foreign_keys=OFF')
+ preservar={'usuarios','roles','permisos','rol_permisos','usuario_roles','schema_migrations','monedas','plan_cuentas','institucion_config','sifen_config','sifen_puntos_expedicion','caja_punto_expedicion','empresa_config','config_sanatorio','puesta_marcha_importaciones'}
+ tablas=[r[0] for r in c.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%'").fetchall()]
+ try:
+  c.execute('BEGIN')
+  for t in tablas:
+   if t not in preservar:c.execute('DELETE FROM "'+t.replace('"','')+'"')
+  try:c.execute('delete from sqlite_sequence')
+  except Exception:pass
+  c.commit()
+ except Exception:c.rollback();c.close();raise
+ c.close();flash('Sistema restablecido. Datos operativos y maestros eliminados. Se conservaron usuarios, configuración fiscal y correlativos SIFEN. Backup: '+os.path.basename(backup));return redirect('/administracion/puesta-en-marcha')
+
+@app.post('/administracion/puesta-en-marcha/importar')
+def puesta_marcha_importar():
+ if not _admin_total():flash('Acceso exclusivo de Administración.');return redirect('/')
+ tipo=(request.form.get('tipo') or '').upper();f=request.files.get('archivo')
+ if not f or not f.filename:flash('Seleccione un archivo XLSX o CSV.');return redirect('/administracion/puesta-en-marcha')
+ rows=_leer_importacion_maestra(f);c=db();n=0
+ try:
+  for r in rows:
+   if tipo=='CLIENTES':
+    nombre=_v(r,'nombre','razon social');ruc=_v(r,'ruc');doc=_v(r,'documento','numero documento',default=ruc)
+    if not nombre:continue
+    vals=('CLIENTE',ruc,nombre,_v(r,'telefono'),_v(r,'email'),_v(r,'moneda',default='PYG'),_v(r,'naturaleza',default='1'),_v(r,'tipo operacion','operacion',default='1'),_v(r,'tipo contribuyente',default='2'),_v(r,'tipo documento',default='1'),doc,_v(r,'pais',default='PRY'),_v(r,'pais descripcion',default='Paraguay'),_v(r,'direccion'),_v(r,'numero casa',default='0'),_v(r,'departamento codigo'),_v(r,'departamento'),_v(r,'distrito codigo'),_v(r,'distrito'),_v(r,'ciudad codigo'),_v(r,'ciudad'),_v(r,'barrio codigo'),_v(r,'barrio'))
+    c.execute('insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc,sifen_barrio_codigo,sifen_barrio_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',vals);n+=1
+   elif tipo=='PRODUCTOS':
+    codigo=_v(r,'codigo');nombre=_v(r,'nombre','descripcion')
+    if not codigo or not nombre:continue
+    c.execute('insert or replace into productos(codigo,nombre,categoria,costo_pyg,precio_pyg,stock,stock_min,iva_pct,sifen_descripcion,sifen_unidad_codigo,sifen_unidad_desc,activo) values(?,?,?,?,?,?,?,?,?,?,?,1)',(codigo,nombre,_v(r,'categoria'),float(_v(r,'costo',default='0') or 0),float(_v(r,'precio',default='0') or 0),float(_v(r,'stock',default='0') or 0),float(_v(r,'stock minimo',default='0') or 0),float(_v(r,'iva',default='10') or 10),_v(r,'descripcion sifen',default=nombre),_v(r,'unidad codigo',default='77'),_v(r,'unidad',default='UNI')));n+=1
+   elif tipo=='SERVICIOS':
+    codigo=_v(r,'codigo');nombre=_v(r,'nombre','descripcion')
+    if not codigo or not nombre:continue
+    c.execute('insert or replace into servicios(codigo,nombre,categoria,precio_pyg,cuenta_ingreso,iva_pct) values(?,?,?,?,?,?)',(codigo,nombre,_v(r,'categoria'),float(_v(r,'precio',default='0') or 0),_v(r,'cuenta ingreso',default='4.1.02'),float(_v(r,'iva',default='10') or 10)));n+=1
+   elif tipo=='GEOGRAFIA':
+    c.execute('insert or replace into sifen_geografia(dep_codigo,dep_nombre,dist_codigo,dist_nombre,ciudad_codigo,ciudad_nombre,barrio_codigo,barrio_nombre,activo) values(?,?,?,?,?,?,?,?,1)',(_v(r,'departamento codigo','codigo departamento'),_v(r,'departamento'),_v(r,'distrito codigo','codigo distrito'),_v(r,'distrito'),_v(r,'ciudad codigo','codigo ciudad'),_v(r,'ciudad'),_v(r,'barrio codigo','codigo barrio'),_v(r,'barrio')));n+=1
+   elif tipo=='SALAS':
+    hab=_v(r,'sala','habitacion');cama=_v(r,'cama','codigo cama')
+    if not hab or not cama:continue
+    h=c.execute('select id from habitaciones where nombre=?',(hab,)).fetchone()
+    if h:hid=h['id']
+    else:c.execute('insert into habitaciones(nombre,tipo) values(?,?)',(hab,_v(r,'tipo',default='INTERNACION')));hid=c.execute('select last_insert_rowid()').fetchone()[0]
+    c.execute("insert or ignore into camas(habitacion_id,codigo,estado) values(?,?,'LIBRE')",(hid,cama));n+=1
+  c.execute('insert into puesta_marcha_importaciones(fecha,tipo,archivo,registros,usuario,estado,detalle) values(?,?,?,?,?,?,?)',(now(),tipo,secure_filename(f.filename),n,session.get('user'),'OK','Importación maestra confirmada'));c.commit();flash(f'Importación {tipo}: {n} registro(s) procesados.')
+ except Exception as e:c.rollback();flash('Importación cancelada: '+str(e))
+ finally:c.close()
+ return redirect('/administracion/puesta-en-marcha')
+
+@app.get('/sifen/preparacion')
+def sifen_preparacion():
+ if not _admin_total():flash('Acceso exclusivo de Administración.');return redirect('/')
+ c=db();checks=[]
+ def add(nombre,ok,detalle):checks.append({'nombre':nombre,'ok':bool(ok),'detalle':detalle})
+ cfg=c.execute('select * from sifen_config where id=1').fetchone() if c.execute("select 1 from sqlite_master where type='table' and name='sifen_config'").fetchone() else None
+ add('Configuración SIFEN',cfg is not None,'Registro de configuración disponible')
+ p=c.execute("select count(*) from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1").fetchone()[0] if c.execute("select 1 from sqlite_master where type='table' and name='sifen_puntos_expedicion'").fetchone() else 0
+ add('Puntos de expedición',p>0,f'{p} punto(s) activo(s) marcado(s) como autorizado(s)')
+ malos=c.execute("select count(*) from terceros where tipo in ('CLIENTE','AMBOS') and (coalesce(nombre,'')='' or coalesce(sifen_naturaleza,'')='' or coalesce(sifen_tipo_operacion,'')='')").fetchone()[0];add('Clientes listos para SIFEN',malos==0,f'{malos} cliente(s) incompletos')
+ malos_p=c.execute("select count(*) from productos where coalesce(activo,1)=1 and (coalesce(sifen_descripcion,'')='' or coalesce(sifen_unidad_codigo,'')='')").fetchone()[0];add('Productos listos para SIFEN',malos_p==0,f'{malos_p} producto(s) incompletos')
+ c.close();return render_template('sifen_readiness.html',checks=checks)
+
+ROUTE_MODULE.update({'puesta_en_marcha':'CONFIG_SANATORIO','puesta_marcha_reset':'CONFIG_SANATORIO','puesta_marcha_importar':'CONFIG_SANATORIO','sifen_preparacion':'FACTURACION'})
