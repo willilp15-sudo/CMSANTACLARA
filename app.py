@@ -4008,7 +4008,10 @@ def _sifen_diagnostico(c,cfg):
         xsd_det='Motor instalado · última validación falló: '+str(ult_xsd['detalle'] or '')[:260]
     else:
         xsd_det='Motor XSD V150 instalado. Ejecute “Generar y validar XML V150”.'
-    add('Validación XSD V150',xsd_motor_ok and xsd_doc_ok,xsd_det)
+    # V13.9.123: no bloquear Producción por una validación histórica.
+    # Cada DE se valida contra XSD inmediatamente antes de transmitirlo; exigir un
+    # XSD previo OK creaba un bloqueo circular para la primera factura.
+    add('Validación XSD V150',xsd_motor_ok,xsd_det)
     mtls_ok=str(cfg['ultimo_estado'] or '').upper()=='OK' if 'ultimo_estado' in cfg.keys() else False
     add('Conexión mTLS SIFEN',mtls_ok,('Última conexión OK: '+str(cfg['ultimo_test'] or '')) if mtls_ok else 'Ejecute y apruebe la prueba de conexión segura antes de Producción')
     return checks
@@ -4453,12 +4456,16 @@ def _sifen_emitir_factura_automatico(venta_id):
         if not cfg: raise ValueError('Configuración SIFEN inexistente.')
         ambiente=str(cfg['ambiente'] or 'TEST').upper()
         xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
+        # V13.9.123: el CDC identifica al DE y debe sobrevivir a cualquier error posterior.
+        c.execute('update ventas set cdc=? where id=?',(cdc,venta_id)); c.commit()
         firmado=_sifen_firmar_rde(xml,cfg)
-        ok,detalle=_sifen_validar_xsd_v150(firmado)
-        if not ok: raise ValueError('XSD V150 rechazó el XML: '+str(detalle))
         qr=_sifen_extraer_qr_rde(firmado)
         if not qr: raise ValueError('El XML firmado no contiene dCarQR.')
+        # El dCarQR también se persiste ANTES de XSD/transporte. Un rechazo no lo borra.
+        c.execute('update ventas set cdc=?,qr_sifen=? where id=?',(cdc,qr,venta_id)); c.commit()
         _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
+        ok,detalle=_sifen_validar_xsd_v150(firmado)
+        if not ok: raise ValueError('XSD V150 rechazó el XML: '+str(detalle))
         if ambiente=='PRODUCCION':
             if not int(cfg['produccion_habilitada'] or 0):
                 raise ValueError('Producción SIFEN no está habilitada en el ERP.')
@@ -4503,11 +4510,13 @@ def sifen_preparar_validacion_factura(venta_id):
         cfg=c.execute('select * from sifen_config where id=1').fetchone()
         if not cfg: raise ValueError('Configuración SIFEN inexistente.')
         xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
+        c.execute('update ventas set cdc=? where id=?',(cdc,venta_id)); c.commit()
         firmado=_sifen_firmar_rde(xml,cfg)
-        ok,detalle=_sifen_validar_xsd_v150(firmado)
-        if not ok: raise ValueError('El XML firmado no pasó XSD V150: '+str(detalle))
         qr=_sifen_extraer_qr_rde(firmado)
         if not qr: raise ValueError('El rDE firmado no contiene dCarQR.')
+        c.execute('update ventas set cdc=?,qr_sifen=? where id=?',(cdc,qr,venta_id)); c.commit()
+        ok,detalle=_sifen_validar_xsd_v150(firmado)
+        if not ok: raise ValueError('El XML firmado no pasó XSD V150: '+str(detalle))
         estado_actual=c.execute('select estado_sifen from ventas where id=?',(venta_id,)).fetchone()
         ea=str(estado_actual['estado_sifen'] or '').upper() if estado_actual else ''
         nuevo=ea if ea in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA') else 'TEST_VALIDADO_XSD'
@@ -4527,12 +4536,17 @@ def sifen_enviar_factura(venta_id):
         cfg=c.execute('select * from sifen_config where id=1').fetchone()
         if not cfg or str(cfg['ambiente'] or '').upper()!='PRODUCCION' or not int(cfg['produccion_habilitada'] or 0):
             raise ValueError('Producción SIFEN no está habilitada en el ERP.')
-        checks=_sifen_diagnostico(c,cfg); faltan=[x['nombre'] for x in checks if not x['ok']]
-        if faltan: raise ValueError('Diagnóstico de Producción pendiente: '+', '.join(faltan))
-        xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id); firmado=_sifen_firmar_rde(xml,cfg)
+        xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
+        c.execute('update ventas set cdc=? where id=?',(cdc,venta_id)); c.commit()
+        firmado=_sifen_firmar_rde(xml,cfg)
+        qr=_sifen_extraer_qr_rde(firmado)
+        if not qr: raise ValueError('El rDE firmado no contiene dCarQR.')
+        c.execute('update ventas set cdc=?,qr_sifen=? where id=?',(cdc,qr,venta_id)); c.commit()
+        _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
         ok,detalle=_sifen_validar_xsd_v150(firmado)
         if not ok: raise ValueError('XSD V150 rechazó el XML: '+str(detalle))
-        qr=_sifen_extraer_qr_rde(firmado); _sifen_guardar_xml_test('FE',venta_id,firmado,cdc)
+        checks=_sifen_diagnostico(c,cfg); faltan=[x['nombre'] for x in checks if not x['ok']]
+        if faltan: raise ValueError('Diagnóstico de Producción pendiente: '+', '.join(faltan))
         status,resp,url=_sifen_enviar_sync(firmado,cfg)
         parsed=_sifen_parse_respuesta(resp); estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
         _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr)
