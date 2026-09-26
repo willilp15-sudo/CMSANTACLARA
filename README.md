@@ -17,3 +17,11 @@ V13.9.78: Preparación segura SIFEN Producción; activación bloqueada hasta tra
 - Prueba desde Configuración > SIFEN usando la última factura, sin firma ni transmisión.
 - Producción permanece bloqueada hasta validar el XML generado contra los XSD oficiales vigentes de DNIT.
 - No modifica correlativos ni la base persistente existente.
+
+
+## V13.9.81 - Usuarios multirroles
+- Un usuario puede tener varios roles simultáneos.
+- Alta de usuario permite selección múltiple de roles.
+- Administración de usuarios permite agregar/quitar varios roles en una sola operación.
+- Los permisos efectivos se obtienen de la unión de los permisos de todos sus roles mediante la tabla usuario_roles existente.
+- No modifica correlativos SIFEN ni datos operativos existentes.

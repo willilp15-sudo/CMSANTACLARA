@@ -1488,8 +1488,8 @@ def admin_usuarios_roles():
   if kind=='usuario':
    uid=c.execute('insert into usuarios(nombre,usuario,clave,rol,activo,tipo_usuario,persona_tipo,persona_id) values(?,?,?,?,?,?,?,?)',(
     request.form['nombre'],request.form['usuario'],password_hash(request.form['clave']),'MODULAR',1,request.form.get('tipo_usuario','EMPLEADO'),request.form.get('persona_tipo') or None,int(request.form['persona_id']) if request.form.get('persona_id') else None)).lastrowid
-   rid=request.form.get('rol_id')
-   if rid:c.execute('insert or ignore into usuario_roles(usuario_id,rol_id) values(?,?)',(uid,int(rid)))
+   for rid in request.form.getlist('rol_ids'):
+    if rid:c.execute('insert or ignore into usuario_roles(usuario_id,rol_id) values(?,?)',(uid,int(rid)))
   elif kind=='rol':c.execute('insert into roles(nombre,descripcion,activo) values(?,?,1)',(request.form['nombre'].upper(),request.form.get('descripcion','')))
   elif kind=='permisos':
    rid=int(request.form['rol_id']);c.execute('delete from permisos_rol where rol_id=?',(rid,))
@@ -1497,8 +1497,8 @@ def admin_usuarios_roles():
     mod,act=key.split('|',1);c.execute('insert into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,mod,act))
   elif kind=='asignar':
    uid=int(request.form['usuario_id']);c.execute('delete from usuario_roles where usuario_id=?',(uid,))
-   rid=request.form.get('rol_id')
-   if rid:c.execute('insert into usuario_roles(usuario_id,rol_id) values(?,?)',(uid,int(rid)))
+   for rid in request.form.getlist('rol_ids'):
+    if rid:c.execute('insert or ignore into usuario_roles(usuario_id,rol_id) values(?,?)',(uid,int(rid)))
   c.commit();audit_change(c,'CONFIGURAR','SEGURIDAD',0,despues={'tipo':kind});c.commit();c.close();return redirect('/admin/usuarios-roles')
  users=c.execute('select * from usuarios order by nombre').fetchall();roles=c.execute('select * from roles where activo=1 order by nombre').fetchall()
  selected_role=int(request.args.get('rol_id') or (roles[0]['id'] if roles else 0))
@@ -1508,8 +1508,10 @@ def admin_usuarios_roles():
  try: empleados=c.execute('select id,nombre from empleados order by nombre').fetchall()
  except sqlite3.OperationalError: pass
  c.close()
- checked={(x['modulo'],x['accion']) for x in perms}; user_role={x['usuario_id']:x['rol_id'] for x in urs}
- return render_template('admin_roles.html',users=users,roles=roles,selected_role=selected_role,checked=checked,user_role=user_role,medicos=medicos,empleados=empleados,modules=MODULES,actions=ACTIONS)
+ checked={(x['modulo'],x['accion']) for x in perms}
+ user_roles={}
+ for x in urs: user_roles.setdefault(x['usuario_id'],set()).add(x['rol_id'])
+ return render_template('admin_roles.html',users=users,roles=roles,selected_role=selected_role,checked=checked,user_roles=user_roles,medicos=medicos,empleados=empleados,modules=MODULES,actions=ACTIONS)
 
 @app.post('/enfermeria/solicitar-farmacia')
 def enfermeria_solicitar_farmacia():
