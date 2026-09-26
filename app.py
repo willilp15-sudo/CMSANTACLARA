@@ -3847,20 +3847,77 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
         gf=etree.SubElement(gd,'{%s}gCamFE'%NS);_sifen_xml_text(gf,'iIndPres','1',NS);_sifen_xml_text(gf,'dDesIndPres','Operación presencial',NS)
     else:
         gn=etree.SubElement(gd,'{%s}gCamNCDE'%NS);_sifen_xml_text(gn,'iMotEmi','1',NS);_sifen_xml_text(gn,'dDesMotEmi','Devolución y ajuste de precios' if tipo=='NCE' else 'Ajuste de precios',NS)
-    total=0.0;iva_total=0.0
+    # V13.9.89: construcción integral de importes obligatorios V150.
+    # TgValorItem exige un grupo gValorRestaItem real (no una etiqueta vacía) y
+    # TgCamIVA exige dBasExe incluso cuando el ítem está gravado.
+    total=0.0;iva_total=0.0;sub_exe=0.0;sub5=0.0;sub10=0.0;iva5=0.0;iva10=0.0;base5=0.0;base10=0.0
     for ix,it in enumerate(items,1):
-        gi=etree.SubElement(gd,'{%s}gCamItem'%NS);_sifen_xml_text(gi,'dCodInt',it['codigo'] if 'codigo' in it.keys() and it['codigo'] else str(ix),NS);_sifen_xml_text(gi,'dDesProSer',it['descripcion'] if 'descripcion' in it.keys() else 'Ítem',NS);_sifen_xml_text(gi,'cUniMed','77',NS);_sifen_xml_text(gi,'dDesUniMed','UNI',NS);q=float(it['cantidad'] or 1);precio=float(it['precio'] or 0);line=float(it['total'] or q*precio);pct=float(it['iva_pct'] or 0);_sifen_xml_text(gi,'dCantProSer',('%0.4f'%q).rstrip('0').rstrip('.'),NS)
-        gv=etree.SubElement(gi,'{%s}gValorItem'%NS);_sifen_xml_text(gv,'dPUniProSer',str(round(precio,4)),NS);_sifen_xml_text(gv,'dTotBruOpeItem',str(round(line,4)),NS);_sifen_xml_text(gv,'gValorRestaItem',None,NS)
-        giv=etree.SubElement(gi,'{%s}gCamIVA'%NS);af='3' if pct<=0 else '1';_sifen_xml_text(giv,'iAfecIVA',af,NS);_sifen_xml_text(giv,'dDesAfecIVA','Exento' if pct<=0 else 'Gravado IVA',NS);_sifen_xml_text(giv,'dPropIVA','100',NS);_sifen_xml_text(giv,'dTasaIVA',str(int(pct)),NS);baseiva=line/(1+pct/100) if pct>0 else 0;iva=line-baseiva if pct>0 else 0;_sifen_xml_text(giv,'dBasGravIVA',str(round(baseiva,4)),NS);_sifen_xml_text(giv,'dLiqIVAItem',str(round(iva,4)),NS);total+=line;iva_total+=iva
+        gi=etree.SubElement(gd,'{%s}gCamItem'%NS)
+        _sifen_xml_text(gi,'dCodInt',it['codigo'] if 'codigo' in it.keys() and it['codigo'] else str(ix),NS)
+        _sifen_xml_text(gi,'dDesProSer',it['descripcion'] if 'descripcion' in it.keys() else 'Ítem',NS)
+        _sifen_xml_text(gi,'cUniMed','77',NS);_sifen_xml_text(gi,'dDesUniMed','UNI',NS)
+        q=float(it['cantidad'] or 1);precio=float(it['precio'] or 0);line=float(it['total'] or q*precio);pct=float(it['iva_pct'] or 0)
+        _sifen_xml_text(gi,'dCantProSer',('%0.4f'%q).rstrip('0').rstrip('.'),NS)
+        gv=etree.SubElement(gi,'{%s}gValorItem'%NS)
+        _sifen_xml_text(gv,'dPUniProSer',str(round(precio,4)),NS)
+        _sifen_xml_text(gv,'dTotBruOpeItem',str(round(line,4)),NS)
+        gvr=etree.SubElement(gv,'{%s}gValorRestaItem'%NS)
+        _sifen_xml_text(gvr,'dDescItem','0',NS);_sifen_xml_text(gvr,'dPorcDesIt','0',NS)
+        _sifen_xml_text(gvr,'dDescGloItem','0',NS);_sifen_xml_text(gvr,'dAntPreUniIt','0',NS)
+        _sifen_xml_text(gvr,'dAntGloPreUniIt','0',NS);_sifen_xml_text(gvr,'dTotOpeItem',str(round(line,4)),NS)
+        giv=etree.SubElement(gi,'{%s}gCamIVA'%NS)
+        af='3' if pct<=0 else '1'
+        _sifen_xml_text(giv,'iAfecIVA',af,NS);_sifen_xml_text(giv,'dDesAfecIVA','Exento' if pct<=0 else 'Gravado IVA',NS)
+        _sifen_xml_text(giv,'dPropIVA','100',NS);_sifen_xml_text(giv,'dTasaIVA',str(int(pct)),NS)
+        baseiva=line/(1+pct/100) if pct>0 else 0;iva=line-baseiva if pct>0 else 0
+        _sifen_xml_text(giv,'dBasGravIVA',str(round(baseiva,4)),NS);_sifen_xml_text(giv,'dLiqIVAItem',str(round(iva,4)),NS)
+        _sifen_xml_text(giv,'dBasExe',str(round(line if pct<=0 else 0,4)),NS)
+        total+=line;iva_total+=iva
+        if pct<=0: sub_exe+=line
+        elif abs(pct-5)<0.001: sub5+=line;iva5+=iva;base5+=baseiva
+        else: sub10+=line;iva10+=iva;base10+=baseiva
+
+    # Grupo F / totales. Aunque gTotSub es opcional a nivel de binding, cuando
+    # se informa debe contener todos sus campos obligatorios; lo generamos de
+    # forma completa para FE/NCE/NDE y evitamos una cadena de errores sucesivos.
+    tots=etree.SubElement(de,'{%s}gTotSub'%NS)
+    _sifen_xml_text(tots,'dSubExe',str(round(sub_exe,4)),NS)
+    _sifen_xml_text(tots,'dSub5',str(round(sub5,4)),NS);_sifen_xml_text(tots,'dSub10',str(round(sub10,4)),NS)
+    _sifen_xml_text(tots,'dTotOpe',str(round(total,4)),NS);_sifen_xml_text(tots,'dTotDesc','0',NS)
+    _sifen_xml_text(tots,'dTotDescGlotem','0',NS);_sifen_xml_text(tots,'dTotAntItem','0',NS);_sifen_xml_text(tots,'dTotAnt','0',NS)
+    _sifen_xml_text(tots,'dPorcDescTotal','0',NS);_sifen_xml_text(tots,'dDescTotal','0',NS);_sifen_xml_text(tots,'dAnticipo','0',NS)
+    _sifen_xml_text(tots,'dRedon','0',NS);_sifen_xml_text(tots,'dTotGralOpe',str(round(total,4)),NS)
+    _sifen_xml_text(tots,'dIVA5',str(round(iva5,4)),NS);_sifen_xml_text(tots,'dIVA10',str(round(iva10,4)),NS)
+    _sifen_xml_text(tots,'dLiqTotIVA5',str(round(iva5,4)),NS);_sifen_xml_text(tots,'dLiqTotIVA10',str(round(iva10,4)),NS)
+    _sifen_xml_text(tots,'dTotIVA',str(round(iva_total,4)),NS);_sifen_xml_text(tots,'dBaseGrav5',str(round(base5,4)),NS)
+    _sifen_xml_text(tots,'dBaseGrav10',str(round(base10,4)),NS);_sifen_xml_text(tots,'dTBasGraIVA',str(round(base5+base10,4)),NS)
     if asoc:
         ga=etree.SubElement(de,'{%s}gCamDEAsoc'%NS);_sifen_xml_text(ga,'iTipDocAso','1',NS);_sifen_xml_text(ga,'dDesTipDocAso','Electrónico',NS);_sifen_xml_text(ga,'dCdCDERef',asoc,NS)
     xml=etree.tostring(root,encoding='UTF-8',xml_declaration=True,pretty_print=False)
     return xml,cdc
 
 def _sifen_validar_xsd_v150(xml_bytes):
-    """Valida rDE V150 con el binding aislado oficial generado desde XSD.
-    V13.9.88 elimina el workaround que quitaba namespaces: el XML se valida tal cual.
+    """Valida rDE V150 con preflight estructural + binding V150.
+    V13.9.89 revisa de una vez los grupos obligatorios que el generador utiliza,
+    para no avanzar error por error en cada despliegue.
     """
+    try:
+        from lxml import etree
+        raw=xml_bytes if isinstance(xml_bytes,bytes) else str(xml_bytes).encode('utf-8')
+        root=etree.fromstring(raw)
+        ns={'s':'http://ekuatia.set.gov.py/sifen/xsd'}
+        falt=[]
+        for xp,nombre in [
+          ('s:DE','DE'),('s:DE/s:gOpeDE','gOpeDE'),('s:DE/s:gTimb','gTimb'),
+          ('s:DE/s:gDatGralOpe/s:gEmis','gEmis'),('s:DE/s:gDatGralOpe/s:gDatRec','gDatRec'),
+          ('s:DE/s:gDtipDE','gDtipDE'),('s:DE/s:gDtipDE/s:gCamItem','gCamItem'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:gValorItem/s:gValorRestaItem/s:dTotOpeItem','gValorRestaItem/dTotOpeItem'),
+          ('s:DE/s:gDtipDE/s:gCamItem/s:gCamIVA/s:dBasExe','gCamIVA/dBasExe'),
+          ('s:DE/s:gTotSub/s:dTotOpe','gTotSub/dTotOpe'),('s:DE/s:gTotSub/s:dTotGralOpe','gTotSub/dTotGralOpe')]:
+            if not root.xpath(xp,namespaces=ns): falt.append(nombre)
+        if falt: return False,['Prevalidación V150: faltan grupos/campos: '+', '.join(falt)]
+    except Exception as e:
+        return False,['XML V150 no pudo analizarse: '+str(e)]
     try:
         from pysifen.de.bindings.de_v150.de_v150 import RDe
     except Exception as e:
