@@ -3232,6 +3232,66 @@ def init_v1391():
  CREATE TABLE IF NOT EXISTS agenda_web_solicitudes(id INTEGER PRIMARY KEY, agenda_id INTEGER, fecha TEXT, hora TEXT, medico_id INTEGER, especialidad TEXT, documento TEXT, paciente TEXT, telefono TEXT, email TEXT, motivo TEXT, estado TEXT DEFAULT 'CONFIRMADO', creado_en TEXT, ip_origen TEXT);
  """);c.commit();c.close()
 
+# ===== V13.9.85: Depósitos bancarios =====
+def init_v13985_depositos_bancarios():
+    c=db()
+    c.execute("""CREATE TABLE IF NOT EXISTS depositos_bancarios(
+      id INTEGER PRIMARY KEY, fecha TEXT NOT NULL, cuenta_bancaria_id INTEGER NOT NULL,
+      moneda TEXT NOT NULL DEFAULT 'PYG', tipo_cambio REAL NOT NULL DEFAULT 1,
+      importe REAL NOT NULL, importe_pyg REAL NOT NULL, tipo_deposito TEXT NOT NULL DEFAULT 'EFECTIVO',
+      origen TEXT NOT NULL DEFAULT 'CAJA', referencia TEXT, concepto TEXT, observaciones TEXT,
+      estado TEXT NOT NULL DEFAULT 'CONFIRMADO', movimiento_financiero_id INTEGER,
+      asiento_id INTEGER, creado_por TEXT, creado_en TEXT, anulado_por TEXT, anulado_en TEXT
+    )""")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.85-depositos-bancarios',?)",(now(),))
+    c.commit();c.close()
+init_v13985_depositos_bancarios()
+
+@app.route('/bancos/depositos',methods=['GET','POST'])
+def depositos_bancarios():
+    c=db()
+    if request.method=='POST':
+        try:
+            f=request.form; fecha=f['fecha']; cuenta_id=int(f['cuenta_bancaria_id']); mon=(f.get('moneda') or 'PYG').upper()
+            imp=float(f.get('importe') or 0); tc=tc_fecha(c,fecha,mon,f.get('tipo_cambio'))
+            if imp<=0: raise ValueError('El importe del depósito debe ser mayor a cero.')
+            b=c.execute('select * from cuentas_bancarias where id=? and activo=1',(cuenta_id,)).fetchone()
+            if not b: raise ValueError('La cuenta bancaria seleccionada no existe o está inactiva.')
+            if not b['cuenta_contable']: raise ValueError('La cuenta bancaria no tiene cuenta contable vinculada. Configure Cuentas Bancarias.')
+            origen=(f.get('origen') or 'CAJA').upper(); tipo=(f.get('tipo_deposito') or 'EFECTIVO').upper()
+            if origen not in ('CAJA','COBRANZA','OTRO'): raise ValueError('Origen del depósito inválido.')
+            pyg=imp*tc; concepto=(f.get('concepto') or 'Depósito bancario').strip(); ref=(f.get('referencia') or '').strip(); obs=(f.get('observaciones') or '').strip()
+            cur=c.execute("""insert into depositos_bancarios(fecha,cuenta_bancaria_id,moneda,tipo_cambio,importe,importe_pyg,tipo_deposito,origen,referencia,concepto,observaciones,estado,creado_por,creado_en)
+              values(?,?,?,?,?,?,?,?,?,?,?,'CONFIRMADO',?,?)""",(fecha,cuenta_id,mon,tc,imp,pyg,tipo,origen,ref,concepto,obs,session.get('user'),now()))
+            did=cur.lastrowid
+            mov=c.execute("insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,'INGRESO','DEPOSITO_BANCARIO',?,?,?,?,?,'DEPOSITO_BANCARIO',?,?)",(fecha,mon,tc,imp,pyg,concepto,did,cuenta_id)).lastrowid
+            cfg=c.execute('select * from tesoreria_config where id=1').fetchone(); contrapartida=(cfg['cuenta_caja'] if cfg else '1.1.01')
+            aid=asiento(c,fecha,concepto,'DEPOSITO_BANCARIO',did,mon,tc,[(b['cuenta_contable'],pyg,0,imp,'Ingreso a banco'),(contrapartida,0,pyg,imp,'Salida/depósito desde caja')])
+            c.execute('update depositos_bancarios set movimiento_financiero_id=?,asiento_id=? where id=?',(mov,aid,did))
+            c.commit();c.close();audit('DEPOSITO_BANCARIO',f'Depósito {did} / {imp} {mon} / cuenta {cuenta_id}');flash('Depósito bancario registrado correctamente.');return redirect('/bancos/depositos')
+        except Exception as ex:
+            c.rollback();c.close();flash('No se pudo registrar el depósito: '+str(ex));return redirect('/bancos/depositos')
+    desde=request.args.get('desde') or '';hasta=request.args.get('hasta') or '';cuenta=request.args.get('cuenta_bancaria_id') or ''
+    sql='select d.*,b.banco,b.alias,b.numero_cuenta from depositos_bancarios d join cuentas_bancarias b on b.id=d.cuenta_bancaria_id where 1=1';ps=[]
+    if desde: sql+=' and d.fecha>=?';ps.append(desde)
+    if hasta: sql+=' and d.fecha<=?';ps.append(hasta)
+    if cuenta: sql+=' and d.cuenta_bancaria_id=?';ps.append(int(cuenta))
+    sql+=' order by d.fecha desc,d.id desc'
+    rows=c.execute(sql,ps).fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();c.close()
+    return render_template('bank_deposits.html',rows=rows,cuentas=cuentas,desde=desde,hasta=hasta,cuenta_sel=cuenta)
+
+@app.post('/bancos/depositos/<int:did>/anular')
+def deposito_bancario_anular(did):
+    c=db();d=c.execute('select * from depositos_bancarios where id=?',(did,)).fetchone()
+    if not d:c.close();flash('Depósito no encontrado.');return redirect('/bancos/depositos')
+    if d['estado']=='ANULADO':c.close();flash('El depósito ya está anulado.');return redirect('/bancos/depositos')
+    if d['movimiento_financiero_id']:c.execute('delete from caja_banco where id=?',(d['movimiento_financiero_id'],))
+    if d['asiento_id']:c.execute("update asientos set estado='ANULADO' where id=?",(d['asiento_id'],))
+    c.execute("update depositos_bancarios set estado='ANULADO',anulado_por=?,anulado_en=? where id=?",(session.get('user'),now(),did));c.commit();c.close()
+    audit('ANULAR_DEPOSITO_BANCARIO',str(did));flash('Depósito bancario anulado. El movimiento bancario fue revertido.');return redirect('/bancos/depositos')
+
+ROUTE_MODULE.update({'depositos_bancarios':'FINANZAS','deposito_bancario_anular':'FINANZAS'})
+
 @app.route('/bancos/conciliacion',methods=['GET','POST'])
 def conciliacion_bancaria():
  c=db()
@@ -3808,11 +3868,35 @@ def _sifen_validar_xsd_v150(xml_bytes):
     try:
         if isinstance(xml_bytes,bytes): xml_text=xml_bytes.decode('utf-8')
         else: xml_text=str(xml_bytes)
-        rde=RDe.from_xml(xml_text)
+        # V13.9.86: pysifen 0.2.0 presenta una incompatibilidad de deserialización
+        # con algunos elementos TgEmis cuando el namespace por defecto viene
+        # expandido como {http://ekuatia.set.gov.py/sifen/xsd}dDepEmi.
+        # Primero intentamos el XML SIFEN normal. Si el binding falla SOLO por
+        # "Unknown property", hacemos una copia exclusivamente para el binding
+        # quitando namespaces de las etiquetas. El XML original NO se modifica:
+        # es el que se guarda, firma y transmite.
+        try:
+            rde=RDe.from_xml(xml_text)
+        except Exception as bind_err:
+            if 'Unknown property' not in str(bind_err):
+                raise
+            from lxml import etree
+            parser=etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True)
+            compat=etree.fromstring(xml_text.encode('utf-8'),parser)
+            for el in compat.iter():
+                if isinstance(el.tag,str) and el.tag.startswith('{'):
+                    el.tag=el.tag.split('}',1)[1]
+                # schemaLocation no forma parte del modelo DE del binding
+                for ak in list(el.attrib):
+                    if ak.startswith('{http://www.w3.org/2001/XMLSchema-instance}'):
+                        del el.attrib[ak]
+            compat_text=etree.tostring(compat,encoding='unicode')
+            try:
+                rde=RDe.from_xml(compat_text)
+            except Exception as compat_err:
+                return False,['Incompatibilidad del binding XSD V150: '+str(compat_err)]
         errores=rde.validate_xml() or []
-        mensajes=[]
-        for e in errores:
-            mensajes.append(str(e))
+        mensajes=[str(e) for e in errores]
         return len(mensajes)==0,mensajes
     except Exception as e:
         return False,[str(e)]
