@@ -5825,7 +5825,17 @@ def _sifen_venta_tuvo_aprobacion(c,v):
     if hist: return True
     # Compatibilidad con registros cuyo detalle guardó el número comercial en vez del id.
     hist=c.execute("select 1 from sifen_eventos where estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE') and detalle like ? order by id desc limit 1",('%CDC '+str(v['cdc'] or '')+'%',)).fetchone()
-    return bool(hist)
+    if hist: return True
+    # V13.9.146: la respuesta de lote 0260 es la evidencia SIFEN de aprobación aunque
+    # versiones anteriores hayan guardado estado='RESPUESTA_RECIBIDA' y luego una
+    # consulta 0365 haya sobrescrito ventas.estado_sifen/sifen_codigo_error.
+    cdc=str(v['cdc'] or '').strip()
+    if cdc:
+        hist=c.execute("select 1 from sifen_eventos where detalle like ? and (detalle like '%0260%' or upper(coalesce(estado,'')) like '%APROB%') order by id desc limit 1",('%CDC '+cdc+'%',)).fetchone()
+        if hist: return True
+    # Último respaldo: respuestas SOAP históricas conservadas en la propia venta.
+    raw=str(v['respuesta_sifen'] or '') if 'respuesta_sifen' in v.keys() else ''
+    return bool(cdc and ('0260' in raw) and (cdc in raw))
 
 @app.post('/ventas/<int:venta_id>/anular')
 def anular_factura_venta(venta_id):
