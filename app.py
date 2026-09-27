@@ -1158,7 +1158,7 @@ def cuenta_paciente(aid):
   iva_pct=float(x['iva_pct'] or 0);total=qty*price;cargo_id=c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,tipo,ref,desc,qty,price,mon,tc,total,total*tc,iva_pct)).lastrowid
   if a['aseguradora_id'] and tipo=='SERVICIO':_registrar_visacion(c,a['aseguradora_id'],a['paciente_id'],'CARGO_SERVICIO',cargo_id,request.form.get('medico_id') or a['medico_id'])
   c.commit();return redirect(f'/cuenta-paciente/{aid}')
- cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();visaciones=c.execute("select v.*,m.nombre medico from seguro_visaciones v left join medicos m on m.id=v.medico_id where (v.origen_tipo=? and v.origen_id=?) or (v.origen_tipo='CARGO_SERVICIO' and v.origen_id in (select id from cargos_paciente where admision_id=?)) order by v.id desc",(a['tipo'],aid,aid)).fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,meds=meds,visaciones=visaciones,total=total)
+ cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();visaciones=c.execute("select v.*,m.nombre medico from seguro_visaciones v left join medicos m on m.id=v.medico_id where (v.origen_tipo=? and v.origen_id=?) or (v.origen_tipo='CARGO_SERVICIO' and v.origen_id in (select id from cargos_paciente where admision_id=?)) order by v.id desc",(a['tipo'],aid,aid)).fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,meds=meds,terceros=terceros,visaciones=visaciones,total=total)
 @app.post('/facturar-admision/<int:aid>')
 def facturar_admision(aid):
  c=db();a=c.execute('select a.*,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone();items=c.execute('select * from cargos_paciente where admision_id=? and facturado=0',(aid,)).fetchall()
@@ -1174,7 +1174,9 @@ def facturar_admision(aid):
  total10_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==10);total5_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==5);exento_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==0)
  base10_pyg,iva10_pyg=desglosar_iva_incluido(total10_pyg,10);base5_pyg,iva5_pyg=desglosar_iva_incluido(total5_pyg,5)
  subtotal_pyg=base10_pyg+base5_pyg+exento_pyg;iva_pyg=iva10_pyg+iva5_pyg;totg=total10_pyg+total5_pyg+exento_pyg
- subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];punto_id_operativo=_punto_id_caja_actual(c,a['tipo']);num,punto_factura=_siguiente_numero_factura(c,punto_id_operativo);cur=c.execute('insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,ter,num,mon,tc,subtotal,iva,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));fid=cur.lastrowid;c.execute('update cargos_paciente set facturado=1 where admision_id=? and facturado=0',(aid,));c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,ter,num,mon,tc,(base10_pyg+base5_pyg)/tc,iva,exento_pyg/tc,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));vid=c.execute('select last_insert_rowid()').fetchone()[0];ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],vid));c.execute('update facturas_sanatorio set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],fid));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(vid,ter,mon,tc,total,total,totg));asiento(c,fecha,'Factura sanatorial '+num,'FACTURA_SANATORIO',fid,mon,tc,[('1.1.02',totg,0,total,'Paciente/Seguro'),('4.1.02',0,subtotal_pyg,subtotal,'Servicios sanatoriales'),('2.1.02',0,iva_pyg,iva,'IVA débito')]);c.commit();audit('FACTURA_SANATORIO',str(fid));return redirect(f'/cuenta-paciente/{aid}')
+ subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];facturado_a=request.form.get('facturado_a_tercero_id');ter=int(facturado_a) if facturado_a else ter
+ if not ter:raise ValueError('Seleccione la persona o empresa a cuyo nombre se emitirá la factura.')
+ punto_id_operativo=_punto_id_caja_actual(c,a['tipo']);num,punto_factura=_siguiente_numero_factura(c,punto_id_operativo);cur=c.execute('insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,ter,num,mon,tc,subtotal,iva,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));fid=cur.lastrowid;c.execute('update cargos_paciente set facturado=1 where admision_id=? and facturado=0',(aid,));c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,ter,num,mon,tc,(base10_pyg+base5_pyg)/tc,iva,exento_pyg/tc,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));vid=c.execute('select last_insert_rowid()').fetchone()[0];c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(a['paciente_id'],ter,vid));ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],vid));c.execute('update facturas_sanatorio set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],fid));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(vid,ter,mon,tc,total,total,totg));asiento(c,fecha,'Factura sanatorial '+num,'FACTURA_SANATORIO',fid,mon,tc,[('1.1.02',totg,0,total,'Paciente/Seguro'),('4.1.02',0,subtotal_pyg,subtotal,'Servicios sanatoriales'),('2.1.02',0,iva_pyg,iva,'IVA débito')]);c.commit();audit('FACTURA_SANATORIO',str(fid));return redirect(f'/cuenta-paciente/{aid}')
 # ===== V13.9.66: liquidación de cobertura por seguro ítem por ítem =====
 def init_v13966_cobertura_seguro():
  c=db()
@@ -1206,7 +1208,8 @@ def alta(aid):
    c.close();flash('La cuenta ya fue cerrada o procesada.');return redirect(f'/cuenta-paciente/{aid}')
   items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
   puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])]
-  c.close();return render_template('insurance_coverage_close.html',a=a,items=items,puntos=puntos)
+  terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall()
+  c.close();return render_template('insurance_coverage_close.html',a=a,items=items,puntos=puntos,terceros=terceros)
  if a['estado']!='ABIERTA':
   c.close();flash('La cuenta ya fue cerrada o procesada.');return redirect(f'/cuenta-paciente/{aid}')
  if not asegurado:
@@ -1224,18 +1227,21 @@ def alta(aid):
    cub=max(0.0,min(total,cub));dif=round(total-cub,2);cat,iva=clasificar_cargo_seguro(c,r);liquid.append((r,cub,dif,cat,iva));total_seg+=cub;total_pac+=dif
   vid_pac=None;fid_pac=None;numero_pac=None
   if total_pac>0.005:
+   receptor_pac=int(request.form.get('facturado_a_tercero_id') or a['paciente_tercero'] or 0)
+   if not receptor_pac:raise ValueError('Seleccione a nombre de quién se facturará la diferencia no cubierta.')
    numero_pac,punto=_siguiente_numero_factura(c,request.form.get('sifen_punto_id'))
    tot10=sum(dif for r,cub,dif,cat,iva in liquid if iva==10);tot5=sum(dif for r,cub,dif,cat,iva in liquid if iva==5);exento=sum(dif for r,cub,dif,cat,iva in liquid if iva==0)
    b10,i10=desglosar_iva_incluido(tot10,10);b5,i5=desglosar_iva_incluido(tot5,5);subtotal=b10+b5+exento;iva=i10+i5
    v=c.execute('''insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta)
-    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,a['paciente_tercero'],numero_pac,'PYG',1,b10+b5,iva,exento,total_pac,total_pac,b10,i10,b5,i5,exento,'CREDITO'));vid_pac=v.lastrowid
+    values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,receptor_pac,numero_pac,'PYG',1,b10+b5,iva,exento,total_pac,total_pac,b10,i10,b5,i5,exento,'CREDITO'));vid_pac=v.lastrowid
+   c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(a['paciente_id'],receptor_pac,vid_pac))
    c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=? where id=?',(punto['id'],punto['establecimiento'],punto['punto_expedicion'],vid_pac))
    for r,cub,dif,cat,ivap in liquid:
     if dif<=0.005:continue
     base,_iv=desglosar_iva_incluido(dif,ivap) if ivap else (dif,0)
     c.execute('''insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)''',(vid_pac,None,1,dif,base,dif,0,ivap,(r['descripcion'] or 'Ítem')+' - diferencia no cubierta por seguro'))
-   fid_pac=c.execute('''insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,aid,a['paciente_tercero'],numero_pac,'PYG',1,subtotal,iva,total_pac,total_pac,b10,i10,b5,i5,exento)).lastrowid
-   c.execute("insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,'PENDIENTE')",(vid_pac,a['paciente_tercero'],'PYG',1,total_pac,total_pac,total_pac))
+   fid_pac=c.execute('''insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,aid,receptor_pac,numero_pac,'PYG',1,subtotal,iva,total_pac,total_pac,b10,i10,b5,i5,exento)).lastrowid
+   c.execute("insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,'PENDIENTE')",(vid_pac,receptor_pac,'PYG',1,total_pac,total_pac,total_pac))
    asiento(c,fecha,'Diferencia no cubierta por seguro '+numero_pac,'FACTURA_SANATORIO',fid_pac,'PYG',1,[('1.1.02',total_pac,0,total_pac,'Cuenta a cobrar paciente'),('4.1.02',0,subtotal,subtotal,'Prestaciones no cubiertas'),('2.1.02',0,iva,iva,'IVA débito')]);_generar_cdc_test_venta(c,vid_pac,fecha,numero_pac)
   for r,cub,dif,cat,ivap in liquid:
    spid=None
@@ -2526,7 +2532,7 @@ def _report_data(c, tipo, desde, hasta):
  if tipo=='compras':
   return ('Informes de Compras',['Fecha','Proveedor','Comprobante','Moneda','Total PYG','Estado'], c.execute("select co.fecha,coalesce(t.nombre,'-'),co.numero,co.moneda,co.total_pyg,co.estado from compras co left join terceros t on t.id=co.proveedor_id where co.fecha between ? and ? order by co.fecha desc,co.id desc",params).fetchall())
  if tipo=='ventas':
-  return ('Informes de Ventas y Facturación',['Fecha','Cliente','Comprobante','Moneda','Total PYG','Estado'], c.execute("select v.fecha,coalesce(t.nombre,'-'),v.numero,v.moneda,v.total_pyg,v.estado from ventas v left join terceros t on t.id=v.cliente_id where v.fecha between ? and ? order by v.fecha desc,v.id desc",params).fetchall())
+  return ('Informes de Ventas y Facturación',['Fecha','Paciente','Facturado para','Comprobante','Moneda','Total PYG','Estado'], c.execute("select v.fecha,coalesce(p.nombre,'-'),coalesce(t.nombre,'-'),v.numero,v.moneda,v.total_pyg,v.estado from ventas v left join terceros t on t.id=v.cliente_id left join pacientes p on p.id=v.paciente_id where v.fecha between ? and ? order by v.fecha desc,v.id desc",params).fetchall())
  if tipo=='consultas':
   return ('Informes de Consultas',['Fecha','Paciente','Médico','Especialidad','Estado','Facturado PYG','Honorario PYG','Margen PYG'], c.execute("select q.fecha,p.nombre,m.nombre,e.nombre,q.estado,q.precio_pyg,q.honorario_pyg,(q.precio_pyg-q.honorario_pyg) from consultas q join pacientes p on p.id=q.paciente_id join medicos m on m.id=q.medico_id join especialidades e on e.id=q.especialidad_id where q.fecha between ? and ? order by q.fecha desc,q.id desc",params).fetchall())
  if tipo in ('cirugias','urgencias','internaciones'):
@@ -3197,6 +3203,19 @@ def _kude_footer(story,inst,cdc=None,consulta_url=None,es_dte=False):
     row=[Paragraph(txt,st['Normal']),qr or Paragraph('',st['Normal'])]
     t=Table([row],colWidths=[150*mm,36*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));story += [Spacer(1,3*mm),t]
 
+# ===== V13.10.4: paciente atendido != receptor fiscal de la factura =====
+def init_v13104_facturacion_terceros():
+ c=db()
+ try:
+  cols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+  if 'paciente_id' not in cols:c.execute('alter table ventas add column paciente_id INT')
+  if 'facturado_a_tercero_id' not in cols:c.execute('alter table ventas add column facturado_a_tercero_id INT')
+  c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
+  c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.10.4-facturacion-terceros',?)",(now(),))
+  c.commit()
+ finally:c.close()
+init_v13104_facturacion_terceros()
+
 # ===== V13.6.4: Factura imprimible/PDF y preparación SIFEN =====
 def init_v1364_factura_electronica():
     c=db()
@@ -3211,8 +3230,8 @@ init_v1364_factura_electronica()
 
 def _factura_venta_data(venta_id):
     c=db()
-    v=c.execute('''select v.*,t.nombre cliente,t.ruc,t.telefono cliente_telefono,t.email cliente_email,t.sifen_direccion cliente_direccion,t.sifen_tipo_operacion,t.sifen_naturaleza,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos
-                   from ventas v left join terceros t on t.id=v.cliente_id
+    v=c.execute('''select v.*,t.nombre cliente,t.ruc,t.telefono cliente_telefono,t.email cliente_email,t.sifen_direccion cliente_direccion,t.sifen_tipo_operacion,t.sifen_naturaleza,pac.nombre paciente,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos
+                   from ventas v left join terceros t on t.id=v.cliente_id left join pacientes pac on pac.id=v.paciente_id
                    left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id
                    left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
     items=c.execute('''select vi.*,p.codigo,coalesce(p.nombre,vi.descripcion,'Servicio') nombre from venta_items vi left join productos p on p.id=vi.producto_id where vi.venta_id=? order by vi.id''',(venta_id,)).fetchall()
@@ -3220,7 +3239,7 @@ def _factura_venta_data(venta_id):
     if v and not v['cdc']:
         try:
             cdc=_generar_cdc_test_venta(c,v['id'],v['fecha'],v['numero'])
-            if cdc:c.commit();v=c.execute('''select v.*,t.nombre cliente,t.ruc,t.telefono cliente_telefono,t.email cliente_email,t.sifen_direccion cliente_direccion,t.sifen_tipo_operacion,t.sifen_naturaleza,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from ventas v left join terceros t on t.id=v.cliente_id left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
+            if cdc:c.commit();v=c.execute('''select v.*,t.nombre cliente,t.ruc,t.telefono cliente_telefono,t.email cliente_email,t.sifen_direccion cliente_direccion,t.sifen_tipo_operacion,t.sifen_naturaleza,pac.nombre paciente,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from ventas v left join terceros t on t.id=v.cliente_id left join pacientes pac on pac.id=v.paciente_id left join cuentas_bancarias cb on cb.id=v.cuenta_bancaria_id left join terminales_pos tp on tp.id=v.terminal_pos_id where v.id=?''',(venta_id,)).fetchone()
         except Exception as ex:
             _sifen_log('CDC_TEST','ERROR',f'Factura {venta_id}: {ex}')
     c.close();return v,items,inst
@@ -3291,7 +3310,7 @@ def factura_venta_pdf(venta_id):
     tipo_tx=('B2B' if str(v['sifen_tipo_operacion'] or '')=='1' else 'B2C' if str(v['sifen_tipo_operacion'] or '')=='2' else 'B2G' if str(v['sifen_tipo_operacion'] or '')=='3' else 'B2F' if str(v['sifen_tipo_operacion'] or '')=='4' else '-')
     operacion='Prestación de servicios / venta' if items else 'Venta'
     fecha=str(v['fecha'] or '-')
-    left_cli=Paragraph(f"<b>Nombre o Razón Social:</b>&nbsp;&nbsp; {v['cliente'] or '-'}<br/><b>RUC/Documento de Identidad Nº:</b>&nbsp;&nbsp; {v['ruc'] or '-'}<br/><b>Fecha y hora:</b>&nbsp;&nbsp; {fecha}<br/><b>Dirección:</b>&nbsp;&nbsp; {v['cliente_direccion'] or '-'}<br/><b>Teléfono:</b>&nbsp;&nbsp; {v['cliente_telefono'] or '-'}<br/><b>Correo Electrónico:</b>&nbsp;&nbsp; {v['cliente_email'] or '-'}",normal)
+    left_cli=Paragraph(f"<b>Nombre o Razón Social / Facturado para:</b>&nbsp;&nbsp; {v['cliente'] or '-'}<br/><b>Paciente:</b>&nbsp;&nbsp; {v['paciente'] or '-'}<br/><b>RUC/Documento de Identidad Nº:</b>&nbsp;&nbsp; {v['ruc'] or '-'}<br/><b>Fecha y hora:</b>&nbsp;&nbsp; {fecha}<br/><b>Dirección:</b>&nbsp;&nbsp; {v['cliente_direccion'] or '-'}<br/><b>Teléfono:</b>&nbsp;&nbsp; {v['cliente_telefono'] or '-'}<br/><b>Correo Electrónico:</b>&nbsp;&nbsp; {v['cliente_email'] or '-'}",normal)
     right_cli=Paragraph(f"<b>Condición de Venta:</b>&nbsp;&nbsp; {v['condicion_venta'] or '-'}<br/><b>Moneda:</b>&nbsp;&nbsp; {v['moneda'] or 'PYG'}<br/><b>Tipo de Cambio:</b>&nbsp;&nbsp; {v['tipo_cambio'] or 1}<br/><b>Operación:</b>&nbsp;&nbsp; {operacion}<br/><b>Tipo de Transacción:</b>&nbsp;&nbsp; {tipo_tx}<br/><b>N° Venta:</b>&nbsp;&nbsp; {v['id']}",normal)
     cli=Table([[left_cli,right_cli]],colWidths=[116*mm,80*mm])
     cli.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]));story += [cli,Spacer(1,1.2*mm)]
@@ -3697,7 +3716,7 @@ def caja_central_detalle(aid):
  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall();total=sum(float(x['total_pyg'] or 0) for x in items);rem=c.execute("select * from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
  if not rem:
   numero='REM-'+str(aid);c.execute('insert or ignore into remisiones_internas(numero,fecha,paciente_id,admision_id,creado_por,creado_en) values(?,?,?,?,?,?)',(numero,a['fecha'],a['paciente_id'],aid,session.get('user'),now()));c.commit();rem=c.execute('select * from remisiones_internas where numero=?',(numero,)).fetchone()
- puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem,puntos=puntos)
+ puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem,puntos=puntos,terceros=terceros)
 
 @app.post('/ventas/caja-central/<int:aid>/facturar')
 def caja_central_facturar(aid):
@@ -3705,15 +3724,18 @@ def caja_central_facturar(aid):
  try:
   a=c.execute('select a.*,p.tercero_id,p.nombre paciente from admisiones a join pacientes p on p.id=a.paciente_id where a.id=?',(aid,)).fetchone()
   if not a or not a['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
+  facturado_a=request.form.get('facturado_a_tercero_id');receptor_id=int(facturado_a) if facturado_a else int(a['tercero_id'])
+  if not c.execute('select id from terceros where id=?',(receptor_id,)).fetchone():raise ValueError('Seleccione un receptor válido para la factura.')
   items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
   if not items:raise ValueError('La cuenta no tiene cargos pendientes para facturar.')
   fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'RECEPCION',True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
   total=sum(float(x['total_pyg'] or 0) for x in items)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de facturar una cuenta en efectivo.')
-  vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,a['tercero_id'],numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
+  vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
+  c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(a['paciente_id'],receptor_id,vid))
   ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,str(a['tipo'] or 'OTROS'),vid))
   for x in items:c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),0,0,x['descripcion']))
-  c.execute('update cargos_paciente set facturado=1 where admision_id=? and coalesce(facturado,0)=0',(aid,));c.execute("update remisiones_internas set estado='FACTURADA' where admision_id=? and estado='PENDIENTE'",(aid,));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,a['tercero_id'],'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
+  c.execute('update cargos_paciente set facturado=1 where admision_id=? and coalesce(facturado,0)=0',(aid,));c.execute("update remisiones_internas set estado='FACTURADA' where admision_id=? and estado='PENDIENTE'",(aid,));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,receptor_id,'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
   if medio=='Efectivo':
    ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro cuenta completa '+a['paciente'],total,'VENTA',vid,session.get('user')))
   asiento(c,fecha,'Factura caja cuenta '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,total,total,'Servicios')]);_generar_cdc_test_venta(c,vid,fecha,numero);c.commit();audit('FACTURAR_CUENTA_CAJA',f'{aid}:{vid}');flash('Cuenta completa facturada correctamente. Factura '+numero);return redirect(f'/ventas/{vid}/factura')
@@ -3722,9 +3744,9 @@ def caja_central_facturar(aid):
 
 @app.get('/ventas/caja-central/consultorio/<int:pid>')
 def caja_central_consultorio_detalle(pid):
- c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];c.close()
+ c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();c.close()
  if not x:flash('La prestación ya fue facturada o no existe.');return redirect('/ventas/caja-central')
- return render_template('cash_consult_detail.html',x=x,puntos=puntos)
+ return render_template('cash_consult_detail.html',x=x,puntos=puntos,terceros=terceros)
 
 @app.post('/ventas/caja-central/consultorio/<int:pid>/facturar')
 def caja_central_consultorio_facturar(pid):
@@ -3733,14 +3755,18 @@ def caja_central_consultorio_facturar(pid):
   x=c.execute("select k.*,p.nombre paciente,p.tercero_id from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone()
   if not x:raise ValueError('La prestación ya fue procesada o no existe.')
   if not x['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
+  facturado_a=request.form.get('facturado_a_tercero_id');receptor_id=int(facturado_a) if facturado_a else int(x['tercero_id'])
+  receptor=c.execute('select id,nombre from terceros where id=?',(receptor_id,)).fetchone()
+  if not receptor:raise ValueError('Seleccione un receptor válido para la factura.')
   fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'RECEPCION',True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de cobrar en efectivo.')
   base,iva=desglosar_iva_incluido(total,10)
-  vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,x['tercero_id'],numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
+  vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
+  c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(x['paciente_id'],receptor_id,vid))
   ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'CONSULTORIO',vid))
   c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,1,total,total,total,0,10,x['descripcion']))
   c.execute("update caja_pendientes_consultorio set estado='FACTURADO',venta_id=?,procesado_en=? where id=?",(vid,now(),pid));c.execute('update consultas set facturada=1,venta_id=? where id=?',(vid,x['consulta_id']))
-  c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,x['tercero_id'],'PYG',1,total,0,0,'PAGADO'))
+  c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,receptor_id,'PYG',1,total,0,0,'PAGADO'))
   c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro consultorio '+x['paciente'],'VENTA',vid))
   if medio=='Efectivo':
    ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro consultorio '+x['paciente'],total,'VENTA',vid,session.get('user')))
