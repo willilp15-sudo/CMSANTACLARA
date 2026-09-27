@@ -5792,10 +5792,11 @@ def _sifen_evento_cancelacion_xml(cdc,motivo,cfg,control_id=None):
     etree.SubElement(can,'{%s}mOtEve'%NS).text=motivo
 
     cert=Path(cfg['cert_path']).read_bytes(); key=Path(cfg['key_path']).read_bytes()
+    # V13.9.149: usamos el mismo perfil XMLDSig ya aceptado por SIFEN para los DE: Exclusive C14N + RSA-SHA256.
     # Firmamos rGesEve completo, referenciando rEve. Así Signature queda como hermano
     # de rEve y el digest se calcula con el contexto namespace definitivo del SOAP.
     signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',
-                     c14n_algorithm='http://www.w3.org/TR/2001/REC-xml-c14n-20010315')
+                     c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
     signer.namespaces={None:'http://www.w3.org/2000/09/xmldsig#'}
     firmado=signer.sign(rges,key=key,cert=cert,reference_uri='#'+event_id,id_attribute='Id')
     grp.replace(rges,firmado)
