@@ -1,13 +1,22 @@
 {% extends 'base.html' %}
-{% block title %}Inicio{% endblock %}
+{% block title %}Centro de Operaciones{% endblock %}
 {% block content %}
-<div class="inicio-santa-clara" aria-label="Inicio Santa Clara"></div>
-<style>
-/* V13.9.34: el inicio usa exclusivamente el background institucional global.
-   Se elimina el logo/imagen central superpuesta para evitar duplicación visual. */
-.inicio-santa-clara{
-  min-height:calc(100vh - 115px);
-  width:100%;
-}
-</style>
+<section class="sc-home">
+  <div class="sc-home-head"><div><h1>Centro de Operaciones</h1><p>Accesos directos a los procesos diarios de Centro Médico Santa Clara.</p></div><div class="sc-home-badge">Grupo Santa Clara S.A.</div></div>
+  <div class="sc-flow-grid">
+    <a class="sc-flow-card" href="/ventas/recepcion-caja"><span>🧾</span><b>Recepción y Ventas</b><small>Registrar, cobrar y facturar al paciente</small></a>
+    <a class="sc-flow-card" href="/agendamiento"><span>📅</span><b>Agenda</b><small>Turnos, médicos y pacientes del día</small></a>
+    <a class="sc-flow-card" href="/internacion/panel"><span>🏥</span><b>Internación</b><small>Admisiones, salas, consumos y altas</small></a>
+    <a class="sc-flow-card" href="/farmacia-solicitudes"><span>💊</span><b>Farmacia</b><small>Solicitudes, entregas y movimientos</small></a>
+    <a class="sc-flow-card" href="/compras"><span>🛒</span><b>Compras</b><small>Proveedores, compras y cuentas a pagar</small></a>
+    <a class="sc-flow-card" href="/finanzas"><span>💰</span><b>Tesorería</b><small>Cajas, bancos, cobros y pagos</small></a>
+    <a class="sc-flow-card" href="/sifen/monitor"><span>⚡</span><b>SIFEN</b><small>Documentos electrónicos y estados</small></a>
+    <a class="sc-flow-card" href="/informes"><span>📊</span><b>Informes</b><small>Indicadores operativos y administrativos</small></a>
+  </div>
+  <div class="sc-workflow"><h2>Flujos principales</h2><div class="sc-workflow-grid">
+    <div><b>Consulta particular</b><p>Agenda → Recepción → Atención → Cobro → Factura → SIFEN</p></div>
+    <div><b>Internación</b><p>Admisión → Cama → Consumos → Alta → Facturación → Cobro</p></div>
+    <div><b>Abastecimiento</b><p>Compra → Recepción → Stock → Cuenta proveedor → Pago</p></div>
+  </div></div>
+</section>
 {% endblock %}
