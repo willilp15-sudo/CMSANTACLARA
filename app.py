@@ -4935,10 +4935,14 @@ def configuracion_sifen():
                     # Los campos que identifican fiscalmente documentos históricos se preservan
                     # automáticamente en vez de rechazar todo el formulario con un error.
                     if usado:
+                        # V13.10.3: preservar identidad del punto y correlativo ya utilizado,
+                        # pero permitir corregir el timbrado para EMISIONES FUTURAS.
+                        # El XML/CDC ya emitido no se reescribe ni se retransmite.
                         est=str(actual['establecimiento'] or '').zfill(3)
                         pex=str(actual['punto_expedicion'] or '').zfill(3)
-                        timbrado=(actual['timbrado'] or '')
                         solicitado=int(actual['proximo_numero_factura'] or 1)
+                    if timbrado and not _solo_digitos(timbrado):
+                        raise ValueError('El timbrado electrónico debe contener solamente números.')
                     if pred:c.execute('update sifen_puntos_expedicion set predeterminado=0 where id<>?',(pid,))
                     c.execute('update sifen_puntos_expedicion set establecimiento=?,punto_expedicion=?,descripcion=?,timbrado=?,factura_electronica=?,nota_credito_electronica=?,nota_debito_electronica=?,autorizado_dnit=?,activo=?,predeterminado=?,proximo_numero_factura=?,actualizado_en=? where id=?',(est,pex,descripcion,timbrado,fe,nc,nd,autorizado,activo,pred,solicitado,now(),pid))
                     # Mantener la configuración institucional alineada con el punto
@@ -6064,6 +6068,37 @@ def init_v13102_nce_nde_sifen():
     c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.2-nce-nde-sifen-real',?)",(now(),))
     c.commit();c.close()
 init_v13102_nce_nde_sifen()
+
+# ===== V13.10.3: corrección segura del punto 001-001 para producción =====
+def init_v13103_punto_001_produccion():
+    c=db()
+    try:
+        mig='13.10.3-punto-001-produccion'
+        if c.execute('select 1 from schema_migrations where version=?',(mig,)).fetchone():
+            c.close();return
+        cfg=c.execute('select ruc,timbrado from sifen_config where id=1').fetchone()
+        p=c.execute("select * from sifen_puntos_expedicion where establecimiento='001' and punto_expedicion='001'").fetchone()
+        # Corrige únicamente el error histórico conocido: el RUC fue guardado como timbrado.
+        # No altera correlativos ni documentos emitidos.
+        if p and cfg:
+            tim_actual=_solo_digitos(p['timbrado'])
+            ruc=_solo_digitos(cfg['ruc'])
+            tim_vigente=_solo_digitos(cfg['timbrado'])
+            if tim_vigente and (not tim_actual or tim_actual==ruc):
+                c.execute("""update sifen_puntos_expedicion
+                             set timbrado=?, factura_electronica=1,
+                                 nota_credito_electronica=1,nota_debito_electronica=1,
+                                 autorizado_dnit=1,activo=1,actualizado_en=?
+                             where id=?""",(tim_vigente,now(),p['id']))
+        c.execute('insert or ignore into schema_migrations(version,aplicado_en) values(?,?)',(mig,now()))
+        c.commit()
+    except Exception:
+        c.rollback()
+    finally:
+        try:c.close()
+        except Exception:pass
+
+init_v13103_punto_001_produccion()
 
 def _sifen_tabla_tipo(tipo):
     tipo=str(tipo or '').upper()
