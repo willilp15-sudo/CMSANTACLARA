@@ -4009,7 +4009,8 @@ def _sifen_diagnostico(c,cfg):
     add('Timbrado electrónico',bool(_solo_digitos(cfg['timbrado'])),'Timbrado '+str(cfg['timbrado'] or '') if cfg['timbrado'] else 'Falta timbrado')
     add('Inicio de vigencia',bool(cfg['timbrado_desde']),str(cfg['timbrado_desde'] or 'Falta fecha de inicio'))
     add('XML SIFEN',str(cfg['xml_version'] or '')=='150','Versión '+str(cfg['xml_version'] or ''))
-    add('CSC / IdCSC',bool((cfg['csc_id'] or '').strip() and (cfg['csc'] or '').strip()),'Configurados' if (cfg['csc_id'] and cfg['csc']) else 'Falta CSC o IdCSC')
+    idcsc_diag=str(cfg['csc_id'] or '').strip(); csc_diag=str(cfg['csc'] or '').strip(); csc_ok=idcsc_diag.isdigit() and 1 <= len(idcsc_diag) <= 4 and len(csc_diag)==32
+    add('CSC / IdCSC',csc_ok,('IdCSC '+idcsc_diag.zfill(4)+' · CSC protegido (32 caracteres)' if csc_ok else 'IdCSC debe tener 1-4 dígitos y CSC 32 caracteres'))
     certok=bool(cfg['cert_path'] and cfg['key_path'] and os.path.exists(cfg['cert_path']) and os.path.exists(cfg['key_path']))
     add('Certificado digital',certok,'Instalado en almacenamiento persistente' if certok else 'No instalado o archivo no disponible')
     aut=[p for p in puntos if int(p['autorizado_dnit'] or 0)]
@@ -4490,6 +4491,7 @@ def _sifen_endpoint(cfg, servicio='sync'):
       'lote':'/de/ws/async/recibe-lote.wsdl',
       'consulta_lote':'/de/ws/consultas/consulta-lote.wsdl',
       'consulta_cdc':'/de/ws/consultas/consulta.wsdl',
+      'consulta_ruc':'/de/ws/consultas/consulta-ruc.wsdl',
       'eventos':'/de/ws/eventos/evento.wsdl',
     }
     if servicio not in rutas: raise ValueError('Servicio SIFEN no soportado: '+str(servicio))
@@ -4510,8 +4512,15 @@ def _sifen_qr_url_rde(root,cfg):
     cant=len(de.findall('.//{%s}gCamItem'%NS))
     digest=root.findtext('.//{%s}DigestValue'%DS) or ''
     if not digest: raise ValueError('La firma XMLDSig no contiene DigestValue para generar el QR.')
-    idcsc=str(cfg['csc_id'] or '').strip(); csc=str(cfg['csc'] or '').strip()
-    if not idcsc or not csc: raise ValueError('Falta IdCSC/CSC. Configure el Código de Seguridad del Contribuyente para generar gCamFuFD/dCarQR.')
+    idcsc_raw=str(cfg['csc_id'] or '').strip(); csc=str(cfg['csc'] or '').strip()
+    if not idcsc_raw or not csc: raise ValueError('Falta IdCSC/CSC. Configure el Código de Seguridad del Contribuyente para generar gCamFuFD/dCarQR.')
+    # SIFEN MT V150: IdCSC identifica el CSC y tiene longitud máxima 4.
+    # La interfaz admite 1, 01, 001 o 0001 y el XML/QR siempre usa 4 dígitos.
+    if not idcsc_raw.isdigit() or len(idcsc_raw) > 4:
+        raise ValueError('IdCSC inválido. Debe ser el identificador numérico asignado al CSC (1 a 4 dígitos), no el RUC ni el CSC secreto.')
+    idcsc=idcsc_raw.zfill(4)
+    if len(csc) != 32:
+        raise ValueError('CSC inválido: SIFEN V150 requiere un Código de Seguridad del Contribuyente de 32 caracteres.')
     def hx(x): return str(x).encode('utf-8').hex()
     # MT V150: fecha y DigestValue se representan en hexadecimal.
     base='nVersion=150&Id='+cdc+'&dFeEmiDE='+hx(fec)+'&dRucRec='+recid+'&dTotGralOpe='+str(tot)+'&dTotIVA='+str(iva)+'&cItems='+str(cant)+'&DigestValue='+hx(digest)+'&IdCSC='+idcsc
@@ -5018,7 +5027,16 @@ def configuracion_sifen():
                 else: flash('Logo no actualizado: use PNG, JPG, JPEG o WEBP.')
             c.commit();audit('CONFIG_EMPRESA','Actualización desde Empresa y Facturación Electrónica');flash('Datos de empresa e identidad guardados.')
         elif accion=='guardar':
-            vals=[request.form.get(x,'').strip() for x in ('ruc','dv','timbrado','csc_id','csc','tipo_contribuyente')]
+            ruc=request.form.get('ruc','').strip(); dv=request.form.get('dv','').strip(); timbrado=request.form.get('timbrado','').strip()
+            csc_id_raw=request.form.get('csc_id','').strip(); csc_nuevo=request.form.get('csc','').strip(); tipo_contribuyente=request.form.get('tipo_contribuyente','').strip()
+            if not csc_id_raw.isdigit() or len(csc_id_raw) > 4:
+                flash('ID CSC inválido: ingrese el identificador asignado por SIFEN (1 a 4 dígitos). No use el RUC ni el CSC secreto.');c.close();return redirect('/configuracion/sifen')
+            csc_id=csc_id_raw.zfill(4)
+            actual=c.execute('select csc from sifen_config where id=1').fetchone()
+            csc=(csc_nuevo if csc_nuevo else str(actual['csc'] or ''))
+            if csc and len(csc) != 32:
+                flash('CSC inválido: SIFEN V150 requiere 32 caracteres.');c.close();return redirect('/configuracion/sifen')
+            vals=[ruc,dv,timbrado,csc_id,csc,tipo_contribuyente]
             tim_desde=request.form.get('timbrado_desde','').strip()
             emis=[request.form.get(x,'').strip() for x in ('emis_departamento_codigo','emis_departamento_desc','emis_distrito_codigo','emis_distrito_desc','emis_ciudad_codigo','emis_ciudad_desc','emis_telefono','emis_direccion')]
             c.execute("update sifen_config set ruc=?,dv=?,timbrado=?,csc_id=?,csc=?,tipo_contribuyente=?,timbrado_desde=?,xml_version='150',emis_departamento_codigo=?,emis_departamento_desc=?,emis_distrito_codigo=?,emis_distrito_desc=?,emis_ciudad_codigo=?,emis_ciudad_desc=?,emis_telefono=?,emis_direccion=?,actualizado_en=? where id=1",(*vals,tim_desde,*emis,now()))
