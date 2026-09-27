@@ -998,8 +998,11 @@ def _sifen_consultar_ruc_oficial(ruc,cfg,timeout=20):
     """Consulta el WS oficial Consulta RUC V150 usando el certificado SIFEN instalado."""
     import requests,secrets,re
     from lxml import etree
-    ruc=re.sub(r'\D','',str(ruc or ''))
-    if not (5 <= len(ruc) <= 8): raise ValueError('Ingrese una C.I./RUC de 5 a 8 dígitos.')
+    raw=str(ruc or '').strip()
+    # Si viene con DV (ej. 4909510-2), SIFEN exige consultar solo el RUC base.
+    base=raw.split('-',1)[0] if '-' in raw else raw
+    ruc=re.sub(r'\D','',base)
+    if not (5 <= len(ruc) <= 8): raise ValueError('Ingrese una C.I./RUC de 5 a 8 dígitos, sin incluir el DV.')
     if not cfg or not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']):
         raise ValueError('El certificado digital SIFEN no está instalado/configurado.')
     NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
@@ -1018,16 +1021,19 @@ def _sifen_consultar_ruc_oficial(ruc,cfg,timeout=20):
         return ''
     codigo=val('dCodRes'); mensaje=val('dMsgRes')
     # Nombres de campos contemplados por distintas revisiones del esquema/respuesta.
-    nombre=val('dRazSoc','dNomFan','dNomRec','dNombre','dNombRec')
+    # resConsRUC_v150.xsd / ContenedorRUC_v150.xsd: el nombre oficial es dRazCons.
+    nombre=val('dRazCons','dRazSoc','dNomFan','dNomRec','dNombre','dNombRec')
     rruc=val('dRUCCons','dRuc','dRUC') or ruc
     dv=val('dDV','dDVRec')
-    estado=val('dEstADO','dEstRUC','dEstadoRUC','dEstado')
+    estado=val('dDesEstCons','dCodEstCons','dEstRUC','dEstadoRUC','dEstado')
     return {'http':resp.status_code,'codigo':codigo,'mensaje':mensaje,'encontrado':codigo=='0502','ruc':rruc,'dv':dv,'nombre':nombre,'estado':estado,'url':url}
 
 @app.get('/api/sifen/consulta-ruc-cliente')
 def api_sifen_consulta_ruc_cliente():
     import re
-    doc=re.sub(r'\D','',request.args.get('documento',''))
+    raw=request.args.get('documento','').strip()
+    base=raw.split('-',1)[0] if '-' in raw else raw
+    doc=re.sub(r'\D','',base)
     if not doc: return jsonify({'ok':False,'encontrado':False,'mensaje':'Ingrese la cédula/RUC.'}),400
     c=db(); cfg=c.execute('select * from sifen_config where id=1').fetchone(); c.close()
     try:
