@@ -5752,18 +5752,32 @@ def nota_credito_venta(venta_id):
       except Exception as e:c.rollback();flash(str(e))
     puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and nota_credito_electronica=1 order by predeterminado desc,id").fetchall();c.close();return render_template('credit_note_sale.html',v=v,items=items,puntos=puntos)
 
-def _sifen_evento_cancelacion_xml(cdc,motivo,cfg):
-    """Genera y firma el evento emisor Cancelación conforme SIFEN MT V150."""
-    import secrets
+def _sifen_evento_cancelacion_xml(cdc,motivo,cfg,control_id=None):
+    """Construye el Evento de Cancelación SIFEN V150 dentro de su contexto final y lo firma."""
+    import secrets,re
     from lxml import etree
     from signxml import XMLSigner,methods
     NS='http://ekuatia.set.gov.py/sifen/xsd'
+    SOAP='http://www.w3.org/2003/05/soap-envelope'
+    XSI='http://www.w3.org/2001/XMLSchema-instance'
     cdc=str(cdc or '').strip(); motivo=' '.join(str(motivo or '').split())
     if len(cdc)!=44 or not cdc.isdigit(): raise ValueError('CDC inválido para cancelación: SIFEN requiere 44 dígitos.')
     if len(motivo)<5 or len(motivo)>500: raise ValueError('El motivo de cancelación debe contener entre 5 y 500 caracteres.')
     if not cfg or not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital SIFEN no instalado.')
+    # GDE003: Id del evento N(1-10). GSch02: dId N(1-15).
     event_id=str(secrets.randbelow(9000000000)+1000000000)
-    rges=etree.Element('{%s}rGesEve'%NS,nsmap={None:NS})
+    control_id=str(control_id or (secrets.randbelow(900000000000000)+100000000000000))
+
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP})
+    etree.SubElement(env,'{%s}Header'%SOAP)
+    body=etree.SubElement(env,'{%s}Body'%SOAP)
+    envio=etree.SubElement(body,'{%s}rEnviEventoDe'%NS,nsmap={None:NS,'xsi':XSI})
+    etree.SubElement(envio,'{%s}dId'%NS).text=control_id
+    dev=etree.SubElement(envio,'{%s}dEvReg'%NS)
+    grp=etree.SubElement(dev,'{%s}gGroupGesEve'%NS)
+    grp.set('{%s}schemaLocation'%XSI, NS+' siRecepEvento_v150.xsd')
+    rges=etree.SubElement(grp,'{%s}rGesEve'%NS)
+    rges.set('{%s}schemaLocation'%XSI, NS+' siRecepEvento_v150.xsd')
     reve=etree.SubElement(rges,'{%s}rEve'%NS); reve.set('Id',event_id)
     etree.SubElement(reve,'{%s}dFecFirma'%NS).text=datetime.datetime.now().replace(microsecond=0).isoformat()
     etree.SubElement(reve,'{%s}dVerFor'%NS).text='150'
@@ -5772,28 +5786,25 @@ def _sifen_evento_cancelacion_xml(cdc,motivo,cfg):
     can=etree.SubElement(grupo,'{%s}rGeVeCan'%NS)
     etree.SubElement(can,'{%s}Id'%NS).text=cdc
     etree.SubElement(can,'{%s}mOtEve'%NS).text=motivo
+
     cert=Path(cfg['cert_path']).read_bytes(); key=Path(cfg['key_path']).read_bytes()
-    signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
+    # Firmamos rGesEve completo, referenciando rEve. Así Signature queda como hermano
+    # de rEve y el digest se calcula con el contexto namespace definitivo del SOAP.
+    signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',
+                     c14n_algorithm='http://www.w3.org/TR/2001/REC-xml-c14n-20010315')
     signer.namespaces={None:'http://www.w3.org/2000/09/xmldsig#'}
-    firmado=signer.sign(reve,key=key,cert=cert,reference_uri='#'+event_id,id_attribute='Id')
-    sig=firmado.find('{http://www.w3.org/2000/09/xmldsig#}Signature')
-    if sig is None: raise ValueError('No fue posible generar la firma XMLDSig del evento.')
-    firmado.remove(sig); rges.replace(reve,firmado); rges.append(sig)
-    return etree.tostring(rges,encoding='UTF-8',xml_declaration=False,pretty_print=False),event_id
+    firmado=signer.sign(rges,key=key,cert=cert,reference_uri='#'+event_id,id_attribute='Id')
+    grp.replace(rges,firmado)
+    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    # SIFEN no admite prefijos automáticos ns0/ns1 en el XML de negocio.
+    if re.search(br'<\/?ns\d+:',payload) or re.search(br'xmlns:ns\d+=',payload):
+        raise ValueError('XML evento SIFEN inválido: se generó un prefijo namespace automático ns0/ns1.')
+    return payload,event_id,control_id
 
 def _sifen_enviar_evento_cancelacion(cdc,motivo,cfg,timeout=35):
     """Envía cancelación por WS Eventos sincrónico; nunca usa recepción DE/lote."""
-    import requests,secrets,re
-    from lxml import etree
-    NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
-    rges_bytes,event_id=_sifen_evento_cancelacion_xml(cdc,motivo,cfg)
-    rges=etree.fromstring(rges_bytes,etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True))
-    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP}); etree.SubElement(env,'{%s}Header'%SOAP); body=etree.SubElement(env,'{%s}Body'%SOAP)
-    envio=etree.SubElement(body,'{%s}rEnviEventoDe'%NS,nsmap={None:NS})
-    etree.SubElement(envio,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
-    dev=etree.SubElement(envio,'{%s}dEvReg'%NS); grp=etree.SubElement(dev,'{%s}gGroupGesEve'%NS); grp.append(rges)
-    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
-    if re.search(br'<\/?ns\d+:',payload) or re.search(br'xmlns:ns\d+=',payload): raise ValueError('SOAP evento SIFEN inválido: prefijo namespace automático ns0/ns1.')
+    import requests
+    payload,event_id,control_id=_sifen_evento_cancelacion_xml(cdc,motivo,cfg)
     url=_sifen_endpoint(cfg,'eventos')
     r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
     return r.status_code,r.content,url,payload,event_id
