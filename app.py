@@ -3351,7 +3351,6 @@ def init_v1365_empresa_config():
     for col,defn in nuevos:
         if col not in cols: c.execute(f'alter table institucion_config add column {col} {defn}')
     c.execute("update institucion_config set razon_social=coalesce(nullif(razon_social,''),nombre), nombre_fantasia=coalesce(nullif(nombre_fantasia,''),nombre) where id=1")
-    c.execute("update institucion_config set razon_social='Grupo Santa Clara S.A.', nombre_fantasia='Centro Médico Santa Clara', nombre='CENTRO MEDICO SANTA CLARA' where id=1 and (razon_social is null or razon_social='' or razon_social=nombre or upper(razon_social)='CENTRO MEDICO SANTA CLARA')")
     c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.6.5-config-empresa',?)",(now(),))
     c.commit();c.close()
@@ -3993,8 +3992,9 @@ def init_v13126_geo_emisor():
     c=db(); cfg=c.execute('select * from sifen_config where id=1').fetchone()
     if cfg:
         dep=str(cfg['emis_departamento_desc'] or '').upper(); dis=str(cfg['emis_distrito_desc'] or '').upper(); ciu=str(cfg['emis_ciudad_desc'] or '').upper()
-        if 'CANINDEY' in dep and 'NUEVA ESPERANZA' in (dis+' '+ciu):
-            c.execute("update sifen_config set emis_departamento_codigo='18',emis_departamento_desc='CANINDEYU',emis_distrito_codigo='238',emis_distrito_desc='NUEVA ESPERANZA',emis_ciudad_codigo='4603',emis_ciudad_desc='NUEVA ESPERANZA' where id=1")
+        # V13.9.142: no inferir ni sobrescribir geografía fiscal.
+        # Los códigos del emisor deben cargarse explícitamente desde la información fiscal/DNIT.
+        pass
     c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.126-geo-emisor-dnit',?)",(now(),))
     c.commit(); c.close()
 init_v13126_geo_emisor()
@@ -4566,6 +4566,42 @@ def _sifen_guardar_respuesta_venta(c,venta_id,status,resp,parsed,estado,cdc,qr):
              respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=? where id=?"""
     c.execute(sql,(cdc,qr,estado,parsed.get('protocolo',''),now() if aprobado else None,codigo,mensaje,now(),raw[:50000],status,parsed.get('fecha_proceso') or now(),venta_id))
 
+def _sifen_preflight_emision(c,cfg,venta_id):
+    """V13.9.142: validación determinística antes de crear/firmar/transmitir un DE."""
+    errores=[]
+    def req(cond,msg):
+        if not cond: errores.append(msg)
+    ambiente=str(cfg['ambiente'] or 'TEST').upper()
+    req(ambiente in ('TEST','PRODUCCION'),'Ambiente SIFEN inválido.')
+    req(bool(_solo_digitos(cfg['ruc'])) and bool(_solo_digitos(cfg['dv'])),'Falta RUC/DV válido del emisor.')
+    req(bool(_solo_digitos(cfg['timbrado'])),'Falta timbrado electrónico.')
+    req(bool(str(cfg['timbrado_desde'] or '').strip()),'Falta inicio de vigencia del timbrado.')
+    req(str(cfg['xml_version'] or '')=='150','La versión XML debe ser 150.')
+    req(bool(str(cfg['csc_id'] or '').strip()) and bool(str(cfg['csc'] or '').strip()),'Falta IdCSC/CSC.')
+    req(bool(str(cfg['emis_departamento_codigo'] or '').strip()) and bool(str(cfg['emis_departamento_desc'] or '').strip()),'Falta departamento fiscal del emisor.')
+    req(bool(str(cfg['emis_ciudad_codigo'] or '').strip()) and bool(str(cfg['emis_ciudad_desc'] or '').strip()),'Falta ciudad fiscal del emisor.')
+    req(bool(str(cfg['emis_telefono'] or '').strip()),'Falta teléfono del emisor.')
+    acts=c.execute("select count(*) n from sifen_actividades_economicas where activo=1").fetchone()['n']
+    req(acts>0,'Falta al menos una actividad económica activa.')
+    v=c.execute("select v.*,t.nombre cliente,t.ruc cliente_ruc,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_documento,t.sifen_numero_documento from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(venta_id,)).fetchone()
+    req(v is not None,'Factura/venta inexistente.')
+    if v:
+        req(bool(v['sifen_punto_id']),'La factura no tiene punto de expedición SIFEN.')
+        if v['sifen_punto_id']:
+            pt=c.execute("select * from sifen_puntos_expedicion where id=?",(v['sifen_punto_id'],)).fetchone()
+            req(bool(pt and _flag_activo(pt['activo']) and _flag_activo(pt['autorizado_dnit']) and _flag_activo(pt['factura_electronica'])),'Punto de expedición inactivo/no autorizado/no habilitado para FE.')
+        req(bool(str(v['cliente'] or '').strip()),'Falta nombre/razón social del receptor.')
+        req(str(v['sifen_naturaleza'] or '') in ('1','2'),'Naturaleza SIFEN del receptor inválida.')
+        req(str(v['sifen_tipo_operacion'] or '') in ('1','2','3','4'),'Tipo de operación del receptor inválido.')
+        nitems=c.execute("select count(*) n from venta_items where venta_id=?",(venta_id,)).fetchone()['n']
+        req(nitems>0,'La factura no tiene ítems.')
+    import os
+    req(bool(cfg['cert_path'] and cfg['key_path'] and os.path.exists(cfg['cert_path']) and os.path.exists(cfg['key_path'])),'Certificado digital no instalado/disponible.')
+    if ambiente=='PRODUCCION':
+        req(bool(int(cfg['produccion_habilitada'] or 0)),'Producción no está habilitada en el ERP.')
+        if 'dnit_habilitado_produccion' in cfg.keys(): req(bool(int(cfg['dnit_habilitado_produccion'] or 0)),'Falta confirmar habilitación externa DNIT para Producción.')
+    return errores
+
 def _sifen_emitir_factura_automatico(venta_id):
     """Proceso único FE: CDC -> XML -> firma -> QR -> XSD -> WS SIFEN.
     TEST transmite al WS TEST para obtener el resultado real de validación, sin valor fiscal.
@@ -4576,6 +4612,9 @@ def _sifen_emitir_factura_automatico(venta_id):
         cfg=c.execute('select * from sifen_config where id=1').fetchone()
         if not cfg: raise ValueError('Configuración SIFEN inexistente.')
         ambiente=str(cfg['ambiente'] or 'TEST').upper()
+        preflight=_sifen_preflight_emision(c,cfg,venta_id)
+        if preflight:
+            raise ValueError('Emisión bloqueada por configuración/datos incompletos: '+' | '.join(preflight))
         xml,cdc=_sifen_generar_de_v150(c,'FE',venta_id)
         # V13.9.123: el CDC identifica al DE y debe sobrevivir a cualquier error posterior.
         c.execute('update ventas set cdc=? where id=?',(cdc,venta_id)); c.commit()
@@ -6365,7 +6404,8 @@ def administracion_geografia():
   c.close();return redirect(request.path)
  rows=c.execute('select * from geo_ubicaciones order by departamento,distrito,ciudad,barrio limit 1000').fetchall();c.close();return render_template('geografia.html',rows=rows)
 
-# El arranque se mueve al final del archivo para registrar TODAS las rutas e inicializaciones.
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=5000,debug=False)
 
 # ===== V13.9.58 - Importacion / actualizacion CxC y CxP =====
 def _imp_norm(v):
@@ -7173,19 +7213,13 @@ def puesta_marcha_importar():
 @app.get('/sifen/preparacion')
 def sifen_preparacion():
  if not _admin_total():flash('Acceso exclusivo de Administración.');return redirect('/')
- c=db();checks=[]
+ c=db();cfg=c.execute('select * from sifen_config where id=1').fetchone();checks=_sifen_diagnostico(c,cfg) if cfg else []
  def add(nombre,ok,detalle):checks.append({'nombre':nombre,'ok':bool(ok),'detalle':detalle})
- cfg=c.execute('select * from sifen_config where id=1').fetchone() if c.execute("select 1 from sqlite_master where type='table' and name='sifen_config'").fetchone() else None
- add('Configuración SIFEN',cfg is not None,'Registro de configuración disponible')
- p=c.execute("select count(*) from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1").fetchone()[0] if c.execute("select 1 from sqlite_master where type='table' and name='sifen_puntos_expedicion'").fetchone() else 0
- add('Puntos de expedición',p>0,f'{p} punto(s) activo(s) marcado(s) como autorizado(s)')
- malos=c.execute("select count(*) from terceros where tipo in ('CLIENTE','AMBOS') and (coalesce(nombre,'')='' or coalesce(sifen_naturaleza,'')='' or coalesce(sifen_tipo_operacion,'')='')").fetchone()[0];add('Clientes listos para SIFEN',malos==0,f'{malos} cliente(s) incompletos')
- malos_p=c.execute("select count(*) from productos where coalesce(activo,1)=1 and (coalesce(sifen_descripcion,'')='' or coalesce(sifen_unidad_codigo,'')='')").fetchone()[0];add('Productos listos para SIFEN',malos_p==0,f'{malos_p} producto(s) incompletos')
- c.close();return render_template('sifen_readiness.html',checks=checks)
+ malos=c.execute("select count(*) n from terceros where tipo in ('CLIENTE','AMBOS') and (coalesce(trim(nombre),'')='' or coalesce(trim(sifen_naturaleza),'')='' or coalesce(trim(sifen_tipo_operacion),'')='')").fetchone()['n']
+ add('Maestro de clientes SIFEN',malos==0,f'{malos} cliente(s) incompletos')
+ malos_p=c.execute("select count(*) n from productos where coalesce(activo,1)=1 and (coalesce(trim(sifen_descripcion),'')='' or coalesce(trim(sifen_unidad_codigo),'')='')").fetchone()['n']
+ add('Maestro de productos/servicios SIFEN',malos_p==0,f'{malos_p} producto(s)/servicio(s) incompletos')
+ bloqueos=[x['nombre'] for x in checks if not x['ok']]
+ c.close();return render_template('sifen_readiness.html',checks=checks,bloqueos=bloqueos)
 
 ROUTE_MODULE.update({'puesta_en_marcha':'CONFIG_SANATORIO','puesta_marcha_reset':'CONFIG_SANATORIO','puesta_marcha_importar':'CONFIG_SANATORIO','sifen_preparacion':'FACTURACION'})
-
-
-# ===== ARRANQUE FINAL: todas las rutas/migraciones ya fueron registradas =====
-if __name__=='__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT','5000')), debug=False)
