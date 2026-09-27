@@ -984,6 +984,65 @@ def _sifen_ruc_dv_normalizar(valor, dv_separado=''):
     dv=re.sub(r'\D','',dv)
     return ruc,dv,(len(dv)==1 and dv==esperado)
 
+# ===== V13.10.5: consulta oficial RUC + correo de factura electrónica =====
+def init_v13105_cliente_ruc_email():
+    c=db(); cols={r['name'] for r in c.execute('pragma table_info(terceros)').fetchall()}
+    for col,ddl in [('email_factura','TEXT'),('enviar_factura_email','INTEGER DEFAULT 1'),('ruc_consultado_sifen_en','TEXT')]:
+        if col not in cols: c.execute(f'alter table terceros add column {col} {ddl}')
+    c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.5-cliente-ruc-email',?)",(now(),))
+    c.commit();c.close()
+init_v13105_cliente_ruc_email()
+
+def _sifen_consultar_ruc_oficial(ruc,cfg,timeout=20):
+    """Consulta el WS oficial Consulta RUC V150 usando el certificado SIFEN instalado."""
+    import requests,secrets,re
+    from lxml import etree
+    ruc=re.sub(r'\D','',str(ruc or ''))
+    if not (5 <= len(ruc) <= 8): raise ValueError('Ingrese una C.I./RUC de 5 a 8 dígitos.')
+    if not cfg or not cfg['cert_path'] or not cfg['key_path'] or not os.path.exists(cfg['cert_path']) or not os.path.exists(cfg['key_path']):
+        raise ValueError('El certificado digital SIFEN no está instalado/configurado.')
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP}); etree.SubElement(env,'{%s}Header'%SOAP); body=etree.SubElement(env,'{%s}Body'%SOAP)
+    req=etree.SubElement(body,'{%s}rEnviConsRUC'%NS,nsmap={None:NS})
+    etree.SubElement(req,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
+    etree.SubElement(req,'{%s}dRUCCons'%NS).text=ruc
+    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    url=_sifen_endpoint(cfg,'consulta_ruc')
+    resp=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
+    root=etree.fromstring(resp.content,etree.XMLParser(resolve_entities=False,no_network=True))
+    def val(*names):
+        for n in names:
+            x=root.xpath('//*[local-name()=$n]',n=n)
+            if x and (x[0].text or '').strip(): return (x[0].text or '').strip()
+        return ''
+    codigo=val('dCodRes'); mensaje=val('dMsgRes')
+    # Nombres de campos contemplados por distintas revisiones del esquema/respuesta.
+    nombre=val('dRazSoc','dNomFan','dNomRec','dNombre','dNombRec')
+    rruc=val('dRUCCons','dRuc','dRUC') or ruc
+    dv=val('dDV','dDVRec')
+    estado=val('dEstADO','dEstRUC','dEstadoRUC','dEstado')
+    return {'http':resp.status_code,'codigo':codigo,'mensaje':mensaje,'encontrado':codigo=='0502','ruc':rruc,'dv':dv,'nombre':nombre,'estado':estado,'url':url}
+
+@app.get('/api/sifen/consulta-ruc-cliente')
+def api_sifen_consulta_ruc_cliente():
+    import re
+    doc=re.sub(r'\D','',request.args.get('documento',''))
+    if not doc: return jsonify({'ok':False,'encontrado':False,'mensaje':'Ingrese la cédula/RUC.'}),400
+    c=db(); cfg=c.execute('select * from sifen_config where id=1').fetchone(); c.close()
+    try:
+        x=_sifen_consultar_ruc_oficial(doc,cfg)
+        if x['encontrado']:
+            # Si la respuesta no trae DV explícito, se calcula localmente y se valida con el mismo algoritmo usado por SIFEN.
+            rr=x['ruc'] or doc; dv=x['dv']
+            nr,ndv,ok=_sifen_ruc_dv_normalizar(rr,dv)
+            x['ruc']=nr or rr; x['dv']=ndv if ok else dv
+            x['ok']=True
+        else: x['ok']=True
+        return jsonify(x)
+    except Exception as ex:
+        return jsonify({'ok':False,'encontrado':False,'mensaje':str(ex)}),400
+
 @app.route('/pacientes',methods=['GET','POST'])
 def pacientes():
  c=db(); sincronizar_clientes_pacientes(c)
@@ -994,11 +1053,11 @@ def pacientes():
    _r,_dv,_ok=_sifen_ruc_dv_normalizar(doc,request.form.get('sifen_dv'))
    if not _ok: c.close(); flash('RUC/DV inválido para contribuyente.'); return redirect('/clientes')
    doc=_r+'-'+_dv
-  vals=(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
-  cur=c.execute("""insert into terceros(tipo,ruc,nombre,telefono,email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",vals)
+  vals=(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('email_factura') or request.form.get('email'),1 if request.form.get('enviar_factura_email')=='1' else 0,request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
+  cur=c.execute("""insert into terceros(tipo,ruc,nombre,telefono,email,email_factura,enviar_factura_email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",vals)
   tid=cur.lastrowid
   c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();c.close();flash('Cliente registrado y preparado para facturación electrónica.');return redirect('/clientes')
- rows=c.execute("""select p.*,t.ruc,t.email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id order by p.id desc""").fetchall();c.close();return render_template('hospital_patients.html',rows=rows)
+ rows=c.execute("""select p.*,t.ruc,t.email,t.email_factura,t.enviar_factura_email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id order by p.id desc""").fetchall();c.close();return render_template('hospital_patients.html',rows=rows)
 @app.route('/config-sanatorio',methods=['GET','POST'])
 def config_sanatorio():
  c=db()
@@ -1306,7 +1365,7 @@ def anular_venta(i):
 
 @app.route('/editar-paciente/<int:i>',methods=['GET','POST'])
 def editar_paciente(i):
- c=db(); r=c.execute("""select p.*,t.email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id where p.id=?""",(i,)).fetchone()
+ c=db(); r=c.execute("""select p.*,t.email,t.email_factura,t.enviar_factura_email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id where p.id=?""",(i,)).fetchone()
  if not r:c.close();flash('Cliente no encontrado.');return redirect('/clientes')
  if request.method=='POST':
   antes=snapshot(r);doc=(request.form.get('documento') or '').strip();nombre=(request.form.get('nombre') or '').strip();nat=request.form.get('sifen_naturaleza') or '1';tiop=request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')
@@ -1315,7 +1374,7 @@ def editar_paciente(i):
    if not _ok: c.close(); flash('RUC/DV inválido para contribuyente.'); return redirect('/editar-paciente/'+str(i))
    doc=_r+'-'+_dv
   c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i))
-  c.execute("""update terceros set tipo='CLIENTE',ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?""",(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),r['tercero_id']))
+  c.execute("""update terceros set tipo='CLIENTE',ruc=?,nombre=?,telefono=?,email=?,email_factura=?,enviar_factura_email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?""",(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('email_factura') or request.form.get('email'),1 if request.form.get('enviar_factura_email')=='1' else 0,request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),r['tercero_id']))
   despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone());audit_change(c,'MODIFICAR','CLIENTES',i,antes,despues,request.form.get('motivo','Actualización'));c.commit();c.close();flash('Cliente actualizado.');return redirect('/clientes')
  c.close();return render_template('edit_patient.html',r=r)
 
@@ -3249,6 +3308,42 @@ def factura_venta(venta_id):
     v,items,inst=_factura_venta_data(venta_id)
     if not v: flash('Factura no encontrada.'); return redirect('/ventas/carga')
     cc=db(); cfg=cc.execute('select * from sifen_config where id=1').fetchone(); cc.close(); sifen_produccion=bool(cfg and str(cfg['ambiente'] or '').upper()=='PRODUCCION' and int(cfg['produccion_habilitada'] or 0)); return render_template('invoice_sale.html',v=v,items=items,inst=inst,sifen_produccion=sifen_produccion)
+
+@app.post('/ventas/<int:venta_id>/factura/enviar-email')
+def factura_venta_enviar_email(venta_id):
+    """Envía KuDE y XML DTE aprobado al correo fiscal guardado del receptor. SMTP se configura solo por variables de entorno."""
+    import smtplib,glob
+    from email.message import EmailMessage
+    c=db(); v=c.execute("select v.*,t.nombre cliente,t.email,t.email_factura,t.enviar_factura_email from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(venta_id,)).fetchone(); c.close()
+    if not v: flash('Factura no encontrada.'); return redirect('/ventas')
+    destino=(v['email_factura'] or v['email'] or '').strip()
+    if not destino: flash('El cliente no tiene correo para factura electrónica. Edite su ficha y agregue uno.'); return redirect(f'/ventas/{venta_id}/factura')
+    if str(v['estado_sifen'] or '').upper() not in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN'):
+        flash('Solo se envían por correo documentos aprobados por SIFEN.'); return redirect(f'/ventas/{venta_id}/factura')
+    host=os.environ.get('SMTP_HOST','').strip(); user=os.environ.get('SMTP_USER','').strip(); pwd=os.environ.get('SMTP_PASSWORD',''); sender=os.environ.get('SMTP_FROM','').strip() or user
+    if not host or not sender:
+        flash('Correo no configurado en el servidor. Configure SMTP_HOST y SMTP_FROM (y SMTP_USER/SMTP_PASSWORD si corresponde).'); return redirect(f'/ventas/{venta_id}/factura')
+    port=int(os.environ.get('SMTP_PORT','587')); use_ssl=os.environ.get('SMTP_SSL','0')=='1'; use_tls=os.environ.get('SMTP_TLS','1')=='1'
+    try:
+        pdf_resp=factura_venta_pdf(venta_id); pdf_resp.direct_passthrough=False; pdf_bytes=pdf_resp.get_data()
+        xml_bytes=None
+        if v['cdc']:
+            patron=str(Path(_sifen_dir())/'xml_test'/('FE_'+str(venta_id)+'_'+str(v['cdc'])+'.xml'))
+            archivos=glob.glob(patron)
+            if archivos: xml_bytes=Path(archivos[0]).read_bytes()
+        msg=EmailMessage(); msg['Subject']='Factura electrónica '+str(v['numero'] or venta_id)+' - Centro Médico Santa Clara'; msg['From']=sender; msg['To']=destino
+        msg.set_content('Adjuntamos la representación gráfica (KuDE)'+(' y el XML del Documento Tributario Electrónico aprobado por SIFEN.' if xml_bytes else ' de su factura electrónica aprobada por SIFEN.')+'\n\nCentro Médico Santa Clara / Grupo Santa Clara S.A.')
+        msg.add_attachment(pdf_bytes,maintype='application',subtype='pdf',filename='KuDE_'+str(v['numero'] or venta_id)+'.pdf')
+        if xml_bytes: msg.add_attachment(xml_bytes,maintype='application',subtype='xml',filename='DTE_'+str(v['cdc'])+'.xml')
+        smtp=smtplib.SMTP_SSL(host,port,timeout=25) if use_ssl else smtplib.SMTP(host,port,timeout=25)
+        try:
+            if (not use_ssl) and use_tls: smtp.starttls()
+            if user: smtp.login(user,pwd)
+            smtp.send_message(msg)
+        finally: smtp.quit()
+        flash('Factura electrónica enviada a '+destino+'.')
+    except Exception as ex: flash('No se pudo enviar el correo: '+str(ex))
+    return redirect(f'/ventas/{venta_id}/factura')
 
 @app.get('/ventas/<int:venta_id>/factura/pdf')
 def factura_venta_pdf(venta_id):
