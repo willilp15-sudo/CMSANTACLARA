@@ -4159,16 +4159,17 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     est,pun,num=_sifen_numero_partes(numero)
     # V13.9.101: FE debe conservar un único CDC/código de seguridad. El XML, QR y factura
     # impresa tienen que referirse al mismo identificador; no se regenera un CDC al validar.
-    cdc_guardado=str(d['cdc'] or '').strip() if tipo=='FE' and 'cdc' in d.keys() else ''
-    cod_guardado=str(d['codigo_seguridad_sifen'] or '').strip() if tipo=='FE' and 'codigo_seguridad_sifen' in d.keys() else ''
-    if tipo=='FE' and len(cdc_guardado)==44 and cdc_guardado.isdigit() and len(cod_guardado)==9 and cod_guardado.isdigit():
+    # V13.10.2: FE/NCE/NDE conservan el mismo CDC y código de seguridad en cada reintento.
+    cdc_guardado=str(d['cdc'] or '').strip() if 'cdc' in d.keys() else ''
+    cod_guardado=str(d['codigo_seguridad_sifen'] or '').strip() if 'codigo_seguridad_sifen' in d.keys() else ''
+    if len(cdc_guardado)==44 and cdc_guardado.isdigit() and len(cod_guardado)==9 and cod_guardado.isdigit():
         cdc=cdc_guardado; cod_seg=cod_guardado
     else:
         cod_seg=str(secrets.randbelow(1000000000)).zfill(9)
         base=_sifen_cdc_base(cfg,ide,numero,fecha,cod_seg);cdc=base+str(_sifen_dv_mod11(base))
-        if tipo=='FE':
-            estado='TEST_GENERADO' if str(cfg['ambiente'] or '').upper()=='TEST' else 'NO_ENVIADO'
-            c.execute("update ventas set cdc=?,codigo_seguridad_sifen=?,cdc_ambiente=?,estado_sifen=? where id=?",(cdc,cod_seg,str(cfg['ambiente'] or '').upper(),estado,doc_id))
+        estado='TEST_GENERADO' if str(cfg['ambiente'] or '').upper()=='TEST' else 'NO_ENVIADO'
+        tabla={'FE':'ventas','NCE':'notas_credito_ventas','NDE':'notas_debito_ventas'}[tipo]
+        c.execute(f"update {tabla} set cdc=?,codigo_seguridad_sifen=?,estado_sifen=? where id=?",(cdc,cod_seg,estado,doc_id))
     root=etree.Element('{%s}rDE'%NS,nsmap={None:NS,'xsi':XSI})
     root.set('{%s}schemaLocation'%XSI,NS+' siRecepDE_v150.xsd')
     _sifen_xml_text(root,'dVerFor','150',NS)
@@ -4275,7 +4276,7 @@ def _sifen_generar_de_v150(c, doc_tipo, doc_id):
     if tipo=='FE':
         gf=etree.SubElement(gd,'{%s}gCamFE'%NS);_sifen_xml_text(gf,'iIndPres','1',NS);_sifen_xml_text(gf,'dDesIndPres','Operación presencial',NS)
     else:
-        gn=etree.SubElement(gd,'{%s}gCamNCDE'%NS);_sifen_xml_text(gn,'iMotEmi','1',NS);_sifen_xml_text(gn,'dDesMotEmi','Devolución y ajuste de precios' if tipo=='NCE' else 'Ajuste de precios',NS)
+        gn=etree.SubElement(gd,'{%s}gCamNCDE'%NS);_sifen_xml_text(gn,'iMotEmi','1' if tipo=='NCE' else '8',NS);_sifen_xml_text(gn,'dDesMotEmi','Devolución y Ajuste de precios' if tipo=='NCE' else 'Ajuste de precio',NS)
     # V13.9.116: condición de operación tomada del modelo real de factura.
     # Para FE, gCamCond es obligatorio: contado incluye la forma/monto de pago;
     # crédito informa la condición y deja al XSD validar los grupos crediticios aplicables.
@@ -6050,14 +6051,140 @@ def nota_credito_compra_pdf(nid):
     _kude_footer(story,inst,None,None,False)
     return _pdf_doc_response(story,'NC-COMPRA-'+str(n['numero'])+'.pdf')
 
+# ===== V13.10.2: NCE/NDE SIFEN real, reutilizando el núcleo FE validado =====
+def init_v13102_nce_nde_sifen():
+    c=db()
+    for tab in ('notas_credito_ventas','notas_debito_ventas'):
+        cols={r['name'] for r in c.execute('pragma table_info('+tab+')').fetchall()}
+        for col,ddl in [
+            ('codigo_seguridad_sifen','TEXT'),('qr_sifen','TEXT'),('sifen_lote','TEXT'),
+            ('respuesta_sifen','TEXT'),('sifen_http_status','INTEGER'),('sifen_fecha_respuesta','TEXT'),
+            ('fecha_aprobacion_sifen','TEXT')]:
+            if col not in cols: c.execute(f'alter table {tab} add column {col} {ddl}')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.2-nce-nde-sifen-real',?)",(now(),))
+    c.commit();c.close()
+init_v13102_nce_nde_sifen()
+
+def _sifen_tabla_tipo(tipo):
+    tipo=str(tipo or '').upper()
+    if tipo=='FE': return 'ventas'
+    if tipo=='NCE': return 'notas_credito_ventas'
+    if tipo=='NDE': return 'notas_debito_ventas'
+    raise ValueError('Tipo SIFEN no soportado: '+tipo)
+
+def _sifen_preflight_complementario(c,cfg,tipo,doc_id):
+    errores=[]; tipo=tipo.upper(); tab=_sifen_tabla_tipo(tipo)
+    n=c.execute(f'''select n.*,v.id venta_id,v.cdc factura_cdc,v.estado_sifen factura_estado,
+                    v.sifen_punto_id,t.nombre cliente,t.ruc cliente_ruc
+                    from {tab} n join ventas v on v.id=n.venta_id
+                    left join terceros t on t.id=v.cliente_id where n.id=?''',(doc_id,)).fetchone()
+    if not n:return ['Documento complementario inexistente.']
+    if not n['numero']: errores.append('La nota no tiene numeración electrónica.')
+    fcdc=str(n['factura_cdc'] or '').strip()
+    if len(fcdc)!=44 or not fcdc.isdigit(): errores.append('La factura asociada no tiene CDC válido de 44 dígitos.')
+    # Una NCE/NDE electrónica debe asociarse a una FE electrónica; no inventar referencias.
+    if str(n['factura_estado'] or '').upper() not in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE'):
+        errores.append('La factura asociada no figura APROBADA en SIFEN. Primero confirme su DTE.')
+    pt=c.execute('select * from sifen_puntos_expedicion where id=?',(n['sifen_punto_id'],)).fetchone() if n['sifen_punto_id'] else None
+    flag='nota_credito_electronica' if tipo=='NCE' else 'nota_debito_electronica'
+    if not pt or not _flag_activo(pt['activo']) or not _flag_activo(pt['autorizado_dnit']) or not _flag_activo(pt[flag]):
+        errores.append('El punto de expedición de la factura no está habilitado para '+tipo+'.')
+    ni=c.execute(('select count(*) n from nota_credito_venta_items where nota_id=?' if tipo=='NCE' else 'select count(*) n from nota_debito_venta_items where nota_id=?'),(doc_id,)).fetchone()['n']
+    if ni<=0: errores.append('La nota no tiene ítems.')
+    # Reutilizar controles de configuración/certificado que ya protegen FE.
+    import os
+    if str(cfg['xml_version'] or '')!='150': errores.append('La versión XML SIFEN debe ser 150.')
+    if not (cfg['cert_path'] and cfg['key_path'] and os.path.exists(cfg['cert_path']) and os.path.exists(cfg['key_path'])): errores.append('Certificado digital no instalado/disponible.')
+    if str(cfg['ambiente'] or '').upper()=='PRODUCCION' and not int(cfg['produccion_habilitada'] or 0): errores.append('Producción SIFEN no está habilitada en el ERP.')
+    return errores
+
+def _sifen_guardar_respuesta_doc(c,tipo,doc_id,status,resp,parsed,estado,cdc,qr):
+    tab=_sifen_tabla_tipo(tipo); aprobado=estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA')
+    codigo=str(parsed.get('codigo') or parsed.get('codigo_lote') or ''); mensaje=str(parsed.get('mensaje') or parsed.get('mensaje_lote') or '')
+    raw=(resp.decode('utf-8','replace') if isinstance(resp,(bytes,bytearray)) else str(resp or ''))
+    protocolo=str(parsed.get('lote') or parsed.get('protocolo') or '')
+    c.execute(f'''update {tab} set cdc=?,qr_sifen=?,estado_sifen=?,protocolo_sifen=?,sifen_lote=?,
+        fecha_aprobacion_sifen=?,sifen_codigo_error=?,sifen_mensaje_error=?,sifen_ultimo_intento=?,
+        sifen_intentos=coalesce(sifen_intentos,0)+1,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=? where id=?''',
+        (cdc,qr,estado,protocolo,protocolo,now() if aprobado else None,codigo,mensaje,now(),raw[:50000],status,parsed.get('fecha_proceso') or now(),doc_id))
+
+def _sifen_emitir_documento_automatico(tipo,doc_id):
+    # NCE/NDE reutilizan firma, QR, XSD y WS por lote del núcleo FE estable.
+    tipo=tipo.upper()
+    if tipo=='FE': return _sifen_emitir_factura_automatico(doc_id)
+    if tipo not in ('NCE','NDE'): raise ValueError('Tipo no soportado.')
+    tab=_sifen_tabla_tipo(tipo); c=db()
+    try:
+        cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        if not cfg: raise ValueError('Configuración SIFEN inexistente.')
+        pre=_sifen_preflight_complementario(c,cfg,tipo,doc_id)
+        if pre: raise ValueError('Emisión bloqueada: '+' | '.join(pre))
+        xml,cdc=_sifen_generar_de_v150(c,tipo,doc_id)
+        c.execute(f'update {tab} set cdc=? where id=?',(cdc,doc_id));c.commit()
+        firmado=_sifen_firmar_rde(xml,cfg); qr=_sifen_extraer_qr_rde(firmado)
+        if not qr: raise ValueError('El XML firmado no contiene dCarQR.')
+        c.execute(f'update {tab} set cdc=?,qr_sifen=? where id=?',(cdc,qr,doc_id));c.commit()
+        _sifen_guardar_xml_test(tipo,doc_id,firmado,cdc)
+        ok,detalle=_sifen_validar_xsd_v150(firmado)
+        if not ok: raise ValueError('XSD V150 rechazó el XML: '+str(detalle))
+        ambiente=str(cfg['ambiente'] or 'TEST').upper()
+        if ambiente=='PRODUCCION':
+            checks=_sifen_diagnostico(c,cfg); faltan=[x['nombre'] for x in checks if not x['ok']]
+            if faltan: raise ValueError('Diagnóstico de Producción pendiente: '+', '.join(faltan))
+        elif ambiente!='TEST': raise ValueError('Ambiente SIFEN no reconocido: '+ambiente)
+        status,resp,url=_sifen_enviar_lote(firmado,cfg); parsed=_sifen_parse_respuesta(resp)
+        estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper(); protocolo=str(parsed.get('lote') or parsed.get('protocolo') or '')
+        if str(parsed.get('codigo') or '')=='0300' and protocolo:
+            estado='LOTE_RECIBIDO';parsed['protocolo']=protocolo;parsed['lote']=protocolo
+        _sifen_guardar_respuesta_doc(c,tipo,doc_id,status,resp,parsed,estado,cdc,qr)
+        c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),tipo+'_EMISION_'+ambiente,estado,f'{tipo} {doc_id} · CDC {cdc} · HTTP {status} · {parsed.get("codigo","")} {parsed.get("mensaje","")} · {url}'))
+        c.commit();return estado
+    except Exception as ex:
+        c.rollback()
+        try:
+            c.execute(f"update {tab} set estado_sifen='ERROR_ENVIO',sifen_codigo_error='',sifen_mensaje_error=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(str(ex)[:3000],now(),doc_id))
+            c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),tipo+'_EMISION','ERROR_ENVIO',f'{tipo} {doc_id}: {ex}'));c.commit()
+        except Exception:c.rollback()
+        raise
+    finally:c.close()
+
+def _sifen_consultar_lote_documento(tipo,doc_id):
+    tipo=tipo.upper();tab=_sifen_tabla_tipo(tipo);c=db()
+    try:
+        n=c.execute(f'select * from {tab} where id=?',(doc_id,)).fetchone();cfg=c.execute('select * from sifen_config where id=1').fetchone()
+        if not n: raise ValueError('Documento no encontrado.')
+        if str(n['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','CANCELADO'): return str(n['estado_sifen']).upper()
+        protocolo=str(n['protocolo_sifen'] or n['sifen_lote'] or '').strip()
+        if not protocolo: raise ValueError('El documento todavía no tiene protocolo/lote SIFEN.')
+        status,resp,url=_sifen_consultar_lote(protocolo,cfg);parsed=_sifen_parse_respuesta(resp);estado=str(parsed.get('estado') or 'RESPUESTA_RECIBIDA').upper()
+        if str(parsed.get('codigo_lote') or parsed.get('codigo') or '')=='0361':estado='LOTE_PROCESANDO'
+        if parsed.get('resultados'):
+            match=next((x for x in parsed['resultados'] if str(x.get('cdc') or '')==str(n['cdc'] or '')),parsed['resultados'][0])
+            estado=str(match.get('estado') or estado).upper();parsed['codigo']=match.get('codigo','');parsed['mensaje']=match.get('mensaje','')
+        parsed['protocolo']=protocolo;parsed['lote']=protocolo
+        _sifen_guardar_respuesta_doc(c,tipo,doc_id,status,resp,parsed,estado,n['cdc'],n['qr_sifen']);c.commit();return estado
+    finally:c.close()
+
+@app.post('/sifen/monitor/<tipo>/<int:doc_id>/consultar-lote')
+def sifen_consultar_lote_complementario(tipo,doc_id):
+    tipo=tipo.upper()
+    if tipo not in ('NCE','NDE'): return ('Tipo no válido',400)
+    try: flash(f'{tipo}: consulta SIFEN procesada. Estado: {_sifen_consultar_lote_documento(tipo,doc_id)}.')
+    except Exception as ex: flash(f'No se pudo consultar {tipo}: {ex}')
+    return redirect('/sifen/monitor')
+
 @app.get('/sifen/monitor')
 def sifen_monitor():
-    c=db(); estado=(request.args.get('estado') or '').strip().upper(); q=(request.args.get('q') or '').strip(); tipo=(request.args.get('tipo') or '').strip().upper(); fecha=(request.args.get('fecha') or '').strip()
+    c=db(); estado=(request.args.get('estado') or '').strip().upper(); q=(request.args.get('q') or '').strip(); tipo=(request.args.get('tipo') or '').strip().upper(); fecha=(request.args.get('fecha') or '').strip(); vista=(request.args.get('vista') or 'operativo').strip().lower()
+    if vista not in ('operativo','historial','todos'): vista='operativo'
     docs=[]
+    finales=('APROBADO','ACEPTADO','CANCELADO','CANCELADA','ANULADO','ANULADA')
     def add_doc(r,tipo_doc,tipo_codigo,edit_url,view_url,retry_url):
         d=dict(r); d.update(tipo_doc=tipo_doc,tipo_codigo=tipo_codigo,edit_url=edit_url,view_url=view_url,retry_url=retry_url); docs.append(d)
     wr=[];args=[]
     if estado: wr.append("upper(coalesce(v.estado_sifen,'NO_ENVIADO'))=?");args.append(estado)
+    elif vista=='operativo': wr.append("upper(coalesce(v.estado_sifen,'NO_ENVIADO')) not in (%s)" % ','.join('?'*len(finales))); args += list(finales)
+    elif vista=='historial': wr.append("upper(coalesce(v.estado_sifen,'NO_ENVIADO')) in (%s)" % ','.join('?'*len(finales))); args += list(finales)
     if fecha: wr.append("substr(coalesce(v.fecha,''),1,10)=?");args.append(fecha)
     if q: wr.append("(v.numero like ? or coalesce(v.cdc,'') like ? or coalesce(t.nombre,'') like ? or coalesce(v.sifen_mensaje_error,'') like ?)");args += ['%'+q+'%']*4
     if tipo in ('','FE'):
@@ -6070,11 +6197,36 @@ def sifen_monitor():
         ec="coalesce(n.sifen_codigo_error,'')" if 'sifen_codigo_error' in cols else "''"; em="coalesce(n.sifen_mensaje_error,'')" if 'sifen_mensaje_error' in cols else "''"; si="coalesce(n.sifen_intentos,0)" if 'sifen_intentos' in cols else '0'; ul="coalesce(n.sifen_ultimo_intento,'')" if 'sifen_ultimo_intento' in cols else "''"
         sql=f"select n.id,n.numero,n.fecha,n.cdc,n.estado_sifen,{si} sifen_intentos,{ul} sifen_ultimo_intento,{ec} sifen_codigo_error,{em} sifen_mensaje_error,t.nombre cliente,coalesce(n.sifen_lote,'') lote from {tab} n join ventas v on v.id=n.venta_id left join terceros t on t.id=v.cliente_id where 1=1"; a=[]
         if estado: sql+=" and upper(coalesce(n.estado_sifen,'NO_ENVIADO'))=?";a.append(estado)
+        elif vista=='operativo': sql+=" and upper(coalesce(n.estado_sifen,'NO_ENVIADO')) not in (%s)" % ','.join('?'*len(finales)); a += list(finales)
+        elif vista=='historial': sql+=" and upper(coalesce(n.estado_sifen,'NO_ENVIADO')) in (%s)" % ','.join('?'*len(finales)); a += list(finales)
         if fecha: sql+=" and substr(coalesce(n.fecha,''),1,10)=?";a.append(fecha)
         if q: sql+=f" and (n.numero like ? or coalesce(n.cdc,'') like ? or coalesce(t.nombre,'') like ? or {em} like ?)";a += ['%'+q+'%']*4
         for r in c.execute(sql+' order by n.id desc limit 300',a).fetchall(): add_doc(r,label,code,f'/sifen/monitor/{key}/{r["id"]}/corregir',pdf.format(r['id']),retry.format(r['id']))
     docs.sort(key=lambda x:(str(x.get('fecha') or ''),int(x.get('id') or 0)),reverse=True); c.close()
-    return render_template('sifen_monitor.html',docs=docs,estado=estado,q=q,tipo=tipo,fecha=fecha)
+    return render_template('sifen_monitor.html',docs=docs,estado=estado,q=q,tipo=tipo,fecha=fecha,vista=vista)
+
+@app.post('/sifen/monitor/enviar-seleccionados')
+def sifen_enviar_seleccionados():
+    raw=request.form.getlist('seleccionados'); seleccion=[]
+    for x in raw:
+        try:
+            tipo,sid=x.split(':',1);tipo=tipo.upper()
+            if tipo in ('FE','NCE','NDE'): seleccion.append((tipo,int(sid)))
+        except Exception:pass
+    seleccion=list(dict.fromkeys(seleccion))
+    if not seleccion:
+        flash('No seleccionó documentos habilitados para envío.');return redirect('/sifen/monitor')
+    finales={'APROBADO','APROBADA','ACEPTADO','ACEPTADA','CANCELADO','CANCELADA','ANULADO','ANULADA'}
+    enviados=excluidos=0;errores=[]
+    for tipo,did in seleccion:
+        tab=_sifen_tabla_tipo(tipo);c=db();d=c.execute(f'select id,numero,estado_sifen from {tab} where id=?',(did,)).fetchone();c.close()
+        if not d:excluidos+=1;continue
+        if str(d['estado_sifen'] or 'NO_ENVIADO').upper() in finales:excluidos+=1;continue
+        try:_sifen_emitir_documento_automatico(tipo,did);enviados+=1
+        except Exception as ex:errores.append(f'{tipo} {d["numero"]}: {str(ex)[:180]}')
+    msg=f'Envío masivo finalizado: {enviados} procesado(s), {excluidos} excluido(s) por estado final/no disponible'
+    if errores:msg+=f', {len(errores)} con error. '+ ' | '.join(errores[:3])
+    flash(msg+'.');return redirect('/sifen/monitor')
 
 @app.route('/sifen/monitor/<tipo>/<int:doc_id>/corregir',methods=['GET','POST'])
 def sifen_corregir_documento(tipo,doc_id):
@@ -6260,11 +6412,9 @@ def sifen_reintentar_venta(venta_id):
 
 @app.post('/sifen/monitor/nd/<int:nid>/reintentar')
 def sifen_reintentar_nd(nid):
-    c=db();n=c.execute('select * from notas_debito_ventas where id=?',(nid,)).fetchone()
-    if not n:c.close();return ('Nota de Débito no encontrada',404)
-    c.execute("update notas_debito_ventas set estado_sifen='PENDIENTE_REENVIO',sifen_intentos=coalesce(sifen_intentos,0)+1,sifen_ultimo_intento=? where id=?",(now(),nid))
-    c.execute('insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)',(now(),'NDE_REENVIO','PENDIENTE_REENVIO',f'NDE {n["numero"]}: reenvío solicitado; pendiente de transmisor XML/firma/WS SIFEN'))
-    c.commit();c.close();flash('Nota de Débito colocada en PENDIENTE_REENVIO.');return redirect('/sifen/monitor')
+    try: estado=_sifen_emitir_documento_automatico('NDE',nid);flash('NDE procesada por SIFEN. Estado: '+str(estado)+'.')
+    except Exception as ex: flash('No se pudo transmitir la NDE: '+str(ex))
+    return redirect('/sifen/monitor')
 
 
 # ===== V13.9.52: Centro de Notas de Crédito + diagnóstico SIFEN =====
@@ -6282,14 +6432,8 @@ def notas_credito_centro():
 
 @app.post('/sifen/monitor/nc/<int:nid>/reintentar')
 def sifen_reintentar_nc(nid):
-    c=db(); n=c.execute('select * from notas_credito_ventas where id=?',(nid,)).fetchone()
-    if not n: c.close(); return ('Nota de Crédito no encontrada',404)
-    # No simular transmisión: la versión actual aún no contiene generador XML NCE + firma + WS SIFEN.
-    c.execute("update notas_credito_ventas set estado_sifen='PENDIENTE_ENVIO' where id=?",(nid,))
-    c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",
-              (now(),'NCE_REENVIO','PENDIENTE_ENVIO',f'NC {n["numero"]}: reenvío solicitado; pendiente del transmisor XML/firma/WS SIFEN'))
-    c.commit(); c.close()
-    flash('La Nota de Crédito quedó en cola. Aún no se transmite hasta activar el transmisor XML/firma/WS SIFEN.')
+    try: estado=_sifen_emitir_documento_automatico('NCE',nid);flash('NCE procesada por SIFEN. Estado: '+str(estado)+'.')
+    except Exception as ex: flash('No se pudo transmitir la NCE: '+str(ex))
     return redirect('/sifen/monitor')
 
 @app.get('/diagnostico/sistema')
