@@ -5812,16 +5812,34 @@ def _sifen_parse_evento(xml_bytes):
     elif out['codigo']: out['estado']='RECHAZADO'
     return out
 
+def _sifen_venta_tuvo_aprobacion(c,v):
+    """No permite que una consulta posterior de un lote viejo borre la condición de DTE aprobado."""
+    estado=str(v['estado_sifen'] or '').upper()
+    codigo=str(v['sifen_codigo_error'] or '').strip() if 'sifen_codigo_error' in v.keys() else ''
+    if estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN','CANCELADO') or codigo=='0260':
+        return True
+    # V13.9.145: recuperar aprobación histórica registrada antes de que una consulta de lote
+    # sobrescribiera estado_sifen/código con 0301/0365 u otra respuesta posterior.
+    patron='Factura '+str(v['id'])+' · CDC '+str(v['cdc'] or '')+' ·%'
+    hist=c.execute("select 1 from sifen_eventos where estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE') and detalle like ? order by id desc limit 1",(patron,)).fetchone()
+    if hist: return True
+    # Compatibilidad con registros cuyo detalle guardó el número comercial en vez del id.
+    hist=c.execute("select 1 from sifen_eventos where estado in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE') and detalle like ? order by id desc limit 1",('%CDC '+str(v['cdc'] or '')+'%',)).fetchone()
+    return bool(hist)
+
 @app.post('/ventas/<int:venta_id>/anular')
 def anular_factura_venta(venta_id):
     c=db()
     try:
       v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
       if not v: raise ValueError('Factura no encontrada.')
-      if str(v['estado'] or '').upper()=='ANULADA': raise ValueError('La factura ya está anulada.')
+      es_aprob=_sifen_venta_tuvo_aprobacion(c,v)
+      # Si una versión anterior la marcó ANULADA sólo localmente después de perder el estado
+      # APROBADO, todavía debemos registrar la cancelación real ante SIFEN.
+      if str(v['estado_sifen'] or '').upper()=='CANCELADO': raise ValueError('La factura ya está cancelada en SIFEN.')
+      if str(v['estado'] or '').upper()=='ANULADA' and not es_aprob: raise ValueError('La factura interna ya está anulada.')
       motivo=(request.form.get('motivo') or '').strip()
       if len(motivo)<5: raise ValueError('Indique un motivo de cancelación de al menos 5 caracteres.')
-      es_aprob=str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN')
       if es_aprob:
        cfg=c.execute('select * from sifen_config where id=1').fetchone()
        if not str(v['cdc'] or '').strip(): raise ValueError('La factura aprobada no tiene CDC; no se puede registrar el evento.')
@@ -5834,7 +5852,7 @@ def anular_factura_venta(venta_id):
         c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','CANCELADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · 0600 {parsed["mensaje"]}'))
         flash('SIFEN registró correctamente la cancelación (0600). La factura fue marcada CANCELADA.')
        else:
-        c.execute("update ventas set estado_sifen='APROBADO',motivo_anulacion=?,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
+        c.execute("update ventas set estado=case when upper(coalesce(estado,''))='ANULADA' then 'EMITIDA' else estado end,estado_sifen='APROBADO',motivo_anulacion=?,fecha_anulacion=NULL,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
         c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','RECHAZADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · {parsed["codigo"]} {parsed["mensaje"]}'))
         flash('SIFEN NO canceló la factura: '+str(parsed['codigo'])+' · '+str(parsed['mensaje'])+'. La factura permanece APROBADA.')
       else:
@@ -6129,6 +6147,13 @@ def sifen_diagnostico_calculo(venta_id):
 def sifen_consultar_lote_venta(venta_id):
     c=db();v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone();cfg=c.execute('select * from sifen_config where id=1').fetchone()
     if not v:c.close();return ('Factura no encontrada',404)
+    # V13.9.145: una consulta de lote histórico jamás puede degradar un DTE ya aprobado/cancelado.
+    if _sifen_venta_tuvo_aprobacion(c,v):
+        estado_actual=str(v['estado_sifen'] or '').upper()
+        if estado_actual not in ('CANCELADO',):
+            c.execute("update ventas set estado_sifen='APROBADO' where id=?",(venta_id,)); c.commit()
+        c.close(); flash('Esta factura ya fue APROBADA por SIFEN. No se consultó el lote histórico para evitar sobrescribir el estado del DTE.')
+        return redirect(f'/ventas/{venta_id}/sifen/detalle')
     protocolo=str((v['protocolo_sifen'] if 'protocolo_sifen' in v.keys() else '') or (v['sifen_lote'] if 'sifen_lote' in v.keys() else '') or '').strip()
     try:
         status,resp,url=_sifen_consultar_lote(protocolo,cfg);parsed=_sifen_parse_respuesta(resp)
