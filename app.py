@@ -1179,24 +1179,38 @@ def config_sanatorio():
     audit_change(c,'EDITAR','CAMAS',cid,snapshot(old),{'habitacion':hab,'codigo':request.form['codigo'],'activo':1 if request.form.get('activo')=='1' else 0})
   c.commit();return redirect('/config-sanatorio')
  data={x:c.execute('select * from '+x+' order by id desc').fetchall() for x in ['servicios','medicos','aseguradoras']};data['especialidades']=c.execute('select * from especialidades order by activo desc,nombre').fetchall();data['camas']=c.execute("select c.*,h.nombre habitacion,exists(select 1 from admisiones a where a.cama_id=c.id and a.estado='ABIERTA') ocupada_actual from camas c join habitaciones h on h.id=c.habitacion_id order by c.id desc").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_config.html',data=data,mons=mons)
+def _asegurar_campos_ingreso_paciente(c):
+ # V13.10.8: amplía la admisión existente sin romper IDs, cuentas ni historial.
+ cols={r['name'] for r in c.execute('pragma table_info(admisiones)').fetchall()}
+ nuevos=[('hora_ingreso','TEXT'),('numero_carnet','TEXT'),('diagnostico','TEXT'),('observaciones','TEXT'),('acompanante_nombre','TEXT'),('acompanante_documento','TEXT'),('acompanante_telefono','TEXT'),('acompanante_telefono_laboral','TEXT'),('acompanante_direccion','TEXT'),('acompanante_direccion_laboral','TEXT'),('recibido_por','TEXT'),('facturado_a_tercero_id','INT')]
+ for col,ddl in nuevos:
+  if col not in cols:c.execute(f'alter table admisiones add column {col} {ddl}')
+ c.commit()
+
+@app.route('/ingreso-pacientes',methods=['GET','POST'])
 @app.route('/admisiones',methods=['GET','POST'])
 def hospital_admisiones():
- c=db()
+ c=db();_asegurar_campos_ingreso_paciente(c)
  if request.method=='POST':
   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));cama=int(request.form['cama_id']) if request.form.get('cama_id') else None
   aseg_id=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None
+  tipo=(request.form.get('tipo') or 'INTERNACION').strip().upper()
+  if tipo not in ('INTERNACION','QUIROFANO'):tipo='INTERNACION'
+  if cama and c.execute("select 1 from admisiones where cama_id=? and estado='ABIERTA' limit 1",(cama,)).fetchone():
+   c.close();flash('La cama seleccionada ya está ocupada.');return redirect('/ingreso-pacientes')
   if aseg_id and not all((request.form.get(k) or '').strip() for k in ('numero_visacion','fecha_visacion','hora_visacion')):
-   c.close();flash('Atención por seguro: complete número, fecha y hora de visación.');return redirect('/admisiones')
+   c.close();flash('Ingreso por seguro: complete número, fecha y hora de visación.');return redirect('/ingreso-pacientes')
   if aseg_id and not (request.form.get('medico_visacion_id') or request.form.get('medico_id')):
-   c.close();flash('Atención por seguro: seleccione el médico que realiza la atención.');return redirect('/admisiones')
-  cur=c.execute('insert into admisiones(fecha,paciente_id,tipo,medico_id,aseguradora_id,moneda,tipo_cambio,cama_id) values(?,?,?,?,?,?,?,?)',(fecha,int(request.form['paciente_id']),request.form['tipo'],request.form.get('medico_id') or None,aseg_id,mon,tc,cama)); aid=cur.lastrowid
-  if aseg_id:_registrar_visacion(c,aseg_id,int(request.form['paciente_id']),request.form['tipo'],aid,request.form.get('medico_id') or None)
+   c.close();flash('Ingreso por seguro: seleccione el médico tratante.');return redirect('/ingreso-pacientes')
+  pid=int(request.form['paciente_id']);mid=request.form.get('medico_id') or None;fact_a=int(request.form['facturado_a_tercero_id']) if request.form.get('facturado_a_tercero_id') else None
+  cur=c.execute('''insert into admisiones(fecha,paciente_id,tipo,medico_id,aseguradora_id,moneda,tipo_cambio,cama_id,hora_ingreso,numero_carnet,diagnostico,observaciones,acompanante_nombre,acompanante_documento,acompanante_telefono,acompanante_telefono_laboral,acompanante_direccion,acompanante_direccion_laboral,recibido_por,facturado_a_tercero_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(fecha,pid,tipo,mid,aseg_id,mon,tc,cama,request.form.get('hora_ingreso'),request.form.get('numero_carnet'),request.form.get('diagnostico'),request.form.get('observaciones'),request.form.get('acompanante_nombre'),request.form.get('acompanante_documento'),request.form.get('acompanante_telefono'),request.form.get('acompanante_telefono_laboral'),request.form.get('acompanante_direccion'),request.form.get('acompanante_direccion_laboral'),session.get('name') or session.get('user'),fact_a));aid=cur.lastrowid
+  if aseg_id:_registrar_visacion(c,aseg_id,pid,tipo,aid,mid)
   if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,))
-  c.commit();audit('ADMISION',str(cur.lastrowid));return redirect('/admisiones')
- rows=c.execute('select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id order by a.id desc').fetchall();pats=c.execute('select * from pacientes').fetchall();med=c.execute('select * from medicos').fetchall();aseg=c.execute('select * from aseguradoras').fetchall();camas=c.execute("select * from camas where estado='LIBRE' and coalesce(activo,1)=1").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('hospital_admissions.html',rows=rows,pats=pats,med=med,aseg=aseg,camas=camas,mons=mons)
+  c.commit();audit('INGRESO_PACIENTE',str(aid));flash(f'Ingreso de paciente N.º {aid:06d} registrado correctamente.');return redirect('/ingreso-pacientes')
+ rows=c.execute('''select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama,t.nombre facturado_a from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id left join terceros t on t.id=a.facturado_a_tercero_id where a.tipo in ('INTERNACION','QUIROFANO') order by a.id desc''').fetchall();med=c.execute('select * from medicos where coalesce(activo,1)=1 order by nombre').fetchall();aseg=c.execute('select * from aseguradoras where coalesce(activo,1)=1 order by nombre').fetchall();camas=c.execute("select c.*,h.nombre habitacion from camas c join habitaciones h on h.id=c.habitacion_id where c.estado='LIBRE' and coalesce(c.activo,1)=1 order by h.nombre,c.codigo").fetchall();mons=c.execute('select * from monedas').fetchall();terceros=c.execute("select id,nombre,ruc from terceros where tipo in ('CLIENTE','AMBOS') order by nombre").fetchall();hoy=datetime.date.today().isoformat();hora=datetime.datetime.now().strftime('%H:%M');c.close();return render_template('hospital_admissions.html',rows=rows,med=med,aseg=aseg,camas=camas,mons=mons,terceros=terceros,hoy=hoy,hora=hora)
 @app.route('/admisiones/<int:aid>/editar',methods=['GET','POST'])
 def editar_admision(aid):
- c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
+ c=db();_asegurar_campos_ingreso_paciente(c);a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
  if not a:
   c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
  if request.method=='POST':
@@ -1208,7 +1222,7 @@ def editar_admision(aid):
   if nueva_cama and nueva_cama!=a['cama_id']:
    oc=c.execute("select 1 from admisiones where cama_id=? and estado='ABIERTA' and id<>? limit 1",(nueva_cama,aid)).fetchone()
    if oc:c.close();flash('La cama seleccionada está ocupada por otra admisión.');return redirect(request.path)
-  c.execute('update admisiones set fecha=?,paciente_id=?,tipo=?,medico_id=?,aseguradora_id=?,moneda=?,tipo_cambio=?,cama_id=? where id=?',(fecha,pid,tipo,mid,aseg,mon,tc,nueva_cama,aid))
+  c.execute('''update admisiones set fecha=?,paciente_id=?,tipo=?,medico_id=?,aseguradora_id=?,moneda=?,tipo_cambio=?,cama_id=?,hora_ingreso=?,numero_carnet=?,diagnostico=?,observaciones=?,acompanante_nombre=?,acompanante_documento=?,acompanante_telefono=?,acompanante_telefono_laboral=?,acompanante_direccion=?,acompanante_direccion_laboral=?,facturado_a_tercero_id=? where id=?''',(fecha,pid,tipo,mid,aseg,mon,tc,nueva_cama,request.form.get('hora_ingreso') or a['hora_ingreso'],request.form.get('numero_carnet'),request.form.get('diagnostico'),request.form.get('observaciones'),request.form.get('acompanante_nombre'),request.form.get('acompanante_documento'),request.form.get('acompanante_telefono'),request.form.get('acompanante_telefono_laboral'),request.form.get('acompanante_direccion'),request.form.get('acompanante_direccion_laboral'),int(request.form['facturado_a_tercero_id']) if request.form.get('facturado_a_tercero_id') else None,aid))
   if a['cama_id'] and a['cama_id']!=nueva_cama:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
   if nueva_cama:c.execute("update camas set estado='OCUPADA' where id=?",(nueva_cama,))
   if aseg:
@@ -1219,8 +1233,8 @@ def editar_admision(aid):
     c.execute('update seguro_visaciones set fecha=?,hora=?,numero_visacion=?,aseguradora_id=?,paciente_id=?,medico_id=?,origen_tipo=?,archivo_nombre=?,archivo_guardado=?,archivo_tipo=?,observacion=? where id=?',(request.form['fecha_visacion'],request.form['hora_visacion'],request.form['numero_visacion'].strip(),aseg,pid,int(request.form.get('medico_visacion_id') or mid),tipo,orig,guard,ft,request.form.get('observacion_visacion'),v['id']))
    else:_registrar_visacion(c,aseg,pid,tipo,aid,mid)
   audit_change(c,'EDITAR','ADMISION',aid,antes,snapshot(c.execute('select * from admisiones where id=?',(aid,)).fetchone()))
-  c.commit();c.close();flash('Admisión modificada correctamente.');return redirect('/admisiones')
- pats=c.execute('select * from pacientes order by nombre').fetchall();med=c.execute('select * from medicos order by nombre').fetchall();asegs=c.execute('select * from aseguradoras where coalesce(activo,1)=1 or id=? order by nombre',(a['aseguradora_id'] or -1,)).fetchall();camas=c.execute("select c.* from camas c where coalesce(c.activo,1)=1 and (c.id=? or not exists(select 1 from admisiones x where x.cama_id=c.id and x.estado='ABIERTA' and x.id<>?)) order by c.codigo",(a['cama_id'] or -1,aid)).fetchall();mons=c.execute('select * from monedas').fetchall();v=c.execute("select * from seguro_visaciones where origen_id=? and origen_tipo in ('CONSULTA','URGENCIA','INTERNACION','QUIROFANO') order by id desc limit 1",(aid,)).fetchone();c.close();return render_template('hospital_admission_edit.html',a=a,pats=pats,med=med,aseg=asegs,camas=camas,mons=mons,v=v)
+  c.commit();c.close();flash('Ingreso de paciente modificado correctamente.');return redirect('/ingreso-pacientes')
+ pats=c.execute('select * from pacientes order by nombre').fetchall();med=c.execute('select * from medicos order by nombre').fetchall();asegs=c.execute('select * from aseguradoras where coalesce(activo,1)=1 or id=? order by nombre',(a['aseguradora_id'] or -1,)).fetchall();camas=c.execute("select c.* from camas c where coalesce(c.activo,1)=1 and (c.id=? or not exists(select 1 from admisiones x where x.cama_id=c.id and x.estado='ABIERTA' and x.id<>?)) order by c.codigo",(a['cama_id'] or -1,aid)).fetchall();mons=c.execute('select * from monedas').fetchall();v=c.execute("select * from seguro_visaciones where origen_id=? and origen_tipo in ('CONSULTA','URGENCIA','INTERNACION','QUIROFANO') order by id desc limit 1",(aid,)).fetchone();terceros=c.execute("select id,nombre,ruc from terceros where tipo in ('CLIENTE','AMBOS') order by nombre").fetchall();c.close();return render_template('hospital_admission_edit.html',a=a,pats=pats,med=med,aseg=asegs,camas=camas,mons=mons,v=v,terceros=terceros)
 
 @app.post('/admisiones/<int:aid>/eliminar')
 def eliminar_admision(aid):
@@ -1271,7 +1285,7 @@ def cuenta_paciente(aid):
  cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();visaciones=c.execute("select v.*,m.nombre medico from seguro_visaciones v left join medicos m on m.id=v.medico_id where (v.origen_tipo=? and v.origen_id=?) or (v.origen_tipo='CARGO_SERVICIO' and v.origen_id in (select id from cargos_paciente where admision_id=?)) order by v.id desc",(a['tipo'],aid,aid)).fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,meds=meds,terceros=terceros,visaciones=visaciones,total=total)
 @app.post('/facturar-admision/<int:aid>')
 def facturar_admision(aid):
- c=db();a=c.execute('select a.*,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone();items=c.execute('select * from cargos_paciente where admision_id=? and facturado=0',(aid,)).fetchall()
+ c=db();_asegurar_campos_ingreso_paciente(c);a=c.execute('select a.*,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone();items=c.execute('select * from cargos_paciente where admision_id=? and facturado=0',(aid,)).fetchall()
  if not a:
   c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
  # V13.6.3: las cuentas de URGENCIA/INTERNACION/QUIROFANO con seguro no se facturan
@@ -1284,7 +1298,7 @@ def facturar_admision(aid):
  total10_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==10);total5_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==5);exento_pyg=sum(x['total_pyg'] for x in items if float(x['iva_pct'] or 0)==0)
  base10_pyg,iva10_pyg=desglosar_iva_incluido(total10_pyg,10);base5_pyg,iva5_pyg=desglosar_iva_incluido(total5_pyg,5)
  subtotal_pyg=base10_pyg+base5_pyg+exento_pyg;iva_pyg=iva10_pyg+iva5_pyg;totg=total10_pyg+total5_pyg+exento_pyg
- subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];facturado_a=request.form.get('facturado_a_tercero_id');ter=int(facturado_a) if facturado_a else ter
+ subtotal=subtotal_pyg/tc;iva=iva_pyg/tc;total=totg/tc;ter=a['seguro_tercero'] or a['paciente_tercero'];facturado_a=request.form.get('facturado_a_tercero_id');ter=int(facturado_a) if facturado_a else (a['facturado_a_tercero_id'] or ter)
  if not ter:raise ValueError('Seleccione la persona o empresa a cuyo nombre se emitirá la factura.')
  punto_id_operativo=_punto_id_caja_actual(c,a['tipo']);num,punto_factura=_siguiente_numero_factura(c,punto_id_operativo);cur=c.execute('insert into facturas_sanatorio(fecha,admision_id,tercero_id,numero,moneda,tipo_cambio,subtotal,iva,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,ter,num,mon,tc,subtotal,iva,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));fid=cur.lastrowid;c.execute('update cargos_paciente set facturado=1 where admision_id=? and facturado=0',(aid,));c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,ter,num,mon,tc,(base10_pyg+base5_pyg)/tc,iva,exento_pyg/tc,total,totg,base10_pyg/tc,iva10_pyg/tc,base5_pyg/tc,iva5_pyg/tc,exento_pyg/tc));vid=c.execute('select last_insert_rowid()').fetchone()[0];c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(a['paciente_id'],ter,vid));ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],vid));c.execute('update facturas_sanatorio set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,a['tipo'],fid));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(vid,ter,mon,tc,total,total,totg));asiento(c,fecha,'Factura sanatorial '+num,'FACTURA_SANATORIO',fid,mon,tc,[('1.1.02',totg,0,total,'Paciente/Seguro'),('4.1.02',0,subtotal_pyg,subtotal,'Servicios sanatoriales'),('2.1.02',0,iva_pyg,iva,'IVA débito')]);c.commit();audit('FACTURA_SANATORIO',str(fid));return redirect(f'/cuenta-paciente/{aid}')
 # ===== V13.9.66: liquidación de cobertura por seguro ítem por ítem =====
@@ -1551,7 +1565,7 @@ def liquidacion_medica_pdf(i):
 
 # ===== V11: arquitectura modular, roles y farmacia interna =====
 MODULES = {
- 'PACIENTES':'Pacientes','CONSULTORIO':'Consultorio','URGENCIAS':'Urgencias','ADMISION':'Admisión / Internación',
+ 'PACIENTES':'Pacientes','CONSULTORIO':'Consultorio','URGENCIAS':'Urgencias','ADMISION':'Ingreso de Pacientes',
  'QUIROFANO':'Quirófano','ENFERMERIA':'Enfermería','FARMACIA':'Farmacia interna','FACTURACION':'Facturación',
  'STOCK':'Productos y Stock','COMPRAS':'Compras','VENTAS':'Ventas','FINANZAS':'CxC/CxP/Caja/Bancos',
  'CONTABILIDAD':'Contabilidad','INFORMES':'Informes','LABORATORIO':'Laboratorio','CONFIG_SANATORIO':'Configuración Sanatorial','USUARIOS':'Usuarios y Roles'
@@ -1798,9 +1812,9 @@ def farmacia_entregar(item_id):
 def trasladar_internacion(aid):
  if not user_has('ADMISION','TRASLADAR'):return ('Acceso no autorizado',403)
  c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone();cama=int(request.form['cama_id']) if request.form.get('cama_id') else None
- if not a or a['estado']!='ABIERTA':c.close();flash('Admisión no disponible.');return redirect('/admisiones')
+ if not a or a['estado']!='ABIERTA':c.close();flash('Ingreso no disponible.');return redirect('/ingreso-pacientes')
  c.execute("update admisiones set tipo='INTERNACION',cama_id=? where id=?",(cama,aid));
- if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,));audit_change(c,'TRASLADAR','ADMISION',aid,antes={'tipo':a['tipo']},despues={'tipo':'INTERNACION','cama':cama});c.commit();c.close();return redirect('/admisiones')
+ if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,));audit_change(c,'TRASLADAR','ADMISION',aid,antes={'tipo':a['tipo']},despues={'tipo':'INTERNACION','cama':cama});c.commit();c.close();return redirect('/ingreso-pacientes')
 
 
 # ===== V12: Recepción, Caja, Agenda y Consultorio Médico =====
