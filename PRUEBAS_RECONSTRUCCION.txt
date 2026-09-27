@@ -1,0 +1,15 @@
+RESULTADO DE VERIFICACIÓN DE LA PRIMERA RECONSTRUCCIÓN
+======================================================
+- Descompresión de los 3 ZIP: OK.
+- Comparación Nextsys1/Nextsys2: 26 PBD lógicos comunes; Nextsys1 incluye copias/actualizaciones adicionales y Nextsys2 distribución/runtime complementario.
+- Compilación sintáctica Python (py_compile): OK.
+- AST completo de app.py: OK.
+- Corrección de arranque: app.run movido al final real del archivo: OK.
+- Inventario estático de rutas Flask: 208 rutas/decoradores detectados.
+- Plantillas HTML: 130.
+- Identidad nueva: Grupo Santa Clara S.A. / Centro Médico Santa Clara: integrada en inicialización institucional.
+- Módulos operativos observados en código/esquema: Ventas, Compras, Clientes/Terceros, Proveedores, Productos, Servicios, Stock, Farmacia, Caja, Bancos/Tesorería, CxC, CxP, Contabilidad, Informes, Usuarios, Roles, Permisos, SIFEN y módulos sanatoriales.
+- SIFEN: generador V150 y validador contra siRecepDE_v150.xsd presentes en código. La vigencia V150 fue contrastada con documentación oficial DNIT el 26/09/2026.
+- Dependencias declaradas: Flask 3.1.0, openpyxl 3.1.5, reportlab 4.2.5, gunicorn 23.0.0, cryptography 46.0.1, requests 2.32.5, xlrd 2.0.2, signxml 4.2.0, lxml 6.0.2, sifen 0.2.0.
+- Instalación de dependencias en este entorno aislado: NO EJECUTABLE por falta de acceso de red de pip en el sandbox; requirements.txt sí fue verificado y la compilación sintáctica pasó.
+- Transmisión real SIFEN: NO realizada (requiere certificado/credenciales/ambiente del contribuyente). No se declara homologación ni aprobación fiscal.

@@ -1,0 +1,260 @@
+{
+  "nextsys1": {
+    "pbd_modules": {
+      "importadora.pbd": {
+        "size": 1806848,
+        "sha256": "960862b31745e17e7280a070ee2b0dfc22a8e927685d68679d565a13ca91919a"
+      },
+      "sanatorio.pbd": {
+        "size": 10415616,
+        "sha256": "f91c1426f2372f3248c859c637306ac13f6f0e3eb00b47842534e9e5f2b41751"
+      },
+      "configuracion_inicial.pbd": {
+        "size": 984064,
+        "sha256": "9d0f1afd38adbffb679405facff8e9bd1a35fd3ba061901a84fbf6bf50a53edd"
+      },
+      "restaurant.pbd": {
+        "size": 4967424,
+        "sha256": "0309317c30e5736454733711c3a81565c0403a9726ed740e77cec01a7dbb7fa0"
+      },
+      "colpick.pbd": {
+        "size": 99328,
+        "sha256": "5c3b16731202c43ff2ddb7d2bcecfe15916d4ff1f6aafcda82ad6951836bf263"
+      },
+      "choosefont105.pbd": {
+        "size": 51200,
+        "sha256": "1cb174f42d3e95255d765dfc410941734ef016b322f756e99f819b4eb94c6c90"
+      },
+      "estacion.pbd": {
+        "size": 2372096,
+        "sha256": "08684912d4fd3c0ba73a468768527b91d909e1cac5e99ab975290abc42b88f82"
+      },
+      "dw2xls_pb10_5.pbd": {
+        "size": 1262592,
+        "sha256": "88b4c7071e184a327a6c50bc3d4d6fc21d0d2fed5bb35d37cc9fa0b553092d81"
+      },
+      "fondo_fijo.pbd": {
+        "size": 529408,
+        "sha256": "6141fddb4b2c9f0f2d43e61d2e0243e537de19eda191824789012e5636e5d19c"
+      },
+      "emailsmtp_10.pbd": {
+        "size": 263168,
+        "sha256": "6767a66e63c091a8bf398f3c152d7030ed489e94c04d81216b8fa95058044c68"
+      },
+      "facturas.pbd": {
+        "size": 13773312,
+        "sha256": "2619d1e1f5e07fe6ff837c9535138a3b7a36028bcde53468baab5a0f3164ba8d"
+      },
+      "transp.pbd": {
+        "size": 37376,
+        "sha256": "06a5cbd7a33330961726e9435188dbb96f0f7d5935b4860da4dd7545fcda6a1b"
+      },
+      "informes.pbd": {
+        "size": 46830080,
+        "sha256": "a4a4f2ecd74b89f6bcfc445eca2b72c7c6676803aff6517be8d44ee76e43a3cd"
+      },
+      "informes_base.pbd": {
+        "size": 18825216,
+        "sha256": "4db908d18547749f0f01edf31280aa3951a0be14b62f68e0e2ede56c8042eda2"
+      },
+      "ftpclient10.pbd": {
+        "size": 595968,
+        "sha256": "7df43673afb068ca481a29cab81173080220e18bf38195f52637785409c94320"
+      },
+      "filtro.pbd": {
+        "size": 90112,
+        "sha256": "099de4aea37e74b5af327da9a60c2fcd115b53a25c1f20aecc91f6a8692b5d98"
+      },
+      "consultas.pbd": {
+        "size": 384512,
+        "sha256": "ea33945b404fc5bc3da527bf009ecc0e9d79d2350c79db90d46319be64b1220b"
+      },
+      "pbdwr.pbd": {
+        "size": 202752,
+        "sha256": "dec15c01357371fbb8bad56f2bbcc5bbceb0000664a443fa1b3f18e39b8c7a2f"
+      },
+      "concentrador.pbd": {
+        "size": 46080,
+        "sha256": "22cb42ccdd5aa2d0ea6ecb9d3b40df698cd1566f627d08d2127065cce60ab050"
+      },
+      "notificaciones.pbd": {
+        "size": 189952,
+        "sha256": "d032f6460e2e2af780e49ff45552a0b5049838dcb947d773579b8fe42cce96e9"
+      },
+      "modelos.pbd": {
+        "size": 3109376,
+        "sha256": "b6dde3edc6d2c6900d2b9586978752e6bcfc2a8c057817209c4616ec6ded2807"
+      },
+      "contabilidad.pbd": {
+        "size": 4429312,
+        "sha256": "e0b5aef14295abd5084f4861fc446fa3d00798ae479f1743f2f7b0974f36b3a3"
+      },
+      "administracion.pbd": {
+        "size": 37462016,
+        "sha256": "28b502689e8b8a37afc6aff6968e45c2fd54e4a46019920cf67f0d6b5780f4fe"
+      },
+      "punto_venta.pbd": {
+        "size": 1959936,
+        "sha256": "dc5899fc60af3101bc3b78069e8650148d58475488b09ecb133ffcc4e6add867"
+      },
+      "pbnismtp.pbd": {
+        "size": 186368,
+        "sha256": "35fe0c157320dc9343b482e010da941a6ad94cbbfee2f2d60f0064b1206d0585"
+      },
+      "dpfp115.pbd": {
+        "size": 84992,
+        "sha256": "907d21504201ceedfcd6f298952360bf303e79666702cdbeb0a46aebf7b8a45a"
+      }
+    },
+    "executables": [
+      "act.exe",
+      "nextsys.exe"
+    ]
+  },
+  "nextsys2": {
+    "pbd_modules": {
+      "importadora.pbd": {
+        "size": 1808384,
+        "sha256": "8dfc43961cfc3eeaa7450d1cf09c541e799183bae68cacf144277f7ed944af88"
+      },
+      "sanatorio.pbd": {
+        "size": 10417152,
+        "sha256": "69508bff4c60b2d3e2f78bf9cc61528ae1740154e7a01721ad66bb10682c9218"
+      },
+      "configuracion_inicial.pbd": {
+        "size": 984064,
+        "sha256": "318b8cacc86fbf4285d5e840bb0366bfd03bd1983be21a988f97f306bad1d2a8"
+      },
+      "restaurant.pbd": {
+        "size": 4995584,
+        "sha256": "e39fa71964f2babb959c8e6c6b8fa99fdd1b3cef45ce100c9a2d5c1a15a4acb4"
+      },
+      "pbnismtp.pbd": {
+        "size": 186368,
+        "sha256": "252163bf2e513cbe782721ce41a89dc8d7b288ef21d2a7017b892bb9dfa8f031"
+      },
+      "dpfp115.pbd": {
+        "size": 84992,
+        "sha256": "c08f2374cd8d3ef89a1dc5f9a9e20335b1429e4158cd385ff5703b8d300459e3"
+      },
+      "colpick.pbd": {
+        "size": 99328,
+        "sha256": "f0e49e87ed1ffd163cad5e7760e14ddcc03abaab678108d4837a6636a94007fb"
+      },
+      "choosefont105.pbd": {
+        "size": 51200,
+        "sha256": "2f4df15d2edcc64eac66d3a3e5ec7252dc9f98fc74e5ee03079dd20480bbc586"
+      },
+      "estacion.pbd": {
+        "size": 2415616,
+        "sha256": "29020a544962f6790a4dd4b7e599eff2adee536c89599653aab9a2f0a0fcbcd3"
+      },
+      "dw2xls_pb10_5.pbd": {
+        "size": 1262592,
+        "sha256": "9371bb91b8cb60aa540a27a84a88ead8310a4175c5e1fbe9b403c5afadd58c19"
+      },
+      "fondo_fijo.pbd": {
+        "size": 529408,
+        "sha256": "b05b6c654dbdd311d9f21a7421986f01843ff7207c5ab710fcc4798793cf385d"
+      },
+      "emailsmtp_10.pbd": {
+        "size": 263168,
+        "sha256": "cdf789797d2bd6bfb3c1c3769e16ed51b3b4ef1a85a5b46aab40e58aa63e6093"
+      },
+      "facturas.pbd": {
+        "size": 13775360,
+        "sha256": "005084022cc8f19c9a05822692ad9812612414149c825ab4e6438c9a119f0a5f"
+      },
+      "transp.pbd": {
+        "size": 37376,
+        "sha256": "bb153f594d2f4ccd1dcd5c4b35f500266a9542527885abbb4decac6544ba919e"
+      },
+      "informes.pbd": {
+        "size": 47353856,
+        "sha256": "dbed1d2d1692e85066e90f8867cd1fcce8d508c797a5b25f30029162a037e99b"
+      },
+      "informes_base.pbd": {
+        "size": 18825216,
+        "sha256": "b0849894cba289d806ea91e52d9f1e692a3bfef494d078df2e7c5b51a6746ea0"
+      },
+      "ftpclient10.pbd": {
+        "size": 595968,
+        "sha256": "68b97fd314cfc1ae2c4413b22948ea09a2c8a879978da0660fa1d4f4359a329b"
+      },
+      "filtro.pbd": {
+        "size": 90112,
+        "sha256": "1fc12152bd4fa2c23cd39176da52e6c0a9f3422660c4eac39072cc8e2c357755"
+      },
+      "consultas.pbd": {
+        "size": 384512,
+        "sha256": "0c5a6f0dadc2cb03a19b1691b88acb80c6628b610236def4cef251c5d49e940f"
+      },
+      "pbdwr.pbd": {
+        "size": 202752,
+        "sha256": "dec15c01357371fbb8bad56f2bbcc5bbceb0000664a443fa1b3f18e39b8c7a2f"
+      },
+      "concentrador.pbd": {
+        "size": 46080,
+        "sha256": "f79e8abf3f1dfc069a51238a478a6f6f1b35cc9b5c02ef0e885f12673132a9a2"
+      },
+      "notificaciones.pbd": {
+        "size": 189952,
+        "sha256": "6891d0b8890c1b690fed8f654c7c56741e59bcd45b6c796ae61ad51a92cc7022"
+      },
+      "modelos.pbd": {
+        "size": 3116032,
+        "sha256": "84c2ea3d0d9793c195f42b1b356fbec9d66ea10b634a49974573ff2eb8d31693"
+      },
+      "contabilidad.pbd": {
+        "size": 4429312,
+        "sha256": "bc3313188bfa64a36ea4938137cd7914f13bba89ad90cfa50d78d20ef7bb0cc3"
+      },
+      "administracion.pbd": {
+        "size": 37513728,
+        "sha256": "0914f09855abebcca04e147ef3756dbe84e8c68e836c3c28c4d7adb2308e6b83"
+      },
+      "punto_venta.pbd": {
+        "size": 1964032,
+        "sha256": "564ec9bbcfcd5885cfe36ab9047114be98ccb99669af6f8959d12cb65ed2df5d"
+      }
+    },
+    "executables": [
+      "act.exe",
+      "bdrecovery.exe",
+      "nextsys.exe"
+    ]
+  },
+  "comparison": {
+    "common_modules": [
+      "administracion.pbd",
+      "choosefont105.pbd",
+      "colpick.pbd",
+      "concentrador.pbd",
+      "configuracion_inicial.pbd",
+      "consultas.pbd",
+      "contabilidad.pbd",
+      "dpfp115.pbd",
+      "dw2xls_pb10_5.pbd",
+      "emailsmtp_10.pbd",
+      "estacion.pbd",
+      "facturas.pbd",
+      "filtro.pbd",
+      "fondo_fijo.pbd",
+      "ftpclient10.pbd",
+      "importadora.pbd",
+      "informes.pbd",
+      "informes_base.pbd",
+      "modelos.pbd",
+      "notificaciones.pbd",
+      "pbdwr.pbd",
+      "pbnismtp.pbd",
+      "punto_venta.pbd",
+      "restaurant.pbd",
+      "sanatorio.pbd",
+      "transp.pbd"
+    ],
+    "only_nextsys1": [],
+    "only_nextsys2": [],
+    "conclusion": "Ambos paquetes contienen el mismo conjunto lógico de 26 bibliotecas PBD principales. nextsys1 incluye copias/actualizaciones adicionales; nextsys2 es una distribución ejecutable complementaria con runtime y utilidades."
+  }
+}

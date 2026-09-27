@@ -3351,6 +3351,7 @@ def init_v1365_empresa_config():
     for col,defn in nuevos:
         if col not in cols: c.execute(f'alter table institucion_config add column {col} {defn}')
     c.execute("update institucion_config set razon_social=coalesce(nullif(razon_social,''),nombre), nombre_fantasia=coalesce(nullif(nombre_fantasia,''),nombre) where id=1")
+    c.execute("update institucion_config set razon_social='Grupo Santa Clara S.A.', nombre_fantasia='Centro Médico Santa Clara', nombre='CENTRO MEDICO SANTA CLARA' where id=1 and (razon_social is null or razon_social='' or razon_social=nombre or upper(razon_social)='CENTRO MEDICO SANTA CLARA')")
     c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, aplicado_en TEXT)")
     c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.6.5-config-empresa',?)",(now(),))
     c.commit();c.close()
@@ -6364,8 +6365,7 @@ def administracion_geografia():
   c.close();return redirect(request.path)
  rows=c.execute('select * from geo_ubicaciones order by departamento,distrito,ciudad,barrio limit 1000').fetchall();c.close();return render_template('geografia.html',rows=rows)
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0',port=5000,debug=False)
+# El arranque se mueve al final del archivo para registrar TODAS las rutas e inicializaciones.
 
 # ===== V13.9.58 - Importacion / actualizacion CxC y CxP =====
 def _imp_norm(v):
@@ -7184,3 +7184,8 @@ def sifen_preparacion():
  c.close();return render_template('sifen_readiness.html',checks=checks)
 
 ROUTE_MODULE.update({'puesta_en_marcha':'CONFIG_SANATORIO','puesta_marcha_reset':'CONFIG_SANATORIO','puesta_marcha_importar':'CONFIG_SANATORIO','sifen_preparacion':'FACTURACION'})
+
+
+# ===== ARRANQUE FINAL: todas las rutas/migraciones ya fueron registradas =====
+if __name__=='__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT','5000')), debug=False)
