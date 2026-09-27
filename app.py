@@ -5764,9 +5764,12 @@ def _sifen_evento_cancelacion_xml(cdc,motivo,cfg,control_id=None):
     if len(cdc)!=44 or not cdc.isdigit(): raise ValueError('CDC inválido para cancelación: SIFEN requiere 44 dígitos.')
     if len(motivo)<5 or len(motivo)>500: raise ValueError('El motivo de cancelación debe contener entre 5 y 500 caracteres.')
     if not cfg or not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital SIFEN no instalado.')
-    # GDE003: Id del evento N(1-10). GSch02: dId N(1-15).
+    # NT SIFEN: el Id del evento es N(1-10). Usamos el mismo valor para dId de control
+    # (admite 1-15) y para rEve@Id, como en los ejemplos oficiales de eventos.
     event_id=str(secrets.randbelow(9000000000)+1000000000)
-    control_id=str(control_id or (secrets.randbelow(900000000000000)+100000000000000))
+    control_id=str(control_id or event_id)
+    if not control_id.isdigit() or not (1 <= len(control_id) <= 15):
+        raise ValueError('dId de control SIFEN inválido.')
 
     env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP})
     etree.SubElement(env,'{%s}Header'%SOAP)
@@ -5781,7 +5784,8 @@ def _sifen_evento_cancelacion_xml(cdc,motivo,cfg,control_id=None):
     reve=etree.SubElement(rges,'{%s}rEve'%NS); reve.set('Id',event_id)
     etree.SubElement(reve,'{%s}dFecFirma'%NS).text=datetime.datetime.now().replace(microsecond=0).isoformat()
     etree.SubElement(reve,'{%s}dVerFor'%NS).text='150'
-    etree.SubElement(reve,'{%s}dTiGDE'%NS).text='1'
+    # IMPORTANTE (NT SIFEN): dTiGDE fue eliminado del XML de evento. gGroupTiEvt
+    # es xs:choice y el tipo se determina por rGeVeCan/rGeVeInu/etc.
     grupo=etree.SubElement(reve,'{%s}gGroupTiEvt'%NS)
     can=etree.SubElement(grupo,'{%s}rGeVeCan'%NS)
     etree.SubElement(can,'{%s}Id'%NS).text=cdc
