@@ -5752,26 +5752,97 @@ def nota_credito_venta(venta_id):
       except Exception as e:c.rollback();flash(str(e))
     puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and nota_credito_electronica=1 order by predeterminado desc,id").fetchall();c.close();return render_template('credit_note_sale.html',v=v,items=items,puntos=puntos)
 
+def _sifen_evento_cancelacion_xml(cdc,motivo,cfg):
+    """Genera y firma el evento emisor Cancelación conforme SIFEN MT V150."""
+    import secrets
+    from lxml import etree
+    from signxml import XMLSigner,methods
+    NS='http://ekuatia.set.gov.py/sifen/xsd'
+    cdc=str(cdc or '').strip(); motivo=' '.join(str(motivo or '').split())
+    if len(cdc)!=44 or not cdc.isdigit(): raise ValueError('CDC inválido para cancelación: SIFEN requiere 44 dígitos.')
+    if len(motivo)<5 or len(motivo)>500: raise ValueError('El motivo de cancelación debe contener entre 5 y 500 caracteres.')
+    if not cfg or not cfg['cert_path'] or not cfg['key_path']: raise ValueError('Certificado digital SIFEN no instalado.')
+    event_id=str(secrets.randbelow(9000000000)+1000000000)
+    rges=etree.Element('{%s}rGesEve'%NS,nsmap={None:NS})
+    reve=etree.SubElement(rges,'{%s}rEve'%NS); reve.set('Id',event_id)
+    etree.SubElement(reve,'{%s}dFecFirma'%NS).text=datetime.datetime.now().replace(microsecond=0).isoformat()
+    etree.SubElement(reve,'{%s}dVerFor'%NS).text='150'
+    etree.SubElement(reve,'{%s}dTiGDE'%NS).text='1'
+    grupo=etree.SubElement(reve,'{%s}gGroupTiEvt'%NS)
+    can=etree.SubElement(grupo,'{%s}rGeVeCan'%NS)
+    etree.SubElement(can,'{%s}Id'%NS).text=cdc
+    etree.SubElement(can,'{%s}mOtEve'%NS).text=motivo
+    cert=Path(cfg['cert_path']).read_bytes(); key=Path(cfg['key_path']).read_bytes()
+    signer=XMLSigner(method=methods.enveloped,signature_algorithm='rsa-sha256',digest_algorithm='sha256',c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
+    signer.namespaces={None:'http://www.w3.org/2000/09/xmldsig#'}
+    firmado=signer.sign(reve,key=key,cert=cert,reference_uri='#'+event_id,id_attribute='Id')
+    sig=firmado.find('{http://www.w3.org/2000/09/xmldsig#}Signature')
+    if sig is None: raise ValueError('No fue posible generar la firma XMLDSig del evento.')
+    firmado.remove(sig); rges.replace(reve,firmado); rges.append(sig)
+    return etree.tostring(rges,encoding='UTF-8',xml_declaration=False,pretty_print=False),event_id
+
+def _sifen_enviar_evento_cancelacion(cdc,motivo,cfg,timeout=35):
+    """Envía cancelación por WS Eventos sincrónico; nunca usa recepción DE/lote."""
+    import requests,secrets,re
+    from lxml import etree
+    NS='http://ekuatia.set.gov.py/sifen/xsd'; SOAP='http://www.w3.org/2003/05/soap-envelope'
+    rges_bytes,event_id=_sifen_evento_cancelacion_xml(cdc,motivo,cfg)
+    rges=etree.fromstring(rges_bytes,etree.XMLParser(remove_blank_text=True,resolve_entities=False,no_network=True))
+    env=etree.Element('{%s}Envelope'%SOAP,nsmap={'soap':SOAP}); etree.SubElement(env,'{%s}Header'%SOAP); body=etree.SubElement(env,'{%s}Body'%SOAP)
+    envio=etree.SubElement(body,'{%s}rEnviEventoDe'%NS,nsmap={None:NS})
+    etree.SubElement(envio,'{%s}dId'%NS).text=str(secrets.randbelow(900000000000000)+100000000000000)
+    dev=etree.SubElement(envio,'{%s}dEvReg'%NS); grp=etree.SubElement(dev,'{%s}gGroupGesEve'%NS); grp.append(rges)
+    payload=etree.tostring(env,encoding='UTF-8',xml_declaration=True,pretty_print=False)
+    if re.search(br'<\/?ns\d+:',payload) or re.search(br'xmlns:ns\d+=',payload): raise ValueError('SOAP evento SIFEN inválido: prefijo namespace automático ns0/ns1.')
+    url=_sifen_endpoint(cfg,'eventos')
+    r=requests.post(url,data=payload,headers={'Content-Type':'application/soap+xml; charset=utf-8'},cert=(cfg['cert_path'],cfg['key_path']),timeout=timeout)
+    return r.status_code,r.content,url,payload,event_id
+
+def _sifen_parse_evento(xml_bytes):
+    from lxml import etree
+    out={'estado':'RESPUESTA_RECIBIDA','codigo':'','mensaje':'','fecha_proceso':''}
+    root=etree.fromstring(xml_bytes if isinstance(xml_bytes,(bytes,bytearray)) else str(xml_bytes).encode(),etree.XMLParser(resolve_entities=False,no_network=True))
+    def first(*names):
+        for n in names:
+            x=root.xpath('//*[local-name()=$n]',n=n)
+            if x and (x[0].text or '').strip(): return (x[0].text or '').strip()
+        return ''
+    out['codigo']=first('dCodRes','dCodResLot'); out['mensaje']=first('dMsgRes','dMsgResLot'); out['fecha_proceso']=first('dFecProc')
+    if out['codigo']=='0600': out['estado']='CANCELADO'
+    elif out['codigo']: out['estado']='RECHAZADO'
+    return out
+
 @app.post('/ventas/<int:venta_id>/anular')
 def anular_factura_venta(venta_id):
     c=db()
     try:
       v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
-      if not v:raise ValueError('Factura no encontrada.')
-      if str(v['estado'] or '').upper()=='ANULADA':raise ValueError('La factura ya está anulada.')
+      if not v: raise ValueError('Factura no encontrada.')
+      if str(v['estado'] or '').upper()=='ANULADA': raise ValueError('La factura ya está anulada.')
       motivo=(request.form.get('motivo') or '').strip()
-      if not motivo:raise ValueError('Indique el motivo de anulación.')
+      if len(motivo)<5: raise ValueError('Indique un motivo de cancelación de al menos 5 caracteres.')
       es_aprob=str(v['estado_sifen'] or '').upper() in ('APROBADO','APROBADA','ACEPTADO','ACEPTADA','DTE','APROBADO_SIFEN')
       if es_aprob:
-       # No se falsifica una cancelación DNIT: queda pendiente hasta que el WS de eventos confirme.
-       c.execute("update ventas set estado_sifen='CANCELACION_PENDIENTE',motivo_anulacion=?,sifen_ultimo_intento=? where id=?",(motivo,now(),venta_id))
-       c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','PENDIENTE_ENVIO',f'Factura {v["numero"]}: {motivo}'))
-       flash('Solicitud preparada. La factura NO se marca anulada fiscalmente hasta recibir confirmación de SIFEN.')
+       cfg=c.execute('select * from sifen_config where id=1').fetchone()
+       if not str(v['cdc'] or '').strip(): raise ValueError('La factura aprobada no tiene CDC; no se puede registrar el evento.')
+       # SIFEN V150: cancelación es Evento del Emisor, WS Eventos sincrónico (no recepción/lote de DE).
+       status,resp,url,payload,event_id=_sifen_enviar_evento_cancelacion(v['cdc'],motivo,cfg)
+       parsed=_sifen_parse_evento(resp)
+       raw=resp.decode('utf-8','replace') if isinstance(resp,(bytes,bytearray)) else str(resp)
+       if parsed['codigo']=='0600':
+        c.execute("update ventas set estado='ANULADA',estado_sifen='CANCELADO',motivo_anulacion=?,fecha_anulacion=?,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,now(),parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
+        c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','CANCELADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · 0600 {parsed["mensaje"]}'))
+        flash('SIFEN registró correctamente la cancelación (0600). La factura fue marcada CANCELADA.')
+       else:
+        c.execute("update ventas set estado_sifen='APROBADO',motivo_anulacion=?,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
+        c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','RECHAZADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · {parsed["codigo"]} {parsed["mensaje"]}'))
+        flash('SIFEN NO canceló la factura: '+str(parsed['codigo'])+' · '+str(parsed['mensaje'])+'. La factura permanece APROBADA.')
       else:
-       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id));flash('Factura interna anulada. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.')
+       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id)); flash('Factura interna anulada. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.')
       c.commit()
-    except Exception as e:c.rollback();flash(str(e))
-    finally:c.close()
+    except Exception as e:
+      c.rollback(); flash('Cancelación no realizada: '+str(e))
+    finally: c.close()
     return redirect(f'/ventas/{venta_id}/factura')
 
 # ===== V13.9.54: aplicación real de Notas de Crédito de Compras =====
