@@ -279,11 +279,53 @@ def tipos_cambio():
  c=db()
  if request.method=='POST':c.execute('insert into tipos_cambio(fecha,moneda,tipo,fuente) values(?,?,?,?) on conflict(fecha,moneda) do update set tipo=excluded.tipo,fuente=excluded.fuente',(request.form['fecha'],request.form['moneda'],float(request.form['tipo']),request.form.get('fuente','Manual')));c.commit();audit('TIPO_CAMBIO',request.form['moneda']);return redirect('/tipos-cambio')
  rows=c.execute('select * from tipos_cambio order by fecha desc,moneda').fetchall();mons=c.execute("select * from monedas where codigo<>'PYG'").fetchall();c.close();return render_template('exchange.html',rows=rows,mons=mons)
+def _doc_maestro_normalizado(valor):
+ """Clave de comparación para CI/RUC: ignora puntos, espacios y DV final."""
+ import re
+ raw=str(valor or '').strip().upper()
+ base=raw.split('-',1)[0]
+ return re.sub(r'[^0-9A-Z]','',base)
+
+def _buscar_tercero_duplicado(c, documento, excluir_id=None, tipos=None):
+ clave=_doc_maestro_normalizado(documento)
+ if not clave:return None
+ sql="select * from terceros where ruc is not null and trim(ruc)<>''"
+ args=[]
+ if excluir_id is not None: sql+=' and id<>?';args.append(int(excluir_id))
+ if tipos:
+  qs=','.join('?'*len(tipos));sql+=f" and upper(coalesce(tipo,'')) in ({qs})";args.extend([x.upper() for x in tipos])
+ for r in c.execute(sql,args).fetchall():
+  if _doc_maestro_normalizado(r['ruc'])==clave:return r
+ return None
+
+def _buscar_paciente_duplicado(c, documento, excluir_id=None):
+ clave=_doc_maestro_normalizado(documento)
+ if not clave:return None
+ sql="select * from pacientes where documento is not null and trim(documento)<>''"
+ args=[]
+ if excluir_id is not None:sql+=' and id<>?';args.append(int(excluir_id))
+ for r in c.execute(sql,args).fetchall():
+  if _doc_maestro_normalizado(r['documento'])==clave:return r
+ return None
+
+def _sifen_operacion_automatica(naturaleza,tipo_contribuyente,pais,operacion_solicitada=None):
+ """Automatiza solo casos inequívocos; B2G requiere identificación explícita del receptor estatal."""
+ nat=str(naturaleza or '2');tc=str(tipo_contribuyente or '1');pais=(pais or 'PRY').strip().upper()
+ if pais and pais!='PRY':return '4' # B2F
+ if nat!='1':return '2' # B2C
+ if tc=='2':return '1' # Persona jurídica contribuyente -> B2B
+ # Persona física con RUC puede actuar B2B o B2C; conserva elección válida del usuario.
+ return str(operacion_solicitada or '2') if str(operacion_solicitada or '') in ('1','2','3') else '2'
+
 @app.route('/proveedores',methods=['GET','POST'])
 def proveedores():
  c=db()
  if request.method=='POST':
-  vals=('PROVEEDOR',request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG')
+  ruc=(request.form.get('ruc') or '').strip()
+  dup=_buscar_tercero_duplicado(c,ruc,tipos=('PROVEEDOR','AMBOS')) if ruc else None
+  if dup:
+   c.close();flash(f'No se creó el proveedor: el RUC/documento ya está registrado como {dup["nombre"]} (ID {dup["id"]}).');return redirect('/proveedores')
+  vals=('PROVEEDOR',ruc,request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form.get('moneda') or 'PYG')
   c.execute('insert into terceros(tipo,ruc,nombre,telefono,email,moneda) values(?,?,?,?,?,?)',vals);c.commit();c.close();flash('Proveedor registrado correctamente.');return redirect('/proveedores')
  rows=c.execute("select * from terceros where upper(coalesce(tipo,''))='PROVEEDOR' order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('providers.html',rows=rows,mons=mons)
 
@@ -1054,12 +1096,15 @@ def pacientes():
  c=db(); sincronizar_clientes_pacientes(c)
  if request.method=='POST':
   doc=(request.form.get('documento') or '').strip(); nombre=(request.form.get('nombre') or '').strip()
-  nat=(request.form.get('sifen_naturaleza') or '1').strip(); tiop=(request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')).strip()
+  nat=(request.form.get('sifen_naturaleza') or '1').strip(); tcon=(request.form.get('sifen_tipo_contribuyente') or '1').strip(); pais=(request.form.get('sifen_pais') or 'PRY').strip(); tiop=_sifen_operacion_automatica(nat,tcon,pais,request.form.get('sifen_tipo_operacion'))
   if nat=='1':
    _r,_dv,_ok=_sifen_ruc_dv_normalizar(doc,request.form.get('sifen_dv'))
    if not _ok: c.close(); flash('RUC/DV inválido para contribuyente.'); return redirect('/clientes')
    doc=_r+'-'+_dv
-  vals=(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('email_factura') or request.form.get('email'),1 if request.form.get('enviar_factura_email')=='1' else 0,request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
+  dup_p=_buscar_paciente_duplicado(c,doc);dup_t=_buscar_tercero_duplicado(c,doc,tipos=('CLIENTE','AMBOS'))
+  if dup_p or dup_t:
+   existente=dup_p or dup_t;c.close();flash(f'No se creó el cliente/paciente: la C.I./RUC ya está registrada (ID {existente["id"]}). Abra el registro existente para actualizar sus datos.');return redirect('/clientes')
+  vals=(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('email_factura') or request.form.get('email'),1 if request.form.get('enviar_factura_email')=='1' else 0,request.form.get('moneda') or 'PYG',nat,tiop,tcon,request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'))
   cur=c.execute("""insert into terceros(tipo,ruc,nombre,telefono,email,email_factura,enviar_factura_email,moneda,sifen_naturaleza,sifen_tipo_operacion,sifen_tipo_contribuyente,sifen_tipo_documento,sifen_numero_documento,sifen_pais,sifen_pais_desc,sifen_direccion,sifen_numero_casa,sifen_departamento_codigo,sifen_departamento_desc,sifen_distrito_codigo,sifen_distrito_desc,sifen_ciudad_codigo,sifen_ciudad_desc) values('CLIENTE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",vals)
   tid=cur.lastrowid
   c.execute('insert into pacientes(documento,nombre,fecha_nacimiento,telefono,direccion,tercero_id) values(?,?,?,?,?,?)',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),tid));c.commit();c.close();flash('Cliente registrado y preparado para facturación electrónica.');return redirect('/clientes')
@@ -1374,13 +1419,16 @@ def editar_paciente(i):
  c=db(); r=c.execute("""select p.*,t.email,t.email_factura,t.enviar_factura_email,t.moneda,t.sifen_naturaleza,t.sifen_tipo_operacion,t.sifen_tipo_contribuyente,t.sifen_tipo_documento,t.sifen_numero_documento,t.sifen_pais,t.sifen_pais_desc,t.sifen_direccion,t.sifen_numero_casa,t.sifen_departamento_codigo,t.sifen_departamento_desc,t.sifen_distrito_codigo,t.sifen_distrito_desc,t.sifen_ciudad_codigo,t.sifen_ciudad_desc from pacientes p left join terceros t on t.id=p.tercero_id where p.id=?""",(i,)).fetchone()
  if not r:c.close();flash('Cliente no encontrado.');return redirect('/clientes')
  if request.method=='POST':
-  antes=snapshot(r);doc=(request.form.get('documento') or '').strip();nombre=(request.form.get('nombre') or '').strip();nat=request.form.get('sifen_naturaleza') or '1';tiop=request.form.get('sifen_tipo_operacion') or ('1' if nat=='1' else '2')
+  antes=snapshot(r);doc=(request.form.get('documento') or '').strip();nombre=(request.form.get('nombre') or '').strip();nat=request.form.get('sifen_naturaleza') or '1';tcon=request.form.get('sifen_tipo_contribuyente') or '1';pais=request.form.get('sifen_pais') or 'PRY';tiop=_sifen_operacion_automatica(nat,tcon,pais,request.form.get('sifen_tipo_operacion'))
   if nat=='1':
    _r,_dv,_ok=_sifen_ruc_dv_normalizar(doc,request.form.get('sifen_dv'))
    if not _ok: c.close(); flash('RUC/DV inválido para contribuyente.'); return redirect('/editar-paciente/'+str(i))
    doc=_r+'-'+_dv
+  dup_p=_buscar_paciente_duplicado(c,doc,excluir_id=i);dup_t=_buscar_tercero_duplicado(c,doc,excluir_id=r['tercero_id'],tipos=('CLIENTE','AMBOS'))
+  if dup_p or dup_t:
+   c.close();flash('No se guardaron los cambios: esa C.I./RUC pertenece a otro cliente/paciente.');return redirect('/editar-paciente/'+str(i))
   c.execute('update pacientes set documento=?,nombre=?,fecha_nacimiento=?,telefono=?,direccion=? where id=?',(doc,nombre,request.form.get('fecha_nacimiento'),request.form.get('telefono'),request.form.get('direccion'),i))
-  c.execute("""update terceros set tipo='CLIENTE',ruc=?,nombre=?,telefono=?,email=?,email_factura=?,enviar_factura_email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?""",(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('email_factura') or request.form.get('email'),1 if request.form.get('enviar_factura_email')=='1' else 0,request.form.get('moneda') or 'PYG',nat,tiop,request.form.get('sifen_tipo_contribuyente') or '2',request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),r['tercero_id']))
+  c.execute("""update terceros set tipo='CLIENTE',ruc=?,nombre=?,telefono=?,email=?,email_factura=?,enviar_factura_email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?""",(doc,nombre,request.form.get('telefono'),request.form.get('email'),request.form.get('email_factura') or request.form.get('email'),1 if request.form.get('enviar_factura_email')=='1' else 0,request.form.get('moneda') or 'PYG',nat,tiop,tcon,request.form.get('sifen_tipo_documento') or '1',request.form.get('sifen_numero_documento') or doc,request.form.get('sifen_pais') or 'PRY',request.form.get('sifen_pais_desc') or 'Paraguay',request.form.get('direccion'),request.form.get('sifen_numero_casa') or '0',request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),r['tercero_id']))
   despues=snapshot(c.execute('select * from pacientes where id=?',(i,)).fetchone());audit_change(c,'MODIFICAR','CLIENTES',i,antes,despues,request.form.get('motivo','Actualización'));c.commit();c.close();flash('Cliente actualizado.');return redirect('/clientes')
  c.close();return render_template('edit_patient.html',r=r)
 
@@ -2455,6 +2503,9 @@ def producto_eliminar(rid):
 def tercero_editar(rid):
     c=db();r=c.execute('select * from terceros where id=?',(rid,)).fetchone();mons=c.execute('select * from monedas').fetchall()
     if request.method=='POST':
+        nuevo_ruc=(request.form.get('ruc') or '').strip();dup=_buscar_tercero_duplicado(c,nuevo_ruc,excluir_id=rid,tipos=('PROVEEDOR','AMBOS')) if nuevo_ruc else None
+        if dup:
+            c.close();flash(f'No se guardaron los cambios: ese RUC/documento ya pertenece al proveedor {dup["nombre"]}.');return redirect('/tercero/'+str(rid)+'/editar')
         c.execute('''update terceros set tipo=?,ruc=?,nombre=?,telefono=?,email=?,moneda=?,sifen_naturaleza=?,sifen_tipo_operacion=?,sifen_tipo_contribuyente=?,sifen_tipo_documento=?,sifen_numero_documento=?,sifen_pais=?,sifen_pais_desc=?,sifen_direccion=?,sifen_numero_casa=?,sifen_departamento_codigo=?,sifen_departamento_desc=?,sifen_distrito_codigo=?,sifen_distrito_desc=?,sifen_ciudad_codigo=?,sifen_ciudad_desc=? where id=?''',('PROVEEDOR',request.form.get('ruc'),request.form['nombre'],request.form.get('telefono'),request.form.get('email'),request.form['moneda'],request.form.get('sifen_naturaleza','1'),request.form.get('sifen_tipo_operacion','1'),request.form.get('sifen_tipo_contribuyente','2'),request.form.get('sifen_tipo_documento','1'),request.form.get('sifen_numero_documento') or request.form.get('ruc'),request.form.get('sifen_pais','PRY'),request.form.get('sifen_pais_desc','Paraguay'),request.form.get('sifen_direccion'),request.form.get('sifen_numero_casa','0'),request.form.get('sifen_departamento_codigo'),request.form.get('sifen_departamento_desc'),request.form.get('sifen_distrito_codigo'),request.form.get('sifen_distrito_desc'),request.form.get('sifen_ciudad_codigo'),request.form.get('sifen_ciudad_desc'),rid));c.commit();c.close();audit('EDITAR_TERCERO',str(rid));return redirect('/proveedores')
     c.close();return render_template('edit_master.html',title='Modificar proveedor',record=r,kind='tercero',mons=mons)
 @app.post('/tercero/<int:rid>/eliminar')
