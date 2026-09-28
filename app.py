@@ -1753,6 +1753,13 @@ def admin_usuarios_roles():
    rid=int(request.form['rol_id']);c.execute('delete from permisos_rol where rol_id=?',(rid,))
    for key in request.form.getlist('perm'):
     mod,act=key.split('|',1);c.execute('insert into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,mod,act))
+  elif kind=='predeterminados':
+   rid=int(request.form['rol_id']); rol=c.execute('select nombre from roles where id=?',(rid,)).fetchone(); perfiles=_perms_role_presets()
+   if not rol or rol['nombre'] not in perfiles:
+    flash('Este es un rol personalizado y no tiene un perfil predeterminado.'); c.close(); return redirect('/admin/usuarios-roles?rol_id='+str(rid))
+   c.execute('delete from permisos_rol where rol_id=?',(rid,))
+   for mod,act in perfiles[rol['nombre']]:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,mod,act))
+   flash('Permisos predeterminados restaurados para '+rol['nombre']+'. Puede modificarlos cuando lo necesite.')
   elif kind=='asignar':
    uid=int(request.form['usuario_id']);c.execute('delete from usuario_roles where usuario_id=?',(uid,))
    for rid in request.form.getlist('rol_ids'):
@@ -1775,7 +1782,7 @@ def admin_usuarios_roles():
  for x in urs: user_roles.setdefault(x['usuario_id'],set()).add(x['rol_id'])
  user_cajas={}
  for x in ucs:user_cajas.setdefault(x['usuario_id'],set()).add(x['caja_id'])
- return render_template('admin_roles.html',users=users,roles=roles,selected_role=selected_role,checked=checked,user_roles=user_roles,user_cajas=user_cajas,cajas_usuario=cajas_usuario,medicos=medicos,empleados=empleados,modules=MODULES,actions=ACTIONS)
+ return render_template('admin_roles.html',users=users,roles=roles,selected_role=selected_role,checked=checked,user_roles=user_roles,user_cajas=user_cajas,cajas_usuario=cajas_usuario,medicos=medicos,empleados=empleados,modules=MODULES,actions=ACTIONS,preset_roles=set(_perms_role_presets().keys()))
 
 @app.post('/enfermeria/solicitar-farmacia')
 def enfermeria_solicitar_farmacia():
@@ -1857,6 +1864,44 @@ def init_v12():
    continue
   rid=c.execute('insert into roles(nombre,descripcion) values(?,?)',(role,'Rol estándar Santa Clara V12')).lastrowid
   for m,a in perms:c.execute('insert into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,m,a))
+ c.commit();c.close()
+
+# ===== V13.10.9: perfiles de permisos predeterminados por rol =====
+def _perms_role_presets():
+ """Perfiles iniciales Santa Clara. Se pueden personalizar luego desde Usuarios y Roles."""
+ def P(mod,*acts): return [(mod,a) for a in acts]
+ perfiles={
+  'ADMINISTRADOR':[(m,a) for m in MODULES for a in ACTIONS],
+  'RECEPCION':P('PACIENTES','VER','CREAR','EDITAR')+P('RECEPCION','VER','CREAR','EDITAR','FACTURAR')+P('AGENDA','VER','CREAR','EDITAR','COBRAR','LLAMAR')+P('CONSULTORIO','VER')+P('VENTAS','VER','CREAR','FACTURAR')+P('CAJA','VER','ABRIR_CAJA','CERRAR_CAJA','COBRAR'),
+  'INGRESO_PACIENTES':P('PACIENTES','VER','CREAR','EDITAR')+P('ADMISION','VER','CREAR','EDITAR','ALTA','TRASLADAR')+P('QUIROFANO','VER','CREAR','EDITAR')+P('URGENCIAS','VER','TRASLADAR')+P('FACTURACION','VER','FACTURAR'),
+  # Compatibilidad con usuarios que ya tenían el rol ADMISION.
+  'ADMISION':P('PACIENTES','VER','CREAR','EDITAR')+P('ADMISION','VER','CREAR','EDITAR','ALTA','TRASLADAR')+P('QUIROFANO','VER','CREAR','EDITAR')+P('URGENCIAS','VER','TRASLADAR')+P('FACTURACION','VER','FACTURAR'),
+  'MEDICO':P('PACIENTES','VER')+P('AGENDA','VER','LLAMAR')+P('CONSULTORIO','VER','CREAR','EDITAR','LLAMAR')+P('HISTORIA','VER','HISTORIA')+P('ADMISION','VER')+P('URGENCIAS','VER')+P('QUIROFANO','VER'),
+  'ENFERMERIA':P('PACIENTES','VER')+P('ADMISION','VER','EDITAR')+P('URGENCIAS','VER','EDITAR')+P('QUIROFANO','VER')+P('ENFERMERIA','VER','CREAR','EDITAR','SOLICITAR')+P('FARMACIA','VER'),
+  'URGENCIAS':P('PACIENTES','VER','CREAR','EDITAR')+P('URGENCIAS','VER','CREAR','EDITAR','TRASLADAR')+P('ADMISION','VER','CREAR','TRASLADAR')+P('ENFERMERIA','VER','CREAR','SOLICITAR')+P('FACTURACION','VER','FACTURAR'),
+  'QUIROFANO':P('PACIENTES','VER')+P('ADMISION','VER')+P('QUIROFANO','VER','CREAR','EDITAR')+P('ENFERMERIA','VER','CREAR','SOLICITAR')+P('FARMACIA','VER'),
+  'FARMACIA':P('FARMACIA','VER','CREAR','EDITAR','AUTORIZAR','ENTREGAR')+P('STOCK','VER','CREAR','EDITAR')+P('COMPRAS','VER'),
+  'VENTAS_CAJA':P('PACIENTES','VER','CREAR','EDITAR')+P('VENTAS','VER','CREAR','EDITAR','FACTURAR','ANULAR')+P('FACTURACION','VER','FACTURAR')+P('FINANZAS','VER','EDITAR')+P('CAJA','VER','ABRIR_CAJA','CERRAR_CAJA','COBRAR')+P('INFORMES','VER'),
+  'COMPRAS':P('COMPRAS','VER','CREAR','EDITAR','ANULAR')+P('STOCK','VER','CREAR','EDITAR')+P('FINANZAS','VER','EDITAR')+P('INFORMES','VER'),
+  'CONTABILIDAD':P('CONTABILIDAD','VER','CREAR','EDITAR')+P('FINANZAS','VER','CREAR','EDITAR')+P('COMPRAS','VER')+P('VENTAS','VER')+P('INFORMES','VER'),
+  'LABORATORIO':P('PACIENTES','VER')+P('LABORATORIO','VER','CREAR','EDITAR','FACTURAR')+P('VENTAS','VER')+P('INFORMES','VER'),
+  'INFORMES':P('INFORMES','VER')+P('VENTAS','VER')+P('COMPRAS','VER')+P('FINANZAS','VER')+P('CONTABILIDAD','VER')+P('PACIENTES','VER'),
+ }
+ # Eliminar permisos referidos a módulos/acciones que no existan en esta versión.
+ return {r:[(m,a) for m,a in ps if m in MODULES and a in ACTIONS] for r,ps in perfiles.items()}
+
+def init_role_presets():
+ """Crea roles estándar faltantes y les asigna permisos solo si todavía están vacíos.
+ Nunca pisa personalizaciones existentes al iniciar el ERP."""
+ c=db(); perfiles=_perms_role_presets()
+ for nombre,perms in perfiles.items():
+  row=c.execute('select id from roles where nombre=?',(nombre,)).fetchone()
+  if row: rid=row['id']
+  else:
+   rid=c.execute('insert into roles(nombre,descripcion,activo) values(?,?,1)',(nombre,'Perfil predeterminado Santa Clara')).lastrowid
+  tiene=c.execute('select 1 from permisos_rol where rol_id=? limit 1',(rid,)).fetchone()
+  if not tiene:
+   for mod,act in perms:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid,mod,act))
  c.commit();c.close()
 
 def caja_abierta(c,usuario=None):
@@ -2456,6 +2501,7 @@ init_v1357_codigo_barras()
 init_consultorio()
 init_modular()
 init_v12()
+init_role_presets()
 # V13.4.5: Ventas contado/crédito, recibos y Recepción+Caja unificados. Migración incremental, sin borrar datos.
 c=db()
 for tabla,col,defn in [
@@ -3105,11 +3151,19 @@ def administrar_cajas():
   try:
    op=request.form.get('op','guardar')
    if op=='guardar':
-    nombre=(request.form.get('nombre') or '').strip(); cid=request.form.get('id')
+    nombre=(request.form.get('nombre') or '').strip(); cid=request.form.get('id'); punto_id=request.form.get('punto_id')
     if not nombre:raise ValueError('El nombre de la caja es obligatorio')
-    if cid:c.execute('update cajas set nombre=?,activo=? where id=?',(nombre,1 if request.form.get('activo','1')=='1' else 0,int(cid)))
-    else:c.execute('insert into cajas(nombre,activo) values(?,1)',(nombre,))
-    flash('Caja guardada correctamente.')
+    if cid:
+     cid=int(cid);c.execute('update cajas set nombre=?,activo=? where id=?',(nombre,1 if request.form.get('activo','1')=='1' else 0,cid))
+    else:
+     cid=c.execute('insert into cajas(nombre,activo) values(?,1)',(nombre,)).lastrowid
+    if punto_id:
+     pt=c.execute("select * from sifen_puntos_expedicion where id=? and activo=1 and autorizado_dnit=1 and factura_electronica=1",(int(punto_id),)).fetchone()
+     if not pt:raise ValueError('Seleccione un punto de expedición SIFEN activo y autorizado por DNIT.')
+     c.execute('insert or replace into caja_punto_expedicion(caja_id,punto_id,codigo_area,actualizado_en) values(?,?,?,?)',(cid,pt['id'],str(pt['punto_expedicion']).zfill(3),now()))
+    elif request.form.get('exigir_punto')=='1':
+     raise ValueError('Cada caja que factura debe tener un punto de expedición vinculado.')
+    flash('Caja y punto de expedición guardados correctamente.')
    elif op=='desactivar':
     cid=int(request.form['id'])
     if c.execute("select 1 from aperturas_caja where caja_id=? and estado='ABIERTA' limit 1",(cid,)).fetchone():raise ValueError('No puede desactivar una caja con apertura activa')
@@ -3117,7 +3171,12 @@ def administrar_cajas():
    c.commit()
   except Exception as e:c.rollback();flash(str(e))
   c.close();return redirect('/ventas/cajas')
- rows=c.execute('select * from cajas order by activo desc,nombre').fetchall();c.close();return render_template('cash_registers.html',rows=rows)
+ rows=c.execute("""select ca.*,m.punto_id,p.establecimiento,p.punto_expedicion,p.descripcion punto_descripcion,p.timbrado
+                   from cajas ca left join caja_punto_expedicion m on m.caja_id=ca.id
+                   left join sifen_puntos_expedicion p on p.id=m.punto_id
+                   order by ca.activo desc,ca.nombre""").fetchall()
+ puntos=c.execute("select * from sifen_puntos_expedicion where activo=1 and autorizado_dnit=1 and factura_electronica=1 order by establecimiento,punto_expedicion").fetchall()
+ c.close();return render_template('cash_registers.html',rows=rows,puntos=puntos)
 
 @app.get('/ventas/cierres-caja')
 def historial_cierres_caja():
@@ -3872,6 +3931,7 @@ def caja_central_facturacion():
   cuentas=c.execute(sql,(like,like,like,digits or q)).fetchall()
   consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' and (p.nombre like ? or coalesce(p.documento,'') like ? or cast(k.consulta_id as text)=?) order by k.id desc limit 100""",(like,like,digits or q)).fetchall()
  else:
+  cuentas=c.execute("""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100""").fetchall()
   consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' order by k.id desc limit 100""").fetchall()
  c.close();return render_template('cash_account_locator.html',q=q,cuentas=cuentas,consultas=consultas)
 
@@ -3882,7 +3942,9 @@ def caja_central_detalle(aid):
  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall();total=sum(float(x['total_pyg'] or 0) for x in items);rem=c.execute("select * from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
  if not rem:
   numero='REM-'+str(aid);c.execute('insert or ignore into remisiones_internas(numero,fecha,paciente_id,admision_id,creado_por,creado_en) values(?,?,?,?,?,?)',(numero,a['fecha'],a['paciente_id'],aid,session.get('user'),now()));c.commit();rem=c.execute('select * from remisiones_internas where numero=?',(numero,)).fetchone()
- puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem,puntos=puntos,terceros=terceros)
+ ap=caja_abierta(c);punto_caja=None
+ if ap:punto_caja=c.execute('select p.* from caja_punto_expedicion m join sifen_puntos_expedicion p on p.id=m.punto_id where m.caja_id=?',(ap['caja_id'],)).fetchone()
+ terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();c.close();return render_template('cash_account_detail.html',a=a,items=items,total=total,rem=rem,terceros=terceros,ap=ap,punto_caja=punto_caja)
 
 @app.post('/ventas/caja-central/<int:aid>/facturar')
 def caja_central_facturar(aid):
@@ -3894,7 +3956,7 @@ def caja_central_facturar(aid):
   if not c.execute('select id from terceros where id=?',(receptor_id,)).fetchone():raise ValueError('Seleccione un receptor válido para la factura.')
   items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
   if not items:raise ValueError('La cuenta no tiene cargos pendientes para facturar.')
-  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'RECEPCION',True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,str(a['tipo'] or 'OTROS'),exigir_caja=True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip()
   total=sum(float(x['total_pyg'] or 0) for x in items)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de facturar una cuenta en efectivo.')
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
@@ -3910,9 +3972,11 @@ def caja_central_facturar(aid):
 
 @app.get('/ventas/caja-central/consultorio/<int:pid>')
 def caja_central_consultorio_detalle(pid):
- c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();c.close()
+ c=db();x=c.execute("select k.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone();ap=caja_abierta(c);punto_caja=None
+ if ap:punto_caja=c.execute('select p.* from caja_punto_expedicion m join sifen_puntos_expedicion p on p.id=m.punto_id where m.caja_id=?',(ap['caja_id'],)).fetchone()
+ terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();c.close()
  if not x:flash('La prestación ya fue facturada o no existe.');return redirect('/ventas/caja-central')
- return render_template('cash_consult_detail.html',x=x,puntos=puntos,terceros=terceros)
+ return render_template('cash_consult_detail.html',x=x,terceros=terceros,ap=ap,punto_caja=punto_caja)
 
 @app.post('/ventas/caja-central/consultorio/<int:pid>/facturar')
 def caja_central_consultorio_facturar(pid):
@@ -3924,7 +3988,7 @@ def caja_central_consultorio_facturar(pid):
   facturado_a=request.form.get('facturado_a_tercero_id');receptor_id=int(facturado_a) if facturado_a else int(x['tercero_id'])
   receptor=c.execute('select id,nombre from terceros where id=?',(receptor_id,)).fetchone()
   if not receptor:raise ValueError('Seleccione un receptor válido para la factura.')
-  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'RECEPCION',True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
+  fecha=request.form.get('fecha') or datetime.date.today().isoformat();numero,punto_factura=_siguiente_numero_factura(c,_punto_id_caja_actual(c,'CONSULTORIO',exigir_caja=True));medio=(request.form.get('forma_cobro') or 'Efectivo').strip();total=float(x['importe_pyg'] or 0)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de cobrar en efectivo.')
   base,iva=desglosar_iva_incluido(total,10)
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
@@ -4074,7 +4138,7 @@ def init_v13977_puntos_por_caja():
         n=str(caja['nombre'] or '').upper()
         cod='001' if 'RECEP' in n else ('002' if 'URGEN' in n else '003')
         pt=c.execute('select id from sifen_puntos_expedicion where establecimiento=? and punto_expedicion=?',(est,cod)).fetchone()
-        if pt:c.execute('insert or replace into caja_punto_expedicion(caja_id,punto_id,codigo_area,actualizado_en) values(?,?,?,?)',(caja['id'],pt['id'],cod,now()))
+        if pt:c.execute('insert or ignore into caja_punto_expedicion(caja_id,punto_id,codigo_area,actualizado_en) values(?,?,?,?)',(caja['id'],pt['id'],cod,now()))
     # Bloqueo de duplicados futuros. No altera documentos históricos ya existentes.
     c.executescript("""
     CREATE TRIGGER IF NOT EXISTS trg_ventas_numero_unico_ins BEFORE INSERT ON ventas
@@ -4101,14 +4165,18 @@ def _punto_id_codigo(c,codigo):
     if not int(p['autorizado_dnit'] or 0):raise ValueError('El punto '+est+'-'+str(codigo).zfill(3)+' debe verificarse/habilitarse como autorizado DNIT antes de emitir.')
     return p['id']
 
-def _punto_id_caja_actual(c,origen_area=None,forzar_recepcion=False):
-    if forzar_recepcion:return _punto_id_codigo(c,'001')
+def _punto_id_caja_actual(c,origen_area=None,forzar_recepcion=False,exigir_caja=False):
     ap=caja_abierta(c)
     if ap:
-        m=c.execute('select punto_id from caja_punto_expedicion where caja_id=?',(ap['caja_id'],)).fetchone()
-        if m:return m['punto_id']
-        nom=str(ap['caja'] or '').upper();cod='001' if 'RECEP' in nom else ('002' if 'URGEN' in nom else '003')
-        return _punto_id_codigo(c,cod)
+        m=c.execute("""select m.punto_id,p.establecimiento,p.punto_expedicion,p.activo,p.autorizado_dnit,p.factura_electronica
+                       from caja_punto_expedicion m join sifen_puntos_expedicion p on p.id=m.punto_id
+                       where m.caja_id=?""",(ap['caja_id'],)).fetchone()
+        if not m:raise ValueError('La caja '+str(ap['caja'])+' no tiene un punto de expedición SIFEN vinculado. Configúrelo en Administración de Cajas.')
+        if not (_flag_activo(m['activo']) and _flag_activo(m['autorizado_dnit']) and _flag_activo(m['factura_electronica'])):
+            raise ValueError('El punto SIFEN vinculado a la caja '+str(ap['caja'])+' no está activo/autorizado para Factura Electrónica.')
+        return m['punto_id']
+    if exigir_caja:raise ValueError('Debe abrir una caja para facturar. La numeración se toma del punto de expedición vinculado a esa caja.')
+    if forzar_recepcion:return _punto_id_codigo(c,'001')
     area=str(origen_area or '').upper()
     if 'URGEN' in area:return _punto_id_codigo(c,'002')
     if area in ('INTERNACION','QUIROFANO','CIRUGIA','CIRUGÍAS','OTROS'):return _punto_id_codigo(c,'003')
@@ -7734,3 +7802,5 @@ def sifen_preparacion():
  c.close();return render_template('sifen_readiness.html',checks=checks,bloqueos=bloqueos)
 
 ROUTE_MODULE.update({'puesta_en_marcha':'CONFIG_SANATORIO','puesta_marcha_reset':'CONFIG_SANATORIO','puesta_marcha_importar':'CONFIG_SANATORIO','sifen_preparacion':'FACTURACION'})
+
+# ===== V13.10.10: caja universal + correlatividad por punto vinculado =====
