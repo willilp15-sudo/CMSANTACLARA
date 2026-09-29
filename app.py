@@ -1788,9 +1788,15 @@ def admin_usuarios_roles():
    for rid in request.form.getlist('rol_ids'):
     if rid:c.execute('insert or ignore into usuario_roles(usuario_id,rol_id) values(?,?)',(uid,int(rid)))
   elif kind=='cajas':
-   uid=int(request.form['usuario_id']);c.execute('delete from usuario_cajas where usuario_id=?',(uid,))
+   uid=int(request.form['usuario_id'])
+   caja_ids=[]
    for cid in request.form.getlist('caja_ids'):
-    if cid:c.execute('insert or ignore into usuario_cajas(usuario_id,caja_id,activo) values(?,?,1)',(uid,int(cid)))
+    if cid and int(cid) not in caja_ids:caja_ids.append(int(cid))
+   if len(caja_ids)>2:
+    flash('Cada usuario puede tener como máximo dos cajas asignadas.')
+    c.close();return redirect('/admin/usuarios-roles')
+   c.execute('delete from usuario_cajas where usuario_id=?',(uid,))
+   for cid in caja_ids:c.execute('insert or ignore into usuario_cajas(usuario_id,caja_id,activo) values(?,?,1)',(uid,cid))
   c.commit();audit_change(c,'CONFIGURAR','SEGURIDAD',0,despues={'tipo':kind});c.commit();c.close();return redirect('/admin/usuarios-roles')
  users=c.execute('select * from usuarios order by nombre').fetchall();roles=c.execute('select * from roles where activo=1 order by nombre').fetchall()
  selected_role=int(request.args.get('rol_id') or (roles[0]['id'] if roles else 0))
@@ -3254,6 +3260,23 @@ def caja_autorizada(c,caja_id,usuario=None):
  return any(int(x['id'])==int(caja_id) for x in cajas_autorizadas_usuario(c,usuario))
 
 init_v139110_cajas_usuario()
+
+# ===== V13.10.16: hasta dos cajas por usuario + dos cajas de Recepción compartiendo correlatividad =====
+def init_v131016_cajas_recepcion():
+ c=db()
+ # Las dos cajas físicas de Recepción comparten el mismo punto fiscal 001-001.
+ # El correlativo pertenece al punto de expedición, no a la caja ni al usuario.
+ for nombre in ('Caja Recepción 1','Caja Recepción 2'):
+  c.execute('insert or ignore into cajas(nombre,activo) values(?,1)',(nombre,))
+ punto=c.execute("select id,punto_expedicion from sifen_puntos_expedicion where establecimiento='001' and punto_expedicion='001' and activo=1 order by id limit 1").fetchone()
+ if punto:
+  for nombre in ('Caja Recepción 1','Caja Recepción 2'):
+   caja=c.execute('select id from cajas where nombre=?',(nombre,)).fetchone()
+   if caja and not c.execute('select 1 from caja_punto_expedicion where caja_id=?',(caja['id'],)).fetchone():
+    c.execute('insert into caja_punto_expedicion(caja_id,punto_id,codigo_area,actualizado_en) values(?,?,?,?)',(caja['id'],punto['id'],'001',now()))
+ c.commit();c.close()
+
+init_v131016_cajas_recepcion()
 
 # ===== V13.5.6: facturación consolidada a Seguros Médicos =====
 def init_v1356_seguros():
