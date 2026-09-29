@@ -5993,6 +5993,52 @@ def _nc_numero(c,punto_id=None):
     c.execute("update sifen_correlativos set proximo=? where tipo='NCE' and punto_id=?",(n+1,p['id']))
     return f"{str(p['establecimiento']).zfill(3)}-{str(p['punto_expedicion']).zfill(3)}-{str(n).zfill(7)}",p
 
+# ===== V13.10.13: reversión segura de stock por devolución =====
+def init_v131013_reversion_stock():
+    c=db()
+    cols={r['name'] for r in c.execute('pragma table_info(notas_credito_ventas)').fetchall()}
+    for col,defn in [('tipo_ajuste_stock',"TEXT NOT NULL DEFAULT 'SIN_STOCK'"),('stock_ajustado','INTEGER NOT NULL DEFAULT 0')]:
+        if col not in cols:c.execute(f'alter table notas_credito_ventas add column {col} {defn}')
+    vcols={r['name'] for r in c.execute('pragma table_info(ventas)').fetchall()}
+    for col,defn in [('stock_revertido_anulacion','INTEGER NOT NULL DEFAULT 0')]:
+        if col not in vcols:c.execute(f'alter table ventas add column {col} {defn}')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.13-reversion-stock-devolucion',?)",(now(),))
+    c.commit();c.close()
+init_v131013_reversion_stock()
+
+def _reintegrar_stock_nce(c,nid,fecha=None):
+    n=c.execute('select * from notas_credito_ventas where id=?',(nid,)).fetchone()
+    if not n or int(n['stock_ajustado'] or 0): return 0
+    if str(n['tipo_ajuste_stock'] or '').upper()!='DEVOLUCION': return 0
+    filas=c.execute('select * from nota_credito_venta_items where nota_id=?',(nid,)).fetchall();movs=0
+    for it in filas:
+        if not it['producto_id']: continue
+        prod=c.execute('select * from productos where id=?',(it['producto_id'],)).fetchone()
+        if not prod or not _producto_controla_stock(prod): continue
+        qty=float(it['cantidad'] or 0)
+        if qty<=0: continue
+        c.execute('update productos set stock=stock+? where id=?',(qty,it['producto_id']))
+        c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'DEVOLUCION_NCE',?)",(fecha or n['fecha'] or datetime.date.today().isoformat(),it['producto_id'],'ENTRADA_DEVOLUCION',qty,float(prod['costo_pyg'] or 0),nid))
+        movs+=1
+    c.execute('update notas_credito_ventas set stock_ajustado=1 where id=?',(nid,))
+    return movs
+
+def _reintegrar_stock_anulacion(c,venta_id,fecha=None):
+    v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
+    if not v or int(v['stock_revertido_anulacion'] or 0): return 0
+    filas=c.execute('select * from venta_items where venta_id=?',(venta_id,)).fetchall();movs=0
+    for it in filas:
+        if not it['producto_id']: continue
+        prod=c.execute('select * from productos where id=?',(it['producto_id'],)).fetchone()
+        if not prod or not _producto_controla_stock(prod): continue
+        qty=float(it['cantidad'] or 0)
+        if qty<=0: continue
+        c.execute('update productos set stock=stock+? where id=?',(qty,it['producto_id']))
+        c.execute("insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,'ANULACION_VENTA',?)",(fecha or datetime.date.today().isoformat(),it['producto_id'],'ENTRADA_ANULACION',qty,float(prod['costo_pyg'] or 0),venta_id))
+        movs+=1
+    c.execute('update ventas set stock_revertido_anulacion=1 where id=?',(venta_id,))
+    return movs
+
 @app.route('/ventas/<int:venta_id>/nota-credito',methods=['GET','POST'])
 def nota_credito_venta(venta_id):
     c=db();v=c.execute("select v.*,t.nombre cliente,t.ruc from ventas v left join terceros t on t.id=v.cliente_id where v.id=?",(venta_id,)).fetchone()
@@ -6002,6 +6048,8 @@ def nota_credito_venta(venta_id):
       try:
        motivo=(request.form.get('motivo') or '').strip()
        if not motivo:raise ValueError('Indique el motivo de la Nota de Crédito.')
+       tipo_ajuste_stock=(request.form.get('tipo_ajuste_stock') or 'SIN_STOCK').upper()
+       if tipo_ajuste_stock not in ('DEVOLUCION','SIN_STOCK'):raise ValueError('Tipo de ajuste de inventario inválido.')
        seleccion=[];total=0
        for it in items:
         q=float(request.form.get(f'qty_{it["id"]}') or 0)
@@ -6011,6 +6059,8 @@ def nota_credito_venta(venta_id):
        if not seleccion:raise ValueError('Seleccione al menos un ítem/cantidad a acreditar.')
        numero,p=_nc_numero(c,v['sifen_punto_id']);cur=c.execute("insert into notas_credito_ventas(venta_id,fecha,numero,motivo,total,estado,estado_sifen,creado_en,usuario) values(?,?,?,?,?,'EMITIDA','PENDIENTE_ENVIO',?,?)",(venta_id,datetime.date.today().isoformat(),numero,motivo,total,now(),session.get('user')));nid=cur.lastrowid
        for it,q,t in seleccion:c.execute("insert into nota_credito_venta_items(nota_id,venta_item_id,producto_id,descripcion,cantidad,precio,total,iva_pct) values(?,?,?,?,?,?,?,?)",(nid,it['id'],it['producto_id'],it['nombre'] or 'Ítem',q,it['precio'],t,it['iva_pct']))
+       c.execute('update notas_credito_ventas set tipo_ajuste_stock=? where id=?',(tipo_ajuste_stock,nid))
+       if tipo_ajuste_stock=='DEVOLUCION': _reintegrar_stock_nce(c,nid,datetime.date.today().isoformat())
        cdc=_generar_cdc_test_complementario(c,'05',datetime.date.today().isoformat(),numero,p['id'],'NCE',nid)
        c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'NCE','TEST_GENERADO' if cdc else 'PENDIENTE_ENVIO',f'NC {numero} asociada a factura {v["numero"]}; CDC TEST '+str(cdc) if cdc else f'NC {numero} pendiente de integración SIFEN'))
        c.commit();flash(('Nota de Crédito emitida con CDC DE PRUEBA: '+cdc) if cdc else 'Nota de Crédito registrada. SIFEN no está en ambiente TEST.');c.close();return redirect(f'/notas-credito/ventas/{nid}/pdf')
@@ -6131,6 +6181,7 @@ def anular_factura_venta(venta_id):
       if str(v['estado'] or '').upper()=='ANULADA' and not es_aprob: raise ValueError('La factura interna ya está anulada.')
       motivo=(request.form.get('motivo') or '').strip()
       if len(motivo)<5: raise ValueError('Indique un motivo de cancelación de al menos 5 caracteres.')
+      devolver_stock=(request.form.get('devolver_stock') or '')=='1'
       if es_aprob:
        cfg=c.execute('select * from sifen_config where id=1').fetchone()
        if not str(v['cdc'] or '').strip(): raise ValueError('La factura aprobada no tiene CDC; no se puede registrar el evento.')
@@ -6141,13 +6192,14 @@ def anular_factura_venta(venta_id):
        if parsed['codigo']=='0600':
         c.execute("update ventas set estado='ANULADA',estado_sifen='CANCELADO',motivo_anulacion=?,fecha_anulacion=?,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,now(),parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
         c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','CANCELADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · 0600 {parsed["mensaje"]}'))
-        flash('SIFEN registró correctamente la cancelación (0600). La factura fue marcada CANCELADA.')
+        movs=_reintegrar_stock_anulacion(c,venta_id) if devolver_stock else 0
+        flash('SIFEN registró correctamente la cancelación (0600). La factura fue marcada CANCELADA.'+(' Stock de productos reintegrado.' if devolver_stock and movs else ''))
        else:
         c.execute("update ventas set estado=case when upper(coalesce(estado,''))='ANULADA' then 'EMITIDA' else estado end,estado_sifen='APROBADO',motivo_anulacion=?,fecha_anulacion=NULL,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
         c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','RECHAZADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · {parsed["codigo"]} {parsed["mensaje"]}'))
         flash('SIFEN NO canceló la factura: '+str(parsed['codigo'])+' · '+str(parsed['mensaje'])+'. La factura permanece APROBADA.')
       else:
-       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id)); flash('Factura interna anulada. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.')
+       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id)); movs=_reintegrar_stock_anulacion(c,venta_id) if devolver_stock else 0; flash('Factura interna anulada. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.'+(' Stock de productos reintegrado.' if devolver_stock and movs else ''))
       c.commit()
     except Exception as e:
       c.rollback(); flash('Cancelación no realizada: '+str(e))
@@ -6832,14 +6884,66 @@ def _registrar_visacion(c,aseguradora_id,paciente_id,origen_tipo,origen_id,medic
       values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(fecha,hora,numero,int(aseguradora_id),paciente_id,int(mid),origen_tipo,int(origen_id),orig,guard,tipo,request.form.get('observacion_visacion'),session.get('user'),now()))
     return cur.lastrowid
 
+def _visaciones_reporte(c):
+    q=(request.args.get('q') or '').strip()
+    desde=(request.args.get('desde') or '').strip()
+    hasta=(request.args.get('hasta') or '').strip()
+    aseguradora_id=(request.args.get('aseguradora_id') or '').strip()
+    where=['1=1']; args=[]
+    if q:
+        where.append("(v.numero_visacion like ? or p.nombre like ? or coalesce(p.cedula,'') like ? or a.nombre like ? or m.nombre like ?)")
+        args += ['%'+q+'%']*5
+    if desde: where.append('v.fecha>=?'); args.append(desde)
+    if hasta: where.append('v.fecha<=?'); args.append(hasta)
+    if aseguradora_id: where.append('v.aseguradora_id=?'); args.append(int(aseguradora_id))
+    rows=c.execute("""select v.*,p.nombre paciente,coalesce(p.cedula,'') paciente_documento,
+      a.nombre aseguradora,m.nombre medico from seguro_visaciones v
+      left join pacientes p on p.id=v.paciente_id left join aseguradoras a on a.id=v.aseguradora_id
+      left join medicos m on m.id=v.medico_id where """+' and '.join(where)+" order by v.fecha desc,v.hora desc,v.id desc",args).fetchall()
+    return q,desde,hasta,aseguradora_id,rows
+
 @app.get('/seguros/visaciones')
 def seguro_visaciones():
-    c=db();q=(request.args.get('q') or '').strip();args=[];where='1=1'
-    if q:where="(v.numero_visacion like ? or p.nombre like ? or a.nombre like ? or m.nombre like ?)";args=['%'+q+'%']*4
-    rows=c.execute("""select v.*,p.nombre paciente,a.nombre aseguradora,m.nombre medico from seguro_visaciones v
-      left join pacientes p on p.id=v.paciente_id left join aseguradoras a on a.id=v.aseguradora_id left join medicos m on m.id=v.medico_id
-      where """+where+" order by v.fecha desc,v.hora desc,v.id desc limit 1000",args).fetchall();c.close()
-    return render_template('insurance_authorizations.html',rows=rows,q=q)
+    c=db();q,desde,hasta,aseguradora_id,rows=_visaciones_reporte(c)
+    aseguradoras=c.execute('select id,nombre from aseguradoras order by nombre').fetchall();c.close()
+    return render_template('insurance_authorizations.html',rows=rows[:1000],q=q,desde=desde,hasta=hasta,aseguradora_id=aseguradora_id,aseguradoras=aseguradoras)
+
+@app.get('/seguros/visaciones/excel')
+def seguro_visaciones_excel():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font,Alignment
+    from io import BytesIO
+    c=db();q,desde,hasta,aseguradora_id,rows=_visaciones_reporte(c);c.close()
+    wb=Workbook();ws=wb.active;ws.title='Visaciones'
+    headers=['Fecha','Hora','N.º Visación','Paciente','Documento','Seguro','Médico','Origen','ID Origen','Observación','Registrado por','Registrado en']
+    ws.append(headers)
+    for cell in ws[1]: cell.font=Font(bold=True); cell.alignment=Alignment(horizontal='center')
+    for r in rows:
+        ws.append([r['fecha'],r['hora'],r['numero_visacion'],r['paciente'] or '',r['paciente_documento'] or '',r['aseguradora'] or '',r['medico'] or '',r['origen_tipo'],r['origen_id'],r['observacion'] or '',r['creado_por'] or '',r['creado_en'] or ''])
+    ws.freeze_panes='A2';ws.auto_filter.ref=ws.dimensions
+    widths=[12,10,20,32,18,28,28,20,12,38,18,20]
+    for i,w in enumerate(widths,1): ws.column_dimensions[chr(64+i)].width=w
+    out=BytesIO();wb.save(out);out.seek(0)
+    return send_file(out,as_attachment=True,download_name=f'visaciones_{desde or "inicio"}_{hasta or "actual"}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+@app.get('/seguros/visaciones/pdf')
+def seguro_visaciones_pdf():
+    from reportlab.lib.pagesizes import A4,landscape
+    from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    from io import BytesIO
+    c=db();q,desde,hasta,aseguradora_id,rows=_visaciones_reporte(c);c.close()
+    out=BytesIO();doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=20,bottomMargin=20)
+    st=getSampleStyleSheet();periodo=f'{desde or "Inicio"} al {hasta or "Actual"}'
+    story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Registro de Visaciones',st['Title']),Paragraph(f'Período: {periodo} | Registros: {len(rows)}',st['Normal']),Spacer(1,8)]
+    data=[['Fecha/Hora','N.º Visación','Paciente','Documento','Seguro','Médico','Origen','Usuario']]
+    for r in rows:
+        data.append([f"{r['fecha']} {r['hora']}",r['numero_visacion'],r['paciente'] or '-',r['paciente_documento'] or '-',r['aseguradora'] or '-',r['medico'] or '-',f"{r['origen_tipo']} #{r['origen_id']}",r['creado_por'] or '-'])
+    t=Table(data,repeatRows=1,colWidths=[68,82,115,70,105,105,90,70])
+    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),.25,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]))
+    story.append(t);doc.build(story);out.seek(0)
+    return send_file(out,as_attachment=True,download_name=f'visaciones_{desde or "inicio"}_{hasta or "actual"}.pdf',mimetype='application/pdf')
 
 @app.get('/seguros/visaciones/<int:vid>/archivo')
 def seguro_visacion_archivo(vid):
@@ -6862,7 +6966,7 @@ def seguro_pendiente_visacion(spid):
         c.close();return redirect('/seguros/facturar')
     meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();c.close();return render_template('insurance_authorization_form.html',sp=sp,meds=meds)
 
-ROUTE_MODULE.update({'seguro_visaciones':'FACTURACION','seguro_visacion_archivo':'FACTURACION','seguro_pendiente_visacion':'FACTURACION'})
+ROUTE_MODULE.update({'seguro_visaciones':'FACTURACION','seguro_visaciones_excel':'FACTURACION','seguro_visaciones_pdf':'FACTURACION','seguro_visacion_archivo':'FACTURACION','seguro_pendiente_visacion':'FACTURACION'})
 
 
 # ===== V13.9.70 - Llamador independiente + histórico =====

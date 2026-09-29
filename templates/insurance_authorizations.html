@@ -1,1 +1,17 @@
-{% extends 'base.html' %}{% block title %}Visaciones de Seguros{% endblock %}{% block content %}<div class="card" style="max-width:1500px;margin:18px auto"><h2>🛡️ Visaciones de Seguros</h2><p>Registro central de autorizaciones/visaciones vinculadas a prestaciones por seguro.</p><form method="get" class="grid"><input name="q" value="{{q}}" placeholder="N.º visación, paciente, seguro o médico"><button>Buscar</button></form><table><tr><th>Fecha/Hora</th><th>N.º Visación</th><th>Paciente</th><th>Seguro</th><th>Médico</th><th>Origen</th><th>Archivo</th></tr>{% for v in rows %}<tr><td>{{v.fecha}} {{v.hora}}</td><td><b>{{v.numero_visacion}}</b></td><td>{{v.paciente or '-'}}</td><td>{{v.aseguradora or '-'}}</td><td>{{v.medico or '-'}}</td><td>{{v.origen_tipo}} #{{v.origen_id}}</td><td>{% if v.archivo_guardado %}<a class="btn secondary" target="_blank" href="/seguros/visaciones/{{v.id}}/archivo">📎 Ver</a>{% else %}-{% endif %}</td></tr>{% else %}<tr><td colspan="7">Sin visaciones registradas.</td></tr>{% endfor %}</table></div>{% endblock %}
+{% extends 'base.html' %}{% block title %}Visaciones de Seguros{% endblock %}{% block content %}
+<div class="card" style="max-width:1500px;margin:18px auto">
+<h2>🛡️ Registro de Visaciones de Seguros</h2><p>Registro central de autorizaciones/visaciones vinculadas a prestaciones por seguro.</p>
+<form method="get" class="grid" style="grid-template-columns:2fr 1fr 1fr 1.5fr auto;align-items:end">
+<label>Buscar<input name="q" value="{{q}}" placeholder="N.º visación, paciente, CI, seguro o médico"></label>
+<label>Desde<input type="date" name="desde" value="{{desde}}"></label>
+<label>Hasta<input type="date" name="hasta" value="{{hasta}}"></label>
+<label>Seguro<select name="aseguradora_id"><option value="">Todos</option>{% for a in aseguradoras %}<option value="{{a.id}}" {% if aseguradora_id|string==a.id|string %}selected{% endif %}>{{a.nombre}}</option>{% endfor %}</select></label>
+<button>🔎 Filtrar</button>
+</form>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">
+<a class="btn" href="/seguros/visaciones/pdf?q={{q|urlencode}}&desde={{desde}}&hasta={{hasta}}&aseguradora_id={{aseguradora_id}}">📄 Descargar PDF</a>
+<a class="btn secondary" href="/seguros/visaciones/excel?q={{q|urlencode}}&desde={{desde}}&hasta={{hasta}}&aseguradora_id={{aseguradora_id}}">📊 Descargar Excel</a>
+<span style="align-self:center"><b>{{rows|length}}</b> registro(s) mostrados</span>
+</div>
+<div style="overflow:auto"><table><tr><th>Fecha/Hora</th><th>N.º Visación</th><th>Paciente</th><th>Documento</th><th>Seguro</th><th>Médico</th><th>Origen</th><th>Registrado por</th><th>Archivo</th></tr>{% for v in rows %}<tr><td>{{v.fecha}} {{v.hora}}</td><td><b>{{v.numero_visacion}}</b></td><td>{{v.paciente or '-'}}</td><td>{{v.paciente_documento or '-'}}</td><td>{{v.aseguradora or '-'}}</td><td>{{v.medico or '-'}}</td><td>{{v.origen_tipo}} #{{v.origen_id}}</td><td>{{v.creado_por or '-'}}</td><td>{% if v.archivo_guardado %}<a class="btn secondary" target="_blank" href="/seguros/visaciones/{{v.id}}/archivo">📎 Ver</a>{% else %}-{% endif %}</td></tr>{% else %}<tr><td colspan="9">Sin visaciones registradas para los filtros seleccionados.</td></tr>{% endfor %}</table></div>
+</div>{% endblock %}
