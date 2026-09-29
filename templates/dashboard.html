@@ -2,21 +2,64 @@
 {% block title %}Centro de Operaciones{% endblock %}
 {% block content %}
 <section class="sc-home">
-  <div class="sc-home-head"><div><h1>Centro de Operaciones</h1><p>Accesos directos a los procesos diarios de Centro Médico Santa Clara.</p></div><div class="sc-home-badge">Grupo Santa Clara S.A.</div></div>
+  <div class="sc-home-head"><div><h1>Centro de Operaciones</h1><p>Accesos directos habilitados para su usuario.</p></div><div class="sc-home-badge">Grupo Santa Clara S.A.</div></div>
   <div class="sc-flow-grid">
+    {% if has_perm('VENTAS','VER') or has_perm('RECEPCION','VER') or has_perm('CAJA','VER') or has_perm('FACTURACION','VER') %}
     <a class="sc-flow-card" href="/ventas/recepcion-caja"><span>🧾</span><b>Recepción y Ventas</b><small>Registrar, cobrar y facturar al paciente</small></a>
+    {% endif %}
+    {% if has_perm('AGENDA','VER') %}
     <a class="sc-flow-card" href="/agendamiento"><span>📅</span><b>Agenda</b><small>Turnos, médicos y pacientes del día</small></a>
+    {% endif %}
+    {% if has_perm('ADMISION','VER') or has_perm('ENFERMERIA','VER') %}
     <a class="sc-flow-card" href="/internacion/panel"><span>🏥</span><b>Internación</b><small>Admisiones, salas, consumos y altas</small></a>
+    {% endif %}
+    {% if has_perm('FARMACIA','VER') %}
     <a class="sc-flow-card" href="/farmacia-solicitudes"><span>💊</span><b>Farmacia</b><small>Solicitudes, entregas y movimientos</small></a>
+    {% endif %}
+    {% if has_perm('COMPRAS','VER') %}
     <a class="sc-flow-card" href="/compras"><span>🛒</span><b>Compras</b><small>Proveedores, compras y cuentas a pagar</small></a>
+    {% endif %}
+    {% if has_perm('FINANZAS','VER') or has_perm('CAJA','VER') %}
     <a class="sc-flow-card" href="/finanzas"><span>💰</span><b>Tesorería</b><small>Cajas, bancos, cobros y pagos</small></a>
+    {% endif %}
+    {% if has_perm('FACTURACION','VER') or has_perm('USUARIOS','ADMINISTRAR') %}
     <a class="sc-flow-card" href="/sifen/monitor"><span>⚡</span><b>SIFEN</b><small>Documentos electrónicos y estados</small></a>
+    {% endif %}
+    {% if has_perm('INFORMES','VER') %}
     <a class="sc-flow-card" href="/informes"><span>📊</span><b>Informes</b><small>Indicadores operativos y administrativos</small></a>
+    {% endif %}
   </div>
-  <div class="sc-workflow"><h2>Flujos principales</h2><div class="sc-workflow-grid">
-    <div><b>Consulta particular</b><p>Agenda → Recepción → Atención → Cobro → Factura → SIFEN</p></div>
-    <div><b>Internación</b><p>Admisión → Cama → Consumos → Alta → Facturación → Cobro</p></div>
-    <div><b>Abastecimiento</b><p>Compra → Recepción → Stock → Cuenta proveedor → Pago</p></div>
-  </div></div>
+
+  {% if (has_perm('COMPRAS','VER') or has_perm('FINANZAS','VER')) and cuentas_semana %}
+  <div class="card" style="margin-top:16px">
+    <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
+      <div>
+        <h2 style="margin:0 0 4px">⏰ Cuentas a pagar de la semana</h2>
+        <div class="muted">Las cuentas vencidas permanecen en esta lista hasta que su saldo quede cancelado.</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <span class="badge">Vencidas: {{ resumen_cxp.vencidas }}</span>
+        <span class="badge">Esta semana: {{ resumen_cxp.semana }}</span>
+        <a class="btn" href="/compras/pagos-proveedores">Registrar pago</a>
+      </div>
+    </div>
+    <div style="overflow:auto;margin-top:12px">
+      <table>
+        <thead><tr><th>Estado</th><th>Vencimiento</th><th>Proveedor</th><th>Documento</th><th>Moneda</th><th style="text-align:right">Saldo</th><th></th></tr></thead>
+        <tbody>
+        {% for r in cuentas_semana %}
+          <tr>
+            <td><b>{{ 'VENCIDA' if r.alerta == 'VENCIDA' else 'VENCE ESTA SEMANA' }}</b></td>
+            <td>{{ r.fecha_vencimiento }}</td><td>{{ r.proveedor }}</td><td>{{ r.documento }}</td><td>{{ r.moneda or 'PYG' }}</td>
+            <td style="text-align:right">{{ r.saldo|money_local(r.moneda or 'PYG') }}</td>
+            <td><a class="btn secondary" href="/compras/pagos-proveedores?proveedor_id={{ r.tercero_id if r.tercero_id is defined else '' }}">Pagar</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
 </section>
 {% endblock %}

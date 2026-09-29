@@ -273,7 +273,30 @@ def login():
 def logout():session.clear();return redirect('/login')
 @app.route('/')
 def home():
- return render_template('dashboard.html')
+ # V13.10.15: recordatorio semanal de cuentas a pagar.
+ # Solo se consulta para usuarios con acceso a Compras o Finanzas.
+ cuentas_semana=[]; resumen_cxp={'vencidas':0,'semana':0,'total':0.0}
+ if user_has('COMPRAS','VER') or user_has('FINANZAS','VER'):
+  c=db()
+  hoy=datetime.date.today(); inicio=hoy-datetime.timedelta(days=hoy.weekday()); fin=inicio+datetime.timedelta(days=6)
+  cuentas_semana=c.execute("""
+   select x.id,x.compra_id,x.tercero_id,x.moneda,x.importe,x.saldo,x.estado,
+          t.nombre proveedor,t.ruc,coalesce(cp.numero,'-') documento,
+          cp.fecha fecha_documento,cp.fecha_vencimiento,
+          case when date(cp.fecha_vencimiento)<date(?) then 'VENCIDA' else 'SEMANA' end alerta
+   from cxp x
+   join terceros t on t.id=x.tercero_id
+   left join compras cp on cp.id=x.compra_id
+   where x.saldo>0.0001 and cp.fecha_vencimiento is not null and trim(cp.fecha_vencimiento)<>''
+     and date(cp.fecha_vencimiento)<=date(?)
+   order by date(cp.fecha_vencimiento),t.nombre,x.id
+  """,(hoy.isoformat(),fin.isoformat())).fetchall()
+  resumen_cxp={'vencidas':sum(1 for r in cuentas_semana if r['alerta']=='VENCIDA'),
+               'semana':sum(1 for r in cuentas_semana if r['alerta']=='SEMANA'),
+               'total':sum(float(r['saldo'] or 0) for r in cuentas_semana),
+               'inicio':inicio.isoformat(),'fin':fin.isoformat()}
+  c.close()
+ return render_template('dashboard.html',cuentas_semana=cuentas_semana,resumen_cxp=resumen_cxp)
 @app.route('/tipos-cambio',methods=['GET','POST'])
 def tipos_cambio():
  c=db()
