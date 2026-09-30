@@ -6028,6 +6028,8 @@ def contabilidad_plantilla(tipo):
         h=['codigo','nombre','tipo','moneda','imputable','cuenta_padre','naturaleza','activa']; ejemplo=[['1.1.01.001','Caja Recepción','ACTIVO','PYG',1,'1.1.01','DEUDORA',1]]
     elif tipo=='diario':
         h=['fecha','asiento','concepto','cuenta','debe_pyg','haber_pyg','moneda','tipo_cambio','detalle']; ejemplo=[['2026-09-25','IMP-0001','Asiento importado','1.1.01',100000,0,'PYG',1,'Detalle'],['2026-09-25','IMP-0001','Asiento importado','4.1.02',0,100000,'PYG',1,'Detalle']]
+    elif tipo in ('compras','ventas'):
+        h=['Documento','Fecha','RUC','Tercero','Moneda','Tipo Cambio','Condicion','Forma Pago','Referencia','Saldo','Producto Codigo','Producto Nombre','Clasificacion','Cantidad',('Costo Unitario' if tipo=='compras' else 'Precio Unitario'),'IVA %','Timbrado','Vencimiento Timbrado','Fecha Vencimiento']; ejemplo=[['001-001-0000001',datetime.date.today().isoformat(),'80000000-0','EJEMPLO','PYG',1,'CREDITO','Transferencia','',100000,'COD001','Producto o servicio','PRODUCTO',1,100000,10,'','','']]
     else:return ('Plantilla no encontrada',404)
     return _tabular_xlsx('Plantilla '+tipo,h,ejemplo,f'plantilla_{tipo}_contabilidad.xlsx')
 
@@ -7440,7 +7442,8 @@ def _imp_csv_field_limit():
         except OverflowError:
             limit //= 10
 
-def _imp_libro_iva_compras_resumen(vals):
+def _imp_libro_iva_resumen(vals, tipo="COMPRA"):
+    tipo=(tipo or "COMPRA").upper()
     """Reconoce reportes CSV/XLS tipo 'Listado I.V.A. Compras Detallado'.
     Puede haber títulos/filtros antes de la cabecera. Convierte cada factura en
     líneas contables sintéticas (10%, 5% y exenta), siempre como SERVICIO para
@@ -7479,16 +7482,18 @@ def _imp_libro_iva_compras_resumen(vals):
         if not any(ch.isdigit() for ch in doc): continue
         if ruc and dv and '-' not in ruc:ruc=ruc+'-'+dv
         tim=_imp_norm(get(pt)); b10=_imp_num(get(p10)); iv10=_imp_num(get(pi10)); b5=_imp_num(get(p5)); iv5=_imp_num(get(pi5)); ex=_imp_num(get(pex)); total=_imp_num(get(ptotal))
-        common={'documento':doc,'fecha':fecha,'ruc':ruc,'tercero':proveedor,'moneda':'PYG','tipo_cambio':'1','condicion':'CREDITO','forma_pago':'','referencia':'','saldo':str(total),'timbrado':tim,'clasificacion':'SERVICIO','cantidad':'1','_libro_iva_compras':'1'}
+        common={'documento':doc,'fecha':fecha,'ruc':ruc,'tercero':proveedor,'moneda':'PYG','tipo_cambio':'1','condicion':'CREDITO','forma_pago':'','referencia':'','saldo':str(total),'timbrado':tim,'clasificacion':'SERVICIO','cantidad':'1','_libro_iva_resumen':'1'}
+        unitkey='costo_unitario' if tipo=='COMPRA' else 'precio_unitario'
+        pref='Compra' if tipo=='COMPRA' else 'Venta'
         if b10 or iv10:
-            x=dict(common);x.update(producto_codigo='IMP-IVA10',producto_nombre='Compra importada gravada IVA 10%',costo_unitario=str(b10+iv10),importe=str(b10+iv10),iva_pct='10');out.append(x)
+            x=dict(common);x.update(producto_codigo='IMP-IVA10',producto_nombre=pref+' importada gravada IVA 10%',importe=str(b10+iv10),iva_pct='10');x[unitkey]=str(b10+iv10);out.append(x)
         if b5 or iv5:
-            x=dict(common);x.update(producto_codigo='IMP-IVA5',producto_nombre='Compra importada gravada IVA 5%',costo_unitario=str(b5+iv5),importe=str(b5+iv5),iva_pct='5');out.append(x)
+            x=dict(common);x.update(producto_codigo='IMP-IVA5',producto_nombre=pref+' importada gravada IVA 5%',importe=str(b5+iv5),iva_pct='5');x[unitkey]=str(b5+iv5);out.append(x)
         if ex:
-            x=dict(common);x.update(producto_codigo='IMP-EXENTA',producto_nombre='Compra importada exenta',costo_unitario=str(ex),importe=str(ex),iva_pct='0');out.append(x)
+            x=dict(common);x.update(producto_codigo='IMP-EXENTA',producto_nombre=pref+' importada exenta',importe=str(ex),iva_pct='0');x[unitkey]=str(ex);out.append(x)
         # Si el reporte trae total pero sus columnas tributarias están vacías, conservarlo como exento/sin desglose.
         if total and not (b10 or iv10 or b5 or iv5 or ex):
-            x=dict(common);x.update(producto_codigo='IMP-SIN-DESGLOSE',producto_nombre='Compra importada sin desglose tributario',costo_unitario=str(total),importe=str(total),iva_pct='0');out.append(x)
+            x=dict(common);x.update(producto_codigo='IMP-SIN-DESGLOSE',producto_nombre=pref+' importada sin desglose tributario',importe=str(total),iva_pct='0');x[unitkey]=str(total);out.append(x)
     return out
 
 def _imp_gasparini_compras_sin_cabecera(vals):
@@ -7545,7 +7550,7 @@ def _imp_gasparini_compras_sin_cabecera(vals):
         })
     return out
 
-def _imp_rows(file):
+def _imp_rows(file, tipo=None):
     name=(file.filename or '').lower();data=file.read();vals=[]
     sig=data[:16]
     is_zip=data[:2]==b'PK'; is_ole=data[:8]==bytes.fromhex('D0CF11E0A1B11AE1')
@@ -7583,7 +7588,7 @@ def _imp_rows(file):
     except Exception as ex:
         raise ValueError('No se pudo interpretar el archivo. Formato real no reconocido: '+str(ex))
     if not vals:return []
-    libro_rows=_imp_libro_iva_compras_resumen(vals)
+    libro_rows=_imp_libro_iva_resumen(vals,tipo) if tipo in ('COMPRA','VENTA') else []
     if libro_rows:
         return libro_rows
     gas_rows=_imp_gasparini_compras_sin_cabecera(vals)
@@ -7774,14 +7779,14 @@ def _imp_producto_tx(c,r,tipo):
   if 'clasificacion' in cols:c.execute("update productos set clasificacion='SERVICIO' where id=?",(pid,))
  return pid
 
-def _tx_rows(file):
- rows=_imp_rows(file)
+def _tx_rows(file,tipo):
+ rows=_imp_rows(file,tipo)
  if not rows:return []
  # En archivos sin detalle explícito, no inventar productos.
  return rows
 
 def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
- rows=_tx_rows(file);c=db();nuevos=actualizados=sin_cambios=errores=0;mensajes=[]
+ rows=_tx_rows(file,tipo);c=db();nuevos=actualizados=sin_cambios=errores=0;mensajes=[]
  groups={}
  for r in rows:
   doc=_imp_norm(r.get('documento'));ruc=_imp_norm(r.get('ruc'));ter=_imp_norm(r.get('tercero'))
