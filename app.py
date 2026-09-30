@@ -7329,6 +7329,57 @@ def _imp_csv_field_limit():
         except OverflowError:
             limit //= 10
 
+def _imp_libro_iva_compras_resumen(vals):
+    """Reconoce reportes CSV/XLS tipo 'Listado I.V.A. Compras Detallado'.
+    Puede haber títulos/filtros antes de la cabecera. Convierte cada factura en
+    líneas contables sintéticas (10%, 5% y exenta), siempre como SERVICIO para
+    no afectar stock. No inventa productos físicos.
+    """
+    if not vals:
+        return []
+    header_i=None; idx={}
+    for i,row in enumerate(vals[:80]):
+        keys=[_imp_key(x) for x in row]
+        # Cabecera real: N° Factura, N° Timbrado, Fecha, Proveedor, R.U.C., dv...
+        if any(k in ('n_factura','nro_factura','numero_factura','factura') for k in keys) and 'fecha' in keys and any(k in ('proveedor','razon_social','nombre') for k in keys) and any(k in ('r_u_c','ruc') for k in keys):
+            header_i=i
+            for j,k in enumerate(keys):
+                if k and k not in idx: idx[k]=j
+            break
+    if header_i is None:
+        return []
+    def pos(*names):
+        for n in names:
+            if n in idx:return idx[n]
+        return None
+    pf=pos('n_factura','nro_factura','numero_factura','factura'); pt=pos('n_timbrado','nro_timbrado','numero_timbrado','timbrado')
+    pfecha=pos('fecha'); pp=pos('proveedor','razon_social','nombre'); pr=pos('r_u_c','ruc'); pdv=pos('dv')
+    p10=pos('total_10','total10'); pi10=pos('total_i_v_a_10','total_iva_10','iva_10')
+    p5=pos('total_5','total5'); pi5=pos('total_i_v_a_5','total_iva_5','iva_5')
+    pex=pos('total_exentas','total_exento','exentas','exento'); ptotal=pos('total_general','total_factura','importe_total')
+    if None in (pf,pfecha,pp,pr) or ptotal is None:
+        return []
+    out=[]
+    for row in vals[header_i+1:]:
+        def get(i): return row[i] if i is not None and i < len(row) else ''
+        doc=_imp_norm(get(pf)); fecha=_imp_norm(get(pfecha)); proveedor=_imp_norm(get(pp)); ruc=_imp_norm(get(pr)); dv=_imp_norm(get(pdv))
+        if not doc or not fecha or not proveedor: continue
+        # Evita filas de totales/pies del reporte.
+        if not any(ch.isdigit() for ch in doc): continue
+        if ruc and dv and '-' not in ruc:ruc=ruc+'-'+dv
+        tim=_imp_norm(get(pt)); b10=_imp_num(get(p10)); iv10=_imp_num(get(pi10)); b5=_imp_num(get(p5)); iv5=_imp_num(get(pi5)); ex=_imp_num(get(pex)); total=_imp_num(get(ptotal))
+        common={'documento':doc,'fecha':fecha,'ruc':ruc,'tercero':proveedor,'moneda':'PYG','tipo_cambio':'1','condicion':'CREDITO','forma_pago':'','referencia':'','saldo':str(total),'timbrado':tim,'clasificacion':'SERVICIO','cantidad':'1','_libro_iva_compras':'1'}
+        if b10 or iv10:
+            x=dict(common);x.update(producto_codigo='IMP-IVA10',producto_nombre='Compra importada gravada IVA 10%',costo_unitario=str(b10+iv10),importe=str(b10+iv10),iva_pct='10');out.append(x)
+        if b5 or iv5:
+            x=dict(common);x.update(producto_codigo='IMP-IVA5',producto_nombre='Compra importada gravada IVA 5%',costo_unitario=str(b5+iv5),importe=str(b5+iv5),iva_pct='5');out.append(x)
+        if ex:
+            x=dict(common);x.update(producto_codigo='IMP-EXENTA',producto_nombre='Compra importada exenta',costo_unitario=str(ex),importe=str(ex),iva_pct='0');out.append(x)
+        # Si el reporte trae total pero sus columnas tributarias están vacías, conservarlo como exento/sin desglose.
+        if total and not (b10 or iv10 or b5 or iv5 or ex):
+            x=dict(common);x.update(producto_codigo='IMP-SIN-DESGLOSE',producto_nombre='Compra importada sin desglose tributario',costo_unitario=str(total),importe=str(total),iva_pct='0');out.append(x)
+    return out
+
 def _imp_gasparini_compras_sin_cabecera(vals):
     """Reconoce el CSV detallado de Compras Gasparini sin fila de encabezados.
     Mapea únicamente campos verificables del archivo; no inventa forma de pago.
@@ -7421,6 +7472,9 @@ def _imp_rows(file):
     except Exception as ex:
         raise ValueError('No se pudo interpretar el archivo. Formato real no reconocido: '+str(ex))
     if not vals:return []
+    libro_rows=_imp_libro_iva_compras_resumen(vals)
+    if libro_rows:
+        return libro_rows
     gas_rows=_imp_gasparini_compras_sin_cabecera(vals)
     if gas_rows:
         return gas_rows
