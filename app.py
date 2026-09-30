@@ -5603,9 +5603,29 @@ def init_v13945_rrhh():
     c.commit();c.close()
 init_v13945_rrhh()
 
+# ===== V13.10.18: modelos y numeracion anual de contratos RR.HH. =====
+def init_v131018_contratos():
+    c=db()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS rrhh_modelos_contrato(
+      id INTEGER PRIMARY KEY,nombre TEXT NOT NULL,archivo_guardado TEXT NOT NULL,archivo_original TEXT,
+      activo INTEGER DEFAULT 1,creado_por TEXT,creado_en TEXT);
+    CREATE TABLE IF NOT EXISTS rrhh_contratos(
+      id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,modelo_id INTEGER,anio INTEGER NOT NULL,secuencia INTEGER NOT NULL,
+      numero TEXT NOT NULL,fecha TEXT NOT NULL,archivo_guardado TEXT,estado TEXT DEFAULT 'VIGENTE',
+      creado_por TEXT,creado_en TEXT,anulado_por TEXT,anulado_en TEXT,
+      UNIQUE(anio,secuencia),UNIQUE(numero));
+    CREATE INDEX IF NOT EXISTS idx_rrhh_contratos_empleado ON rrhh_contratos(empleado_id);
+    """)
+    c.commit();c.close()
+    os.makedirs(os.path.join(DATA_DIR,'rrhh','modelos_contrato'),exist_ok=True)
+    os.makedirs(os.path.join(DATA_DIR,'rrhh','contratos_generados'),exist_ok=True)
+init_v131018_contratos()
+
 ROUTE_MODULE.update({
  'rrhh_inicio':'RRHH','rrhh_funcionarios':'RRHH','rrhh_funcionario_editar':'RRHH','rrhh_asistencia':'RRHH','rrhh_novedades':'RRHH',
- 'rrhh_liquidaciones':'RRHH','rrhh_liquidar':'RRHH','rrhh_liquidacion_detalle':'RRHH','rrhh_liquidacion_pdf':'RRHH','rrhh_configuracion':'RRHH','rrhh_informes':'RRHH'
+ 'rrhh_liquidaciones':'RRHH','rrhh_liquidar':'RRHH','rrhh_liquidacion_detalle':'RRHH','rrhh_liquidacion_pdf':'RRHH','rrhh_configuracion':'RRHH','rrhh_informes':'RRHH',
+ 'rrhh_contratos':'RRHH','rrhh_modelos_contrato':'RRHH','rrhh_generar_contrato':'RRHH','rrhh_descargar_contrato':'RRHH','rrhh_anular_contrato':'RRHH'
 })
 
 def _rrhh_perm(accion='VER'):
@@ -5633,12 +5653,17 @@ def rrhh_funcionarios():
     c=db()
     if request.method=='POST':
         f=request.form
-        c.execute('''insert into empleados(nombre,documento,ruc,fecha_nacimiento,telefono,email,direccion,cargo,departamento,fecha_ingreso,tipo_contrato,salario_base,ips_numero,ips_activo,turno,estado,observacion,creado_en,actualizado_en)
+        cur=c.execute('''insert into empleados(nombre,documento,ruc,fecha_nacimiento,telefono,email,direccion,cargo,departamento,fecha_ingreso,tipo_contrato,salario_base,ips_numero,ips_activo,turno,estado,observacion,creado_en,actualizado_en)
         values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),'ACTIVO',f.get('observacion'),now(),now()))
-        c.commit();c.close();audit('RRHH_FUNCIONARIO_CREAR',f.get('nombre',''));flash('Funcionario registrado.');return redirect('/rrhh/funcionarios')
+        eid=cur.lastrowid;c.commit();c.close();audit('RRHH_FUNCIONARIO_CREAR',f.get('nombre',''));flash('Funcionario registrado.')
+        if f.get('generar_contrato') and f.get('modelo_contrato_id'):
+            try:
+                _,numero=_rrhh_crear_contrato(eid,int(f.get('modelo_contrato_id')),f.get('fecha_ingreso') or None);flash(f'Contrato Nº {numero} generado.')
+            except Exception as ex:flash('Funcionario guardado, pero no se pudo generar el contrato: '+str(ex))
+        return redirect('/rrhh/funcionarios')
     q=(request.args.get('q') or '').strip();params=[];sql='select * from empleados'
     if q: sql+=' where nombre like ? or documento like ? or cargo like ? or departamento like ?';params=['%'+q+'%']*4
-    sql+=' order by estado desc,nombre';rows=c.execute(sql,params).fetchall();c.close();return render_template('rrhh_employees.html',rows=rows,q=q)
+    sql+=' order by estado desc,nombre';rows=c.execute(sql,params).fetchall();modelos=c.execute("select id,nombre from rrhh_modelos_contrato where activo=1 order by nombre").fetchall();c.close();return render_template('rrhh_employees.html',rows=rows,q=q,modelos=modelos)
 
 @app.route('/rrhh/funcionarios/<int:i>/editar',methods=['GET','POST'])
 def rrhh_funcionario_editar(i):
@@ -5648,6 +5673,92 @@ def rrhh_funcionario_editar(i):
     if request.method=='POST':
         f=request.form;c.execute('''update empleados set nombre=?,documento=?,ruc=?,fecha_nacimiento=?,telefono=?,email=?,direccion=?,cargo=?,departamento=?,fecha_ingreso=?,fecha_salida=?,tipo_contrato=?,salario_base=?,ips_numero=?,ips_activo=?,turno=?,estado=?,observacion=?,actualizado_en=? where id=?''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('fecha_salida'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),f.get('estado','ACTIVO'),f.get('observacion'),now(),i));c.commit();c.close();audit('RRHH_FUNCIONARIO_EDITAR',str(i));flash('Ficha actualizada.');return redirect('/rrhh/funcionarios')
     c.close();return render_template('rrhh_employee_edit.html',e=e)
+
+def _rrhh_reemplazar_docx(doc, valores):
+    def reemplazar_parrafo(parrafo):
+        texto=''.join(r.text for r in parrafo.runs)
+        if not texto:return
+        nuevo=texto
+        for k,v in valores.items():nuevo=nuevo.replace('{{'+k+'}}',str(v if v is not None else ''))
+        if nuevo!=texto:
+            if parrafo.runs:
+                parrafo.runs[0].text=nuevo
+                for r in parrafo.runs[1:]:r.text=''
+            else:parrafo.text=nuevo
+    def recorrer_tabla(tabla):
+        for fila in tabla.rows:
+            for celda in fila.cells:
+                for p in celda.paragraphs:reemplazar_parrafo(p)
+                for t in celda.tables:recorrer_tabla(t)
+    for p in doc.paragraphs:reemplazar_parrafo(p)
+    for t in doc.tables:recorrer_tabla(t)
+    for sec in doc.sections:
+        for p in sec.header.paragraphs:reemplazar_parrafo(p)
+        for t in sec.header.tables:recorrer_tabla(t)
+        for p in sec.footer.paragraphs:reemplazar_parrafo(p)
+        for t in sec.footer.tables:recorrer_tabla(t)
+
+def _rrhh_crear_contrato(empleado_id,modelo_id,fecha=None):
+    from docx import Document
+    fecha=fecha or datetime.date.today().isoformat();anio=int(fecha[:4]);c=db()
+    try:
+        c.execute('BEGIN IMMEDIATE')
+        e=c.execute('select * from empleados where id=?',(empleado_id,)).fetchone();m=c.execute('select * from rrhh_modelos_contrato where id=? and activo=1',(modelo_id,)).fetchone()
+        if not e or not m:raise ValueError('Funcionario o modelo de contrato no disponible.')
+        sig=c.execute('select coalesce(max(secuencia),0)+1 n from rrhh_contratos where anio=?',(anio,)).fetchone()['n'];numero=f'{int(sig):02d}/{anio}'
+        cur=c.execute('insert into rrhh_contratos(empleado_id,modelo_id,anio,secuencia,numero,fecha,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?)',(empleado_id,modelo_id,anio,sig,numero,fecha,'VIGENTE',session.get('user'),now()));cid=cur.lastrowid
+        origen=os.path.join(DATA_DIR,'rrhh','modelos_contrato',m['archivo_guardado']);nombre=f'Contrato_{int(sig):02d}_{anio}_Funcionario_{empleado_id}.docx';destino=os.path.join(DATA_DIR,'rrhh','contratos_generados',nombre)
+        doc=Document(origen);valores={'NUMERO_CONTRATO':numero,'FECHA_CONTRATO':fecha,'NOMBRE_FUNCIONARIO':e['nombre'] or '','CEDULA':e['documento'] or '','RUC':e['ruc'] or '','CARGO':e['cargo'] or '','DEPARTAMENTO':e['departamento'] or '','SALARIO':_money_local(e['salario_base'] or 0,'PYG'),'FECHA_INGRESO':e['fecha_ingreso'] or '','DOMICILIO':e['direccion'] or '','TELEFONO':e['telefono'] or '','EMAIL':e['email'] or '','HORARIO':e['turno'] or '','TIPO_CONTRATO':e['tipo_contrato'] or '','EMPRESA':'Grupo Santa Clara S.A.','CENTRO_MEDICO':'Centro Médico Santa Clara'}
+        _rrhh_reemplazar_docx(doc,valores);doc.save(destino);c.execute('update rrhh_contratos set archivo_guardado=? where id=?',(nombre,cid));c.commit();audit('RRHH_CONTRATO_GENERAR',f'{numero} - {e["nombre"]}');return cid,numero
+    except Exception:c.rollback();raise
+    finally:c.close()
+
+@app.route('/rrhh/modelos-contrato',methods=['GET','POST'])
+def rrhh_modelos_contrato():
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    c=db()
+    if request.method=='POST':
+        f=request.files.get('archivo');nombre=(request.form.get('nombre') or '').strip()
+        if not f or not f.filename:flash('Seleccione un archivo DOCX.');c.close();return redirect('/rrhh/modelos-contrato')
+        if not f.filename.lower().endswith('.docx'):flash('El modelo debe ser un archivo .docx de Microsoft Word.');c.close();return redirect('/rrhh/modelos-contrato')
+        original=secure_filename(f.filename);token=datetime.datetime.now().strftime('%Y%m%d%H%M%S')+'_'+secrets.token_hex(4)+'_'+original;ruta=os.path.join(DATA_DIR,'rrhh','modelos_contrato',token);f.save(ruta)
+        try:
+            from docx import Document;Document(ruta)
+        except Exception:
+            try:os.remove(ruta)
+            except OSError:pass
+            flash('El archivo no es un DOCX válido.');c.close();return redirect('/rrhh/modelos-contrato')
+        c.execute('insert into rrhh_modelos_contrato(nombre,archivo_guardado,archivo_original,activo,creado_por,creado_en) values(?,?,?,?,?,?)',(nombre or original,token,original,1,session.get('user'),now()));c.commit();flash('Modelo de contrato importado.')
+    modelos=c.execute('select * from rrhh_modelos_contrato order by activo desc,id desc').fetchall();c.close();return render_template('rrhh_contract_templates.html',modelos=modelos)
+
+@app.get('/rrhh/contratos')
+def rrhh_contratos():
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();anio=int(request.args.get('anio') or datetime.date.today().year);rows=c.execute('''select x.*,e.nombre funcionario,e.documento,m.nombre modelo from rrhh_contratos x join empleados e on e.id=x.empleado_id left join rrhh_modelos_contrato m on m.id=x.modelo_id where x.anio=? order by x.secuencia desc''',(anio,)).fetchall();c.close();return render_template('rrhh_contracts.html',rows=rows,anio=anio)
+
+@app.post('/rrhh/funcionarios/<int:i>/generar-contrato')
+def rrhh_generar_contrato(i):
+    if not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
+    try:
+        _,numero=_rrhh_crear_contrato(i,int(request.form['modelo_id']),request.form.get('fecha') or None);flash(f'Contrato Nº {numero} generado correctamente.')
+    except Exception as ex:flash('No se pudo generar el contrato: '+str(ex))
+    return redirect('/rrhh/contratos')
+
+@app.get('/rrhh/contratos/<int:i>/descargar')
+def rrhh_descargar_contrato(i):
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();r=c.execute('select * from rrhh_contratos where id=?',(i,)).fetchone();c.close()
+    if not r or not r['archivo_guardado']:return ('Contrato no encontrado',404)
+    ruta=os.path.join(DATA_DIR,'rrhh','contratos_generados',r['archivo_guardado'])
+    if not os.path.isfile(ruta):return ('Archivo de contrato no encontrado',404)
+    return send_file(ruta,as_attachment=True,download_name=r['archivo_guardado'],mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+
+@app.post('/rrhh/contratos/<int:i>/anular')
+def rrhh_anular_contrato(i):
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    c=db();r=c.execute('select numero,estado from rrhh_contratos where id=?',(i,)).fetchone()
+    if r and r['estado']!='ANULADO':c.execute("update rrhh_contratos set estado='ANULADO',anulado_por=?,anulado_en=? where id=?",(session.get('user'),now(),i));c.commit();audit('RRHH_CONTRATO_ANULAR',r['numero']);flash('Contrato anulado administrativamente. Su número no será reutilizado.')
+    c.close();return redirect('/rrhh/contratos')
 
 @app.route('/rrhh/asistencia',methods=['GET','POST'])
 def rrhh_asistencia():
