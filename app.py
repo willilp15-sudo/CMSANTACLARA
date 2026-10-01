@@ -7546,6 +7546,60 @@ def _imp_gasparini_libro_compras_16(vals, tipo=None):
             x=dict(common);x.update(producto_codigo='IMP-GASP-EXENTA',producto_nombre='Compra Gasparini exenta',costo_unitario=str(ex),importe=str(ex),iva_pct='0');out.append(x)
     return out
 
+def _imp_gasparini_libro_ventas_16(vals, tipo=None):
+    """Reconoce el Libro IVA Ventas de Gasparini exportado como CSV ANSI/CP1252,
+    sin fila de encabezados y con 16 columnas fijas.
+
+    Estructura verificada con VENTAS 2026.csv:
+      1 tipo-registro, 2 RUC/documento, 3 DV, 4 cliente, 5 sucursal,
+      6 factura, 7 fecha, 8 base 10%, 9 IVA 10%, 10 base 5%, 11 IVA 5%,
+      12 exentas, 13 total, 14-15 indicadores internos, 16 timbrado.
+
+    Se importa como histórico tributario: no transmite a SIFEN, no genera CDC y
+    crea líneas sintéticas SERVICIO para que nunca afecte existencias físicas.
+    """
+    import re
+    if (tipo or '').upper() != 'VENTA' or not vals:
+        return []
+    muestra=[r for r in vals[:min(40,len(vals))] if any(_imp_norm(x) for x in r)]
+    if not muestra or not all(len(r)==16 for r in muestra):
+        return []
+    def _es_fila(r):
+        if len(r)!=16:return False
+        return (bool(re.fullmatch(r'\d{3}-\d{3}-\d{6,8}',_imp_norm(r[5]))) and
+                bool(re.fullmatch(r'\d{2}/\d{2}/\d{4}',_imp_norm(r[6]))) and
+                bool(_imp_norm(r[3])) and bool(re.fullmatch(r'\d+',_imp_norm(r[15]))))
+    if sum(1 for r in muestra if _es_fila(r)) < max(1,int(len(muestra)*.90)):
+        return []
+    out=[]
+    for r in vals:
+        if not _es_fila(r):continue
+        ruc=_imp_norm(r[1]);dv=_imp_norm(r[2]);cliente=_imp_norm(r[3])
+        # Gasparini usa 000/000000... para consumidor sin RUC. No unir clientes
+        # distintos bajo un RUC ficticio: en esos casos la relación se hace por nombre.
+        if ruc and set(ruc)=={'0'}: ruc=''
+        else: ruc=ruc.lstrip('0') or ''
+        if ruc and dv:ruc=ruc+'-'+dv
+        doc=_imp_norm(r[5]);fecha=_imp_norm(r[6]);tim=_imp_norm(r[15])
+        b10=_imp_num(r[7]);iv10=_imp_num(r[8]);b5=_imp_num(r[9]);iv5=_imp_num(r[10]);ex=_imp_num(r[11]);total=_imp_num(r[12])
+        # Validación de integridad del registro: el total Gasparini debe coincidir
+        # con las bases + IVA + exentas (tolerancia de Gs. 1 por redondeo).
+        calc=b10+iv10+b5+iv5+ex
+        if total<=0:continue
+        if abs(calc-total)>1:continue
+        common={'documento':doc,'fecha':fecha,'ruc':ruc,'tercero':cliente,
+                'moneda':'PYG','tipo_cambio':'1','condicion':'CONTADO','forma_pago':'IMPORTACION_LIBRO_IVA',
+                'referencia':'Gasparini Libro IVA Ventas','saldo':'0','timbrado':tim,
+                'clasificacion':'SERVICIO','cantidad':'1','_gasparini_libro_iva_ventas_16':'1',
+                '_base10':str(b10),'_iva10':str(iv10),'_base5':str(b5),'_iva5':str(iv5),'_exenta':str(ex),'_total_fuente':str(total)}
+        if b10 or iv10:
+            x=dict(common);x.update(producto_codigo='IMP-GASP-VTA-IVA10',producto_nombre='Venta Gasparini gravada IVA 10%',precio_unitario=str(b10+iv10),importe=str(b10+iv10),iva_pct='10');out.append(x)
+        if b5 or iv5:
+            x=dict(common);x.update(producto_codigo='IMP-GASP-VTA-IVA5',producto_nombre='Venta Gasparini gravada IVA 5%',precio_unitario=str(b5+iv5),importe=str(b5+iv5),iva_pct='5');out.append(x)
+        if ex:
+            x=dict(common);x.update(producto_codigo='IMP-GASP-VTA-EXENTA',producto_nombre='Venta Gasparini exenta',precio_unitario=str(ex),importe=str(ex),iva_pct='0');out.append(x)
+    return out
+
 def _imp_gasparini_compras_sin_cabecera(vals):
     """Reconoce el CSV detallado de Compras Gasparini sin fila de encabezados.
     Mapea únicamente campos verificables del archivo; no inventa forma de pago.
@@ -7641,10 +7695,13 @@ def _imp_rows(file, tipo=None):
     libro_rows=_imp_libro_iva_resumen(vals,tipo) if tipo in ('COMPRA','VENTA') else []
     if libro_rows:
         return libro_rows
-    # Gasparini Libro IVA Compras: CSV de 16 columnas, CP1252 y sin cabecera.
+    # Gasparini Libro IVA: CSV de 16 columnas, CP1252 y sin cabecera.
     gas16_rows=_imp_gasparini_libro_compras_16(vals,tipo)
     if gas16_rows:
         return gas16_rows
+    gas16_vtas=_imp_gasparini_libro_ventas_16(vals,tipo)
+    if gas16_vtas:
+        return gas16_vtas
     gas_rows=_imp_gasparini_compras_sin_cabecera(vals)
     if gas_rows:
         return gas_rows
@@ -7869,10 +7926,13 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
      detalles.append((p,pid,qty,unit,base,pct,bruto))
     # En el Libro IVA Gasparini conservar exactamente los importes fiscales de origen.
     # El cálculo desde precio IVA incluido puede diferir centavos por redondeo.
-    if tipo=='COMPRA' and r0.get('_gasparini_libro_iva_16')=='1':
-     g10=sum(_imp_num(r.get('_base10')) for r in grp);i10=sum(_imp_num(r.get('_iva10')) for r in grp)
-     g5=sum(_imp_num(r.get('_base5')) for r in grp);i5=sum(_imp_num(r.get('_iva5')) for r in grp)
-     exento=sum(_imp_num(r.get('_exenta')) for r in grp);grav=g10+g5;iva=i10+i5;total=sum(_imp_num(r.get('_total_fuente')) for r in grp)
+    if ((tipo=='COMPRA' and r0.get('_gasparini_libro_iva_16')=='1') or
+        (tipo=='VENTA' and r0.get('_gasparini_libro_iva_ventas_16')=='1')):
+     # Una factura Gasparini puede producir varias líneas sintéticas; los totales
+     # fiscales de origen se repiten en ellas, por eso se toman una sola vez.
+     g10=_imp_num(r0.get('_base10'));i10=_imp_num(r0.get('_iva10'))
+     g5=_imp_num(r0.get('_base5'));i5=_imp_num(r0.get('_iva5'))
+     exento=_imp_num(r0.get('_exenta'));grav=g10+g5;iva=i10+i5;total=_imp_num(r0.get('_total_fuente'))
     if total<=0:raise ValueError('Total cero en '+doc)
     tab='compras' if tipo=='COMPRA' else 'ventas';fk='proveedor_id' if tipo=='COMPRA' else 'cliente_id'
     old=c.execute(f'select * from {tab} where numero=? and {fk}=? order by id limit 1',(doc,terid)).fetchone()
