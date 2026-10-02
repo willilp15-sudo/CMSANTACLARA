@@ -5700,7 +5700,10 @@ def rrhh_funcionarios():
         f=request.form
         cur=c.execute('''insert into empleados(nombre,documento,ruc,fecha_nacimiento,telefono,email,direccion,cargo,departamento,fecha_ingreso,tipo_contrato,salario_base,ips_numero,ips_activo,turno,estado,observacion,creado_en,actualizado_en)
         values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),'ACTIVO',f.get('observacion'),now(),now()))
-        eid=cur.lastrowid;c.commit();c.close();audit('RRHH_FUNCIONARIO_CREAR',f.get('nombre',''));flash('Funcionario registrado.')
+        eid=cur.lastrowid;c.commit();c.close()
+        firma=request.files.get('firma')
+        if firma and firma.filename:_rrhh_guardar_firma(eid,firma)
+        audit('RRHH_FUNCIONARIO_CREAR',f.get('nombre',''));flash('Funcionario registrado.')
         if f.get('generar_contrato') and f.get('modelo_contrato_id'):
             try:
                 _,numero=_rrhh_crear_contrato(eid,int(f.get('modelo_contrato_id')),f.get('fecha_ingreso') or None);flash(f'Contrato Nº {numero} generado.')
@@ -5716,7 +5719,11 @@ def rrhh_funcionario_editar(i):
     c=db();e=c.execute('select * from empleados where id=?',(i,)).fetchone()
     if not e:c.close();return ('Funcionario no encontrado',404)
     if request.method=='POST':
-        f=request.form;c.execute('''update empleados set nombre=?,documento=?,ruc=?,fecha_nacimiento=?,telefono=?,email=?,direccion=?,cargo=?,departamento=?,fecha_ingreso=?,fecha_salida=?,tipo_contrato=?,salario_base=?,ips_numero=?,ips_activo=?,turno=?,estado=?,observacion=?,actualizado_en=? where id=?''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('fecha_salida'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),f.get('estado','ACTIVO'),f.get('observacion'),now(),i));c.commit();c.close();audit('RRHH_FUNCIONARIO_EDITAR',str(i));flash('Ficha actualizada.');return redirect('/rrhh/funcionarios')
+        f=request.form;c.execute('''update empleados set nombre=?,documento=?,ruc=?,fecha_nacimiento=?,telefono=?,email=?,direccion=?,cargo=?,departamento=?,fecha_ingreso=?,fecha_salida=?,tipo_contrato=?,salario_base=?,ips_numero=?,ips_activo=?,turno=?,estado=?,observacion=?,actualizado_en=? where id=?''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('fecha_salida'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),f.get('estado','ACTIVO'),f.get('observacion'),now(),i));c.commit()
+        firma=request.files.get('firma')
+        c.close()
+        if firma and firma.filename:_rrhh_guardar_firma(i,firma)
+        audit('RRHH_FUNCIONARIO_EDITAR',str(i));flash('Ficha actualizada.');return redirect('/rrhh/funcionarios')
     c.close();return render_template('rrhh_employee_edit.html',e=e)
 
 def _rrhh_reemplazar_docx(doc, valores):
@@ -7302,6 +7309,14 @@ def init_v131025_productos_depositos():
  CREATE TABLE IF NOT EXISTS transferencias_deposito(id INTEGER PRIMARY KEY,numero TEXT UNIQUE,fecha TEXT,origen_id INTEGER,destino_id INTEGER,observacion TEXT,usuario TEXT,estado TEXT DEFAULT 'CONFIRMADA');
  CREATE TABLE IF NOT EXISTS transferencia_deposito_items(id INTEGER PRIMARY KEY,transferencia_id INTEGER,producto_id INTEGER,cantidad REAL);
  """)
+ # V13.10.26: responsables y firmas en transferencias
+ tcols={r['name'] for r in c.execute('pragma table_info(transferencias_deposito)').fetchall()}
+ for col,typ in [('responsable_entrega_id','INTEGER'),('responsable_recibe_id','INTEGER')]:
+  if col not in tcols:c.execute(f'alter table transferencias_deposito add column {col} {typ}')
+ ecols={r['name'] for r in c.execute('pragma table_info(empleados)').fetchall()}
+ for col,typ in [('firma_archivo','TEXT'),('firma_original','TEXT'),('firma_imagen','TEXT')]:
+  if col not in ecols:c.execute(f'alter table empleados add column {col} {typ}')
+ os.makedirs(os.path.join(DATA_DIR,'rrhh','firmas'),exist_ok=True)
  if not c.execute('select 1 from depositos_stock where es_principal=1').fetchone():c.execute("insert or ignore into depositos_stock(nombre,codigo,ubicacion,es_principal,activo,creado_en,creado_por) values('Farmacia Interna','FARMACIA','Centro Médico Santa Clara',1,1,?,'SISTEMA')",(now(),))
  c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.25-productos-depositos',?)",(now(),));c.commit();c.close()
 init_v131025_productos_depositos()
@@ -7333,13 +7348,34 @@ def deposito_estado(did):
  if not d or d['es_principal']:flash('El depósito principal no puede desactivarse.');c.close();return redirect('/farmacia/depositos')
  c.execute('update depositos_stock set activo=? where id=?',(0 if d['activo'] else 1,did));c.commit();c.close();return redirect('/farmacia/depositos')
 
+def _rrhh_guardar_firma(empleado_id, archivo):
+ if not archivo or not getattr(archivo,'filename',''):return None
+ ext=os.path.splitext(secure_filename(archivo.filename))[1].lower()
+ if ext not in ('.png','.jpg','.jpeg','.pdf'):raise ValueError('La firma debe ser PNG, JPG, JPEG o PDF.')
+ base=os.path.join(DATA_DIR,'rrhh','firmas');os.makedirs(base,exist_ok=True)
+ stem=f'firma_{int(empleado_id)}_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}'
+ original=os.path.join(base,stem+ext);archivo.save(original);imagen=original
+ if ext=='.pdf':
+  try:
+   import fitz
+   doc=fitz.open(original)
+   if len(doc)<1:raise ValueError('PDF de firma vacío.')
+   page=doc[0];pix=page.get_pixmap(matrix=fitz.Matrix(2,2),alpha=True);imagen=os.path.join(base,stem+'.png');pix.save(imagen);doc.close()
+  except Exception as e:
+   try:os.remove(original)
+   except Exception:pass
+   raise ValueError('No se pudo procesar el PDF de firma: '+str(e))
+ c=db();c.execute('update empleados set firma_archivo=?,firma_original=?,firma_imagen=?,actualizado_en=? where id=?',(original,archivo.filename,imagen,now(),empleado_id));c.commit();c.close();return imagen
+
 @app.route('/farmacia/transferencias',methods=['GET','POST'])
 def transferencias_deposito():
- c=db();deps=c.execute('select * from depositos_stock where activo=1 order by es_principal desc,nombre').fetchall();prods=c.execute('select * from productos where coalesce(activo,1)=1 order by nombre').fetchall()
+ c=db();deps=c.execute('select * from depositos_stock where activo=1 order by es_principal desc,nombre').fetchall();prods=c.execute('select * from productos where coalesce(activo,1)=1 order by nombre').fetchall();empleados=c.execute("select id,nombre,cargo,firma_imagen from empleados where estado='ACTIVO' order by nombre").fetchall()
  if request.method=='POST':
   try:
-   ori=int(request.form.get('origen_id') or 0);des=int(request.form.get('destino_id') or 0);pid=int(request.form.get('producto_id') or 0);qty=float(request.form.get('cantidad') or 0)
+   ori=int(request.form.get('origen_id') or 0);des=int(request.form.get('destino_id') or 0);pid=int(request.form.get('producto_id') or 0);qty=float(request.form.get('cantidad') or 0);rent=int(request.form.get('responsable_entrega_id') or 0);rrec=int(request.form.get('responsable_recibe_id') or 0)
    if not ori or not des or ori==des or not pid or qty<=0:raise ValueError('Revise origen, destino, producto y cantidad.')
+   if not rent or not rrec:raise ValueError('Seleccione responsable que entrega y responsable que recibe.')
+   if not c.execute('select 1 from empleados where id=? and estado=\'ACTIVO\'',(rent,)).fetchone() or not c.execute('select 1 from empleados where id=? and estado=\'ACTIVO\'',(rrec,)).fetchone():raise ValueError('Responsable inválido o inactivo.')
    prod=c.execute('select * from productos where id=?',(pid,)).fetchone()
    if not prod or not _producto_controla_stock(prod):raise ValueError('El ítem seleccionado no controla stock.')
    disp=_stock_en_deposito(c,pid,ori)
@@ -7348,13 +7384,42 @@ def transferencias_deposito():
    if ori!=prid:c.execute('insert into stock_deposito(producto_id,deposito_id,stock) values(?,?,?) on conflict(producto_id,deposito_id) do update set stock=stock-excluded.stock',(pid,ori,qty))
    if des!=prid:c.execute('insert into stock_deposito(producto_id,deposito_id,stock) values(?,?,?) on conflict(producto_id,deposito_id) do update set stock=stock+excluded.stock',(pid,des,qty))
    seq=int(c.execute('select coalesce(max(id),0)+1 from transferencias_deposito').fetchone()[0]);numero=f'TR-{datetime.datetime.now().year}-{seq:06d}'
-   tid=c.execute('insert into transferencias_deposito(numero,fecha,origen_id,destino_id,observacion,usuario,estado) values(?,?,?,?,?,?,?)',(numero,now(),ori,des,(request.form.get('observacion') or '').strip(),session.get('user'),'CONFIRMADA')).lastrowid
+   tid=c.execute('insert into transferencias_deposito(numero,fecha,origen_id,destino_id,observacion,usuario,estado,responsable_entrega_id,responsable_recibe_id) values(?,?,?,?,?,?,?,?,?)',(numero,now(),ori,des,(request.form.get('observacion') or '').strip(),session.get('user'),'CONFIRMADA',rent,rrec)).lastrowid
    c.execute('insert into transferencia_deposito_items(transferencia_id,producto_id,cantidad) values(?,?,?)',(tid,pid,qty));c.commit();flash('Transferencia '+numero+' registrada.')
   except Exception as e:c.rollback();flash('No se pudo transferir: '+str(e))
   c.close();return redirect(request.path)
- hist=c.execute('select t.*,o.nombre origen,d.nombre destino,p.nombre producto,i.cantidad from transferencias_deposito t join depositos_stock o on o.id=t.origen_id join depositos_stock d on d.id=t.destino_id join transferencia_deposito_items i on i.transferencia_id=t.id join productos p on p.id=i.producto_id order by t.id desc limit 200').fetchall();c.close();return render_template('stock_transfers.html',depositos=deps,productos=prods,rows=hist)
+ hist=c.execute('''select t.*,o.nombre origen,d.nombre destino,p.nombre producto,i.cantidad,ee.nombre responsable_entrega,er.nombre responsable_recibe from transferencias_deposito t join depositos_stock o on o.id=t.origen_id join depositos_stock d on d.id=t.destino_id join transferencia_deposito_items i on i.transferencia_id=t.id join productos p on p.id=i.producto_id left join empleados ee on ee.id=t.responsable_entrega_id left join empleados er on er.id=t.responsable_recibe_id order by t.id desc limit 200''').fetchall();c.close();return render_template('stock_transfers.html',depositos=deps,productos=prods,empleados=empleados,rows=hist)
 
-@app.get('/farmacia/inventario-depositos')
+@app.get('/farmacia/transferencias/<int:tid>/pdf')
+def transferencia_deposito_pdf(tid):
+ from reportlab.lib.pagesizes import A4
+ from reportlab.lib import colors
+ from reportlab.lib.styles import getSampleStyleSheet
+ from reportlab.lib.units import mm
+ from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image
+ c=db();t=c.execute('''select t.*,o.nombre origen,d.nombre destino,ee.nombre responsable_entrega,ee.cargo cargo_entrega,ee.firma_imagen firma_entrega,er.nombre responsable_recibe,er.cargo cargo_recibe,er.firma_imagen firma_recibe from transferencias_deposito t join depositos_stock o on o.id=t.origen_id join depositos_stock d on d.id=t.destino_id left join empleados ee on ee.id=t.responsable_entrega_id left join empleados er on er.id=t.responsable_recibe_id where t.id=?''',(tid,)).fetchone()
+ if not t:c.close();return ('Transferencia no encontrada',404)
+ items=c.execute('select p.codigo,p.nombre,i.cantidad from transferencia_deposito_items i join productos p on p.id=i.producto_id where i.transferencia_id=? order by i.id',(tid,)).fetchall();c.close()
+ out=io.BytesIO();doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=18*mm,rightMargin=18*mm,topMargin=15*mm,bottomMargin=15*mm);st=getSampleStyleSheet();story=[]
+ lg=pdf_logo(width=95,height=55)
+ if lg:story.append(lg)
+ story += [Paragraph('CENTRO MÉDICO SANTA CLARA',st['Title']),Paragraph('TRANSFERENCIA ENTRE DEPÓSITOS',st['Heading2']),Paragraph(f"<b>Nº:</b> {t['numero']} &nbsp;&nbsp; <b>Fecha:</b> {t['fecha']}",st['Normal']),Spacer(1,5*mm)]
+ info=[[Paragraph('<b>Depósito origen</b>',st['Normal']),str(t['origen'])],[Paragraph('<b>Depósito destino</b>',st['Normal']),str(t['destino'])],[Paragraph('<b>Registrado por</b>',st['Normal']),str(t['usuario'] or '-')],[Paragraph('<b>Observaciones</b>',st['Normal']),str(t['observacion'] or '-')]]
+ tb=Table(info,colWidths=[42*mm,128*mm]);tb.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.35,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),5)]));story += [tb,Spacer(1,6*mm)]
+ data=[['Código','Producto','Cantidad']]+[[x['codigo'] or '',x['nombre'],_num_local(x['cantidad'],2)] for x in items]
+ ti=Table(data,colWidths=[35*mm,105*mm,30*mm],repeatRows=1);ti.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('PADDING',(0,0),(-1,-1),5)]));story += [ti,Spacer(1,15*mm)]
+ def sig(path,nombre,cargo):
+  parts=[]
+  if path and os.path.isfile(path):
+   try:parts.append(Image(path,width=42*mm,height=18*mm,kind='proportional'))
+   except Exception:pass
+  parts += [Paragraph('____________________________',st['Normal']),Paragraph('<b>'+str(nombre or 'Sin asignar')+'</b>',st['Normal']),Paragraph(str(cargo or ''),st['Normal'])]
+  return parts
+ left=sig(t['firma_entrega'],t['responsable_entrega'],t['cargo_entrega']);right=sig(t['firma_recibe'],t['responsable_recibe'],t['cargo_recibe']);mx=max(len(left),len(right));left += ['']*(mx-len(left));right += ['']*(mx-len(right))
+ sf=Table([[left[i],right[i]] for i in range(mx)],colWidths=[85*mm,85*mm]);sf.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'BOTTOM')]));story += [sf,Spacer(1,4*mm),Table([['RESPONSABLE QUE ENTREGA','RESPONSABLE QUE RECIBE']],colWidths=[85*mm,85*mm],style=[('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,0),(-1,-1),'Helvetica-Bold')])]
+ doc.build(story);out.seek(0);inline=request.args.get('inline')=='1';return send_file(out,as_attachment=not inline,download_name=f"Transferencia_{t['numero']}.pdf",mimetype='application/pdf')
+
+''@app.get('/farmacia/inventario-depositos')
 def inventario_depositos():
  c=db();did=int(request.args.get('deposito_id') or 0);q=(request.args.get('q') or '').strip();deps=c.execute('select * from depositos_stock where activo=1 order by es_principal desc,nombre').fetchall();pat='%'+q+'%';prods=c.execute("select * from productos where coalesce(activo,1)=1 and (codigo like ? or nombre like ? or coalesce(categoria,'') like ? or coalesce(tipo_producto,'') like ?) order by nombre",(pat,pat,pat,pat)).fetchall();inv=[]
  for d in [x for x in deps if not did or int(x['id'])==did]:
@@ -7363,7 +7428,7 @@ def inventario_depositos():
    st=_stock_en_deposito(c,p['id'],d['id'])
    if st or did:inv.append({'deposito':d['nombre'],'codigo':p['codigo'],'producto':p['nombre'],'clasificacion':p['categoria'] or p['tipo_producto'] or '','iva':p['iva_pct'],'stock':st,'costo':p['costo_pyg'],'valor':st*float(p['costo_pyg'] or 0)})
  c.close();return render_template('stock_inventory_deposits.html',rows=inv,depositos=deps,deposito_id=did,q=q)
-ROUTE_MODULE.update({'depositos_stock':'STOCK','deposito_estado':'STOCK','transferencias_deposito':'STOCK','inventario_depositos':'STOCK'})
+ROUTE_MODULE.update({'depositos_stock':'STOCK','deposito_estado':'STOCK','transferencias_deposito':'STOCK','transferencia_deposito_pdf':'STOCK','inventario_depositos':'STOCK'})
 
 
 if __name__=='__main__':
