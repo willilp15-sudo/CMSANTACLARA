@@ -408,10 +408,10 @@ def productos():
   try:
    cb=(request.form.get('codigo_barras') or '').strip() or None
    if cb and c.execute('select 1 from productos where codigo_barras=?',(cb,)).fetchone():raise ValueError('Código de barras ya registrado en otro producto.')
-   c.execute('insert into productos(codigo,codigo_barras,nombre,categoria,costo_pyg,precio_pyg,stock,stock_min,iva_pct,resumido,moneda,tipo_producto,presentacion,generico,laboratorio,distribuidora,droga,indicacion,posologia,tipo_controlado,especialidad,clasif_general,clasif_parcial,descripcion,vencimiento_control,lote_control,permitir_salida,activo,sifen_descripcion,sifen_unidad_codigo,sifen_unidad_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria',''),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('resumido',''),request.form.get('moneda','PYG'),request.form.get('tipo_producto',''),request.form.get('presentacion',''),request.form.get('generico',''),request.form.get('laboratorio',''),request.form.get('distribuidora',''),request.form.get('droga',''),request.form.get('indicacion',''),request.form.get('posologia',''),request.form.get('tipo_controlado',''),request.form.get('especialidad',''),request.form.get('clasif_general',''),request.form.get('clasif_parcial',''),request.form.get('descripcion',''),1 if request.form.get('vencimiento_control') else 0,1 if request.form.get('lote_control') else 0,1 if request.form.get('permitir_salida') else 0,1,request.form.get('sifen_descripcion') or request.form['nombre'],request.form.get('sifen_unidad_codigo') or '77',request.form.get('sifen_unidad_desc') or 'UNI'));c.commit();flash('Producto registrado correctamente.')
+   c.execute('insert into productos(codigo,codigo_barras,nombre,categoria,costo_pyg,precio_pyg,stock,stock_min,iva_pct,resumido,moneda,tipo_producto,presentacion,generico,laboratorio,distribuidora,droga,indicacion,posologia,tipo_controlado,especialidad,clasif_general,clasif_parcial,descripcion,vencimiento_control,lote_control,permitir_salida,activo,sifen_descripcion,sifen_unidad_codigo,sifen_unidad_desc) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria',''),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('resumido',''),request.form.get('moneda','PYG'),request.form.get('tipo_producto',''),request.form.get('presentacion',''),request.form.get('generico',''),request.form.get('laboratorio',''),request.form.get('distribuidora',''),request.form.get('droga',''),request.form.get('indicacion',''),request.form.get('posologia',''),request.form.get('tipo_controlado',''),request.form.get('especialidad',''),request.form.get('clasif_general',''),request.form.get('clasif_parcial',''),request.form.get('descripcion',''),1 if request.form.get('vencimiento_control') else 0,1 if request.form.get('lote_control') else 0,1 if request.form.get('permitir_salida') else 0,1,request.form.get('sifen_descripcion') or request.form['nombre'],request.form.get('sifen_unidad_codigo') or '77',request.form.get('sifen_unidad_desc') or 'UNI'));pid=c.execute('select last_insert_rowid()').fetchone()[0];c.execute('update productos set cuenta_inventario=?,cuenta_costo=?,cuenta_ingreso=?,controla_stock=? where id=?',((request.form.get('cuenta_inventario') or '').strip() or None,(request.form.get('cuenta_costo') or '').strip() or None,(request.form.get('cuenta_ingreso') or '').strip() or None,1 if request.form.get('controla_stock') else 0,pid));c.commit();flash('Producto registrado correctamente.')
   except Exception as e:c.rollback();flash('No se pudo registrar el producto: '+str(e))
   c.close();return redirect('/productos')
- rows=c.execute('select * from productos order by nombre').fetchall();c.close();return render_template('products.html',rows=rows)
+ rows=c.execute('select * from productos order by nombre').fetchall();cuentas=c.execute("select codigo,nombre,tipo from plan_cuentas where coalesce(activa,1)=1 and imputable=1 order by codigo").fetchall();c.close();return render_template('products.html',rows=rows,cuentas=cuentas)
 @app.route('/compras',methods=['GET','POST'])
 def compras():
  c=db()
@@ -707,6 +707,9 @@ def _producto_es_servicio(p):
     return any('SERVICIO' in str(v or '').strip().upper() for v in vals)
 
 def _producto_controla_stock(p):
+    try:
+        if 'controla_stock' in p.keys() and p['controla_stock'] is not None: return bool(int(p['controla_stock']))
+    except Exception: pass
     return not _producto_es_servicio(p)
 
 @app.route('/ventas/carga',methods=['GET','POST'])
@@ -2624,8 +2627,8 @@ def producto_editar(rid):
     if request.method=='POST':
         cb=(request.form.get('codigo_barras') or '').strip() or None
         if cb and c.execute('select 1 from productos where codigo_barras=? and id<>?',(cb,rid)).fetchone():flash('Código de barras ya registrado en otro producto.');c.close();return redirect(f'/producto/{rid}/editar')
-        c.execute('update productos set codigo=?,codigo_barras=?,nombre=?,categoria=?,costo_pyg=?,precio_pyg=?,stock_min=?,iva_pct=?,tipo_producto=?,clasif_general=?,sifen_descripcion=?,sifen_unidad_codigo=?,sifen_unidad_desc=? where id=?',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria'),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('tipo_producto') or '',request.form.get('clasif_general') or '',request.form.get('sifen_descripcion') or request.form['nombre'],request.form.get('sifen_unidad_codigo') or '77',request.form.get('sifen_unidad_desc') or 'UNI',rid));c.commit();c.close();audit('EDITAR_PRODUCTO',str(rid));return redirect('/productos')
-    c.close();return render_template('edit_master.html',title='Modificar producto',record=r,kind='producto')
+        c.execute('update productos set codigo=?,codigo_barras=?,nombre=?,categoria=?,costo_pyg=?,precio_pyg=?,stock_min=?,iva_pct=?,tipo_producto=?,clasif_general=?,sifen_descripcion=?,sifen_unidad_codigo=?,sifen_unidad_desc=?,cuenta_inventario=?,cuenta_costo=?,cuenta_ingreso=?,controla_stock=? where id=?',(request.form['codigo'],cb,request.form['nombre'],request.form.get('categoria'),float(request.form.get('costo_pyg') or 0),float(request.form.get('precio_pyg') or 0),float(request.form.get('stock_min') or 0),float(request.form.get('iva_pct') or 0),request.form.get('tipo_producto') or '',request.form.get('clasif_general') or '',request.form.get('sifen_descripcion') or request.form['nombre'],request.form.get('sifen_unidad_codigo') or '77',request.form.get('sifen_unidad_desc') or 'UNI',(request.form.get('cuenta_inventario') or '').strip() or None,(request.form.get('cuenta_costo') or '').strip() or None,(request.form.get('cuenta_ingreso') or '').strip() or None,1 if request.form.get('controla_stock') else 0,rid));c.commit();c.close();audit('EDITAR_PRODUCTO',str(rid));return redirect('/productos')
+    cuentas=c.execute("select codigo,nombre,tipo from plan_cuentas where coalesce(activa,1)=1 and imputable=1 order by codigo").fetchall();c.close();return render_template('edit_master.html',title='Modificar producto',record=r,kind='producto',cuentas=cuentas)
 @app.post('/producto/<int:rid>/eliminar')
 def producto_eliminar(rid):
     ok,msg=_safe_delete_master('productos',rid,[('compra_items','producto_id'),('venta_items','producto_id'),('stock_mov','producto_id'),('cargos_paciente','referencia_id')]);flash(msg);audit('ELIMINAR_PRODUCTO' if ok else 'BLOQUEO_ELIMINAR_PRODUCTO',str(rid));return redirect('/productos')
@@ -7287,6 +7290,81 @@ def administracion_geografia():
   except Exception as e:c.rollback();flash('No se pudo importar: '+str(e))
   c.close();return redirect(request.path)
  rows=c.execute('select * from geo_ubicaciones order by departamento,distrito,ciudad,barrio limit 1000').fetchall();c.close();return render_template('geografia.html',rows=rows)
+
+# ===== V13.10.25: cuentas por producto + depósitos y transferencias =====
+def init_v131025_productos_depositos():
+ c=db();cols={r['name'] for r in c.execute('pragma table_info(productos)').fetchall()}
+ for col,typ in [('cuenta_inventario','TEXT'),('cuenta_costo','TEXT'),('cuenta_ingreso','TEXT'),('controla_stock','INTEGER')]:
+  if col not in cols:c.execute(f'alter table productos add column {col} {typ}')
+ c.executescript("""
+ CREATE TABLE IF NOT EXISTS depositos_stock(id INTEGER PRIMARY KEY,nombre TEXT NOT NULL UNIQUE,codigo TEXT UNIQUE,ubicacion TEXT,es_principal INTEGER DEFAULT 0,activo INTEGER DEFAULT 1,creado_en TEXT,creado_por TEXT);
+ CREATE TABLE IF NOT EXISTS stock_deposito(producto_id INTEGER NOT NULL,deposito_id INTEGER NOT NULL,stock REAL DEFAULT 0,stock_min REAL DEFAULT 0,PRIMARY KEY(producto_id,deposito_id));
+ CREATE TABLE IF NOT EXISTS transferencias_deposito(id INTEGER PRIMARY KEY,numero TEXT UNIQUE,fecha TEXT,origen_id INTEGER,destino_id INTEGER,observacion TEXT,usuario TEXT,estado TEXT DEFAULT 'CONFIRMADA');
+ CREATE TABLE IF NOT EXISTS transferencia_deposito_items(id INTEGER PRIMARY KEY,transferencia_id INTEGER,producto_id INTEGER,cantidad REAL);
+ """)
+ if not c.execute('select 1 from depositos_stock where es_principal=1').fetchone():c.execute("insert or ignore into depositos_stock(nombre,codigo,ubicacion,es_principal,activo,creado_en,creado_por) values('Farmacia Interna','FARMACIA','Centro Médico Santa Clara',1,1,?,'SISTEMA')",(now(),))
+ c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.25-productos-depositos',?)",(now(),));c.commit();c.close()
+init_v131025_productos_depositos()
+
+def _deposito_principal(c):return c.execute('select * from depositos_stock where es_principal=1 and activo=1 order by id limit 1').fetchone()
+def _stock_en_deposito(c,pid,did):
+ p=c.execute('select stock from productos where id=?',(pid,)).fetchone();principal=_deposito_principal(c)
+ if not p:return 0.0
+ if principal and int(did)==int(principal['id']):
+  otros=c.execute('select coalesce(sum(sd.stock),0) from stock_deposito sd join depositos_stock d on d.id=sd.deposito_id where sd.producto_id=? and d.es_principal=0',(pid,)).fetchone()[0]
+  return max(0.0,float(p['stock'] or 0)-float(otros or 0))
+ r=c.execute('select stock from stock_deposito where producto_id=? and deposito_id=?',(pid,did)).fetchone();return float(r['stock'] or 0) if r else 0.0
+
+@app.route('/farmacia/depositos',methods=['GET','POST'])
+def depositos_stock():
+ c=db()
+ if request.method=='POST':
+  try:
+   nombre=(request.form.get('nombre') or '').strip();codigo=(request.form.get('codigo') or '').strip().upper() or None
+   if not nombre:raise ValueError('Indique el nombre del depósito.')
+   c.execute('insert into depositos_stock(nombre,codigo,ubicacion,es_principal,activo,creado_en,creado_por) values(?,?,?,?,1,?,?)',(nombre,codigo,(request.form.get('ubicacion') or '').strip(),0,now(),session.get('user')));c.commit();flash('Depósito creado.')
+  except Exception as e:c.rollback();flash('No se pudo crear el depósito: '+str(e))
+  c.close();return redirect(request.path)
+ rows=c.execute('select * from depositos_stock order by es_principal desc,nombre').fetchall();c.close();return render_template('stock_deposits.html',rows=rows)
+
+@app.post('/farmacia/depositos/<int:did>/estado')
+def deposito_estado(did):
+ c=db();d=c.execute('select * from depositos_stock where id=?',(did,)).fetchone()
+ if not d or d['es_principal']:flash('El depósito principal no puede desactivarse.');c.close();return redirect('/farmacia/depositos')
+ c.execute('update depositos_stock set activo=? where id=?',(0 if d['activo'] else 1,did));c.commit();c.close();return redirect('/farmacia/depositos')
+
+@app.route('/farmacia/transferencias',methods=['GET','POST'])
+def transferencias_deposito():
+ c=db();deps=c.execute('select * from depositos_stock where activo=1 order by es_principal desc,nombre').fetchall();prods=c.execute('select * from productos where coalesce(activo,1)=1 order by nombre').fetchall()
+ if request.method=='POST':
+  try:
+   ori=int(request.form.get('origen_id') or 0);des=int(request.form.get('destino_id') or 0);pid=int(request.form.get('producto_id') or 0);qty=float(request.form.get('cantidad') or 0)
+   if not ori or not des or ori==des or not pid or qty<=0:raise ValueError('Revise origen, destino, producto y cantidad.')
+   prod=c.execute('select * from productos where id=?',(pid,)).fetchone()
+   if not prod or not _producto_controla_stock(prod):raise ValueError('El ítem seleccionado no controla stock.')
+   disp=_stock_en_deposito(c,pid,ori)
+   if qty>disp+1e-9:raise ValueError(f'Stock insuficiente. Disponible en origen: {disp:g}.')
+   principal=_deposito_principal(c);prid=int(principal['id'])
+   if ori!=prid:c.execute('insert into stock_deposito(producto_id,deposito_id,stock) values(?,?,?) on conflict(producto_id,deposito_id) do update set stock=stock-excluded.stock',(pid,ori,qty))
+   if des!=prid:c.execute('insert into stock_deposito(producto_id,deposito_id,stock) values(?,?,?) on conflict(producto_id,deposito_id) do update set stock=stock+excluded.stock',(pid,des,qty))
+   seq=int(c.execute('select coalesce(max(id),0)+1 from transferencias_deposito').fetchone()[0]);numero=f'TR-{datetime.datetime.now().year}-{seq:06d}'
+   tid=c.execute('insert into transferencias_deposito(numero,fecha,origen_id,destino_id,observacion,usuario,estado) values(?,?,?,?,?,?,?)',(numero,now(),ori,des,(request.form.get('observacion') or '').strip(),session.get('user'),'CONFIRMADA')).lastrowid
+   c.execute('insert into transferencia_deposito_items(transferencia_id,producto_id,cantidad) values(?,?,?)',(tid,pid,qty));c.commit();flash('Transferencia '+numero+' registrada.')
+  except Exception as e:c.rollback();flash('No se pudo transferir: '+str(e))
+  c.close();return redirect(request.path)
+ hist=c.execute('select t.*,o.nombre origen,d.nombre destino,p.nombre producto,i.cantidad from transferencias_deposito t join depositos_stock o on o.id=t.origen_id join depositos_stock d on d.id=t.destino_id join transferencia_deposito_items i on i.transferencia_id=t.id join productos p on p.id=i.producto_id order by t.id desc limit 200').fetchall();c.close();return render_template('stock_transfers.html',depositos=deps,productos=prods,rows=hist)
+
+@app.get('/farmacia/inventario-depositos')
+def inventario_depositos():
+ c=db();did=int(request.args.get('deposito_id') or 0);q=(request.args.get('q') or '').strip();deps=c.execute('select * from depositos_stock where activo=1 order by es_principal desc,nombre').fetchall();pat='%'+q+'%';prods=c.execute("select * from productos where coalesce(activo,1)=1 and (codigo like ? or nombre like ? or coalesce(categoria,'') like ? or coalesce(tipo_producto,'') like ?) order by nombre",(pat,pat,pat,pat)).fetchall();inv=[]
+ for d in [x for x in deps if not did or int(x['id'])==did]:
+  for p in prods:
+   if not _producto_controla_stock(p):continue
+   st=_stock_en_deposito(c,p['id'],d['id'])
+   if st or did:inv.append({'deposito':d['nombre'],'codigo':p['codigo'],'producto':p['nombre'],'clasificacion':p['categoria'] or p['tipo_producto'] or '','iva':p['iva_pct'],'stock':st,'costo':p['costo_pyg'],'valor':st*float(p['costo_pyg'] or 0)})
+ c.close();return render_template('stock_inventory_deposits.html',rows=inv,depositos=deps,deposito_id=did,q=q)
+ROUTE_MODULE.update({'depositos_stock':'STOCK','deposito_estado':'STOCK','transferencias_deposito':'STOCK','inventario_depositos':'STOCK'})
+
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
