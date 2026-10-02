@@ -7050,12 +7050,12 @@ def _visaciones_reporte(c):
     aseguradora_id=(request.args.get('aseguradora_id') or '').strip()
     where=['1=1']; args=[]
     if q:
-        where.append("(v.numero_visacion like ? or p.nombre like ? or coalesce(p.cedula,'') like ? or a.nombre like ? or m.nombre like ?)")
+        where.append("(v.numero_visacion like ? or p.nombre like ? or coalesce(p.documento,'') like ? or a.nombre like ? or m.nombre like ?)")
         args += ['%'+q+'%']*5
     if desde: where.append('v.fecha>=?'); args.append(desde)
     if hasta: where.append('v.fecha<=?'); args.append(hasta)
     if aseguradora_id: where.append('v.aseguradora_id=?'); args.append(int(aseguradora_id))
-    rows=c.execute("""select v.*,p.nombre paciente,coalesce(p.cedula,'') paciente_documento,
+    rows=c.execute("""select v.*,p.nombre paciente,coalesce(p.documento,'') paciente_documento,
       a.nombre aseguradora,m.nombre medico from seguro_visaciones v
       left join pacientes p on p.id=v.paciente_id left join aseguradoras a on a.id=v.aseguradora_id
       left join medicos m on m.id=v.medico_id where """+' and '.join(where)+" order by v.fecha desc,v.hora desc,v.id desc",args).fetchall()
