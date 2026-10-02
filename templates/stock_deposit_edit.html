@@ -1,0 +1,3 @@
+{% extends 'base.html' %}{% block title %}Editar Depósito{% endblock %}{% block content %}
+<div class="toolbar"><a class="btn secondary" href="/farmacia/depositos">← Depósitos</a></div>
+<div class="card"><h2>Editar depósito</h2><form method="post" class="grid"><label>Código<input name="codigo" value="{{d.codigo or ''}}"></label><label>Nombre<input name="nombre" required value="{{d.nombre}}"></label><label>Ubicación<input name="ubicacion" value="{{d.ubicacion or ''}}"></label><div class="actions"><button>💾 Guardar cambios</button></div></form></div>{% endblock %}

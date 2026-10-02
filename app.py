@@ -6008,20 +6008,46 @@ def intercambio_validar():
   return render_template('data_import_preview.html',filename=f.filename,headers=headers,rows=data,total=max(0,len(rows)-1))
  except Exception as e:flash('No se pudo validar el archivo: '+str(e));return redirect('/intercambio')
 
+def _rg90_periodo(periodo):
+ periodo=(periodo or datetime.date.today().strftime('%Y-%m'))[:7]
+ y,m=map(int,periodo.split('-'))
+ if not (1<=m<=12): raise ValueError('Mes inválido')
+ desde=f'{y:04d}-{m:02d}-01'
+ hasta=(datetime.date(y+1,1,1)-datetime.timedelta(days=1)).isoformat() if m==12 else (datetime.date(y,m+1,1)-datetime.timedelta(days=1)).isoformat()
+ return periodo,y,m,desde,hasta
+
+def _rg90_data(tipo,periodo):
+ periodo,y,m,desde,hasta=_rg90_periodo(periodo); c=db();cfg=c.execute('select * from institucion_config where id=1').fetchone()
+ rows,errores=_marangatu_rows(c,desde,hasta,tipo in ('ventas','ambos'),tipo in ('compras','ambos'));c.close()
+ ruc=_ruc_sin_dv(cfg['ruc'] if cfg else '')
+ if not ruc:errores.insert(0,'Configure el RUC institucional antes de generar el archivo RG 90.')
+ if len(rows)>5000:errores.insert(0,f'El período contiene {len(rows)} registros válidos. La especificación admite máximo 5.000 filas por archivo; genere archivos/lotes separados.')
+ return periodo,y,m,desde,hasta,ruc,rows,errores
+
+@app.get('/contabilidad/rg90')
+def rg90_centro():
+ periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m');tipo=(request.args.get('tipo') or 'compras').lower()
+ if tipo not in ('compras','ventas'):tipo='compras'
+ try:periodo,y,m,desde,hasta,ruc,rows,errores=_rg90_data(tipo,periodo)
+ except Exception as e:return ('Periodo inválido: '+str(e),400)
+ return render_template('rg90.html',periodo=periodo,tipo=tipo,rows=rows[:200],total=len(rows),errores=errores,ruc=ruc,desde=desde,hasta=hasta)
+
 @app.get('/marangatu/exportar')
 def marangatu_exportar():
- periodo=(request.args.get('periodo') or datetime.date.today().strftime('%Y-%m'))[:7];tipo=request.args.get('tipo','compras');fmt=request.args.get('formato','zip')
- try:y,m=map(int,periodo.split('-'));desde=f'{y:04d}-{m:02d}-01';hasta=(datetime.date(y+1,1,1)-datetime.timedelta(days=1)).isoformat() if m==12 else (datetime.date(y,m+1,1)-datetime.timedelta(days=1)).isoformat()
- except:return ('Periodo inválido',400)
- c=db();cfg=c.execute('select * from institucion_config where id=1').fetchone();rows,errores=_marangatu_rows(c,desde,hasta,tipo in ('ventas','ambos'),tipo in ('compras','ambos'));c.close()
- if errores:flash('Advertencia: '+ ' | '.join(errores[:8]))
- ruc=_ruc_sin_dv(cfg['ruc'] if cfg else '')
+ periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m');tipo=(request.args.get('tipo') or 'compras').lower();fmt=(request.args.get('formato') or 'zip').lower();ident=(request.args.get('identificador') or 'SC001').strip().upper()[:5]
+ if tipo not in ('compras','ventas','ambos'):return ('Tipo inválido',400)
+ if fmt not in ('zip','csv','txt'):return ('Formato inválido',400)
+ if not ident or not ident.isalnum():return ('El identificador debe ser alfanumérico y tener hasta 5 caracteres.',400)
+ try:periodo,y,m,desde,hasta,ruc,rows,errores=_rg90_data(tipo,periodo)
+ except Exception:return ('Periodo inválido',400)
  if not ruc:return ('Configure el RUC institucional antes de exportar para Marangatu.',400)
- base=f"{ruc}_REG_{m:02d}{y}_SC001";raw=io.StringIO(newline='');w=csv.writer(raw,delimiter=',',lineterminator='\n');
+ if errores:return render_template('rg90.html',periodo=periodo,tipo=('compras' if tipo=='ambos' else tipo),rows=rows[:200],total=len(rows),errores=errores,ruc=ruc,desde=desde,hasta=hasta),400
+ base=f"{ruc}_REG_{m:02d}{y}_{ident}";raw=io.StringIO(newline='');delimiter='\t' if fmt=='txt' else ',';w=csv.writer(raw,delimiter=delimiter,lineterminator='\n')
  for r in rows:w.writerow(r)
- data=raw.getvalue().encode('utf-8')
- if fmt=='csv':bio=io.BytesIO(data);return send_file(bio,as_attachment=True,download_name=base+'.csv',mimetype='text/csv; charset=utf-8')
- out=io.BytesIO();
+ data=raw.getvalue().encode('utf-8');ext='.txt' if fmt=='txt' else '.csv'
+ if fmt in ('csv','txt'):
+  bio=io.BytesIO(data);bio.seek(0);return send_file(bio,as_attachment=True,download_name=base+ext,mimetype=('text/plain; charset=utf-8' if fmt=='txt' else 'text/csv; charset=utf-8'))
+ out=io.BytesIO()
  with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:z.writestr(base+'.csv',data)
  out.seek(0);return send_file(out,as_attachment=True,download_name=base+'.zip',mimetype='application/zip')
 
@@ -6035,7 +6061,7 @@ def rrhh_informes_csv():
  if not _rrhh_perm():return ('Acceso no autorizado',403)
  periodo=_rrhh_periodo(request.args.get('periodo'));c=db();rows=c.execute('''select e.documento,e.nombre,e.cargo,l.periodo,l.salario_base,l.haberes,l.ips_obrero,l.ips_patronal,l.anticipos,l.prestamos,l.otros_descuentos,l.neto,l.costo_empresa,l.estado from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();c.close();headers=['CI','Funcionario','Cargo','Periodo','Salario base','Haberes','IPS obrero','IPS patronal','Anticipos','Préstamos','Otros descuentos','Neto','Costo empresa','Estado'];return _tabular_csv(headers,rows,f'rrhh_{periodo}.csv')
 
-ROUTE_MODULE.update({'intercambio_centro':'INFORMES','intercambio_validar':'INFORMES','marangatu_exportar':'CONTABILIDAD','informe_excel_tabla':'INFORMES','informe_csv_tabla':'INFORMES','contabilidad_csv':'CONTABILIDAD','contabilidad_exportar_formato':'CONTABILIDAD','contabilidad_importar_desde_libro':'CONTABILIDAD','rrhh_informes_excel':'RRHH','rrhh_informes_csv':'RRHH'})
+ROUTE_MODULE.update({'intercambio_centro':'INFORMES','intercambio_validar':'INFORMES','rg90_centro':'CONTABILIDAD','marangatu_exportar':'CONTABILIDAD','informe_excel_tabla':'INFORMES','informe_csv_tabla':'INFORMES','contabilidad_csv':'CONTABILIDAD','contabilidad_exportar_formato':'CONTABILIDAD','contabilidad_importar_desde_libro':'CONTABILIDAD','rrhh_informes_excel':'RRHH','rrhh_informes_csv':'RRHH'})
 
 # ===== V13.9.50: Importación / exportación contable operativa =====
 def _leer_tabla_subida(f):
@@ -7311,7 +7337,7 @@ def init_v131025_productos_depositos():
  """)
  # V13.10.26: responsables y firmas en transferencias
  tcols={r['name'] for r in c.execute('pragma table_info(transferencias_deposito)').fetchall()}
- for col,typ in [('responsable_entrega_id','INTEGER'),('responsable_recibe_id','INTEGER')]:
+ for col,typ in [('responsable_entrega_id','INTEGER'),('responsable_recibe_id','INTEGER'),('anulado_por','TEXT'),('anulado_en','TEXT'),('motivo_anulacion','TEXT')]:
   if col not in tcols:c.execute(f'alter table transferencias_deposito add column {col} {typ}')
  ecols={r['name'] for r in c.execute('pragma table_info(empleados)').fetchall()}
  for col,typ in [('firma_archivo','TEXT'),('firma_original','TEXT'),('firma_imagen','TEXT')]:
@@ -7347,6 +7373,31 @@ def deposito_estado(did):
  c=db();d=c.execute('select * from depositos_stock where id=?',(did,)).fetchone()
  if not d or d['es_principal']:flash('El depósito principal no puede desactivarse.');c.close();return redirect('/farmacia/depositos')
  c.execute('update depositos_stock set activo=? where id=?',(0 if d['activo'] else 1,did));c.commit();c.close();return redirect('/farmacia/depositos')
+
+@app.route('/farmacia/depositos/<int:did>/editar',methods=['GET','POST'])
+def deposito_editar(did):
+ c=db();d=c.execute('select * from depositos_stock where id=?',(did,)).fetchone()
+ if not d:c.close();flash('Depósito no encontrado.');return redirect('/farmacia/depositos')
+ if request.method=='POST':
+  try:
+   nombre=(request.form.get('nombre') or '').strip();codigo=(request.form.get('codigo') or '').strip().upper() or None;ubicacion=(request.form.get('ubicacion') or '').strip()
+   if not nombre:raise ValueError('Indique el nombre del depósito.')
+   c.execute('update depositos_stock set nombre=?,codigo=?,ubicacion=? where id=?',(nombre,codigo,ubicacion,did));c.commit();audit('EDITAR_DEPOSITO_STOCK',str(did));flash('Depósito actualizado.');c.close();return redirect('/farmacia/depositos')
+  except Exception as e:c.rollback();flash('No se pudo modificar el depósito: '+str(e))
+ c.close();return render_template('stock_deposit_edit.html',d=d)
+
+@app.post('/farmacia/depositos/<int:did>/eliminar')
+def deposito_eliminar(did):
+ c=db();d=c.execute('select * from depositos_stock where id=?',(did,)).fetchone()
+ if not d:c.close();flash('Depósito no encontrado.');return redirect('/farmacia/depositos')
+ if d['es_principal']:c.close();flash('El depósito principal no puede eliminarse.');return redirect('/farmacia/depositos')
+ usado=c.execute('select 1 from transferencias_deposito where origen_id=? or destino_id=? limit 1',(did,did)).fetchone()
+ stock=float(c.execute('select coalesce(sum(abs(stock)),0) from stock_deposito where deposito_id=?',(did,)).fetchone()[0] or 0)
+ if usado or stock>1e-9:c.close();flash('No se puede eliminar: el depósito ya tiene movimientos o existencias. Puede desactivarlo.');return redirect('/farmacia/depositos')
+ try:
+  c.execute('delete from stock_deposito where deposito_id=?',(did,));c.execute('delete from depositos_stock where id=?',(did,));c.commit();c.close();audit('ELIMINAR_DEPOSITO_STOCK',str(did));flash('Depósito eliminado.')
+ except Exception as e:c.rollback();c.close();flash('No se pudo eliminar el depósito: '+str(e))
+ return redirect('/farmacia/depositos')
 
 def _rrhh_guardar_firma(empleado_id, archivo):
  if not archivo or not getattr(archivo,'filename',''):return None
@@ -7390,6 +7441,38 @@ def transferencias_deposito():
   c.close();return redirect(request.path)
  hist=c.execute('''select t.*,o.nombre origen,d.nombre destino,p.nombre producto,i.cantidad,ee.nombre responsable_entrega,er.nombre responsable_recibe from transferencias_deposito t join depositos_stock o on o.id=t.origen_id join depositos_stock d on d.id=t.destino_id join transferencia_deposito_items i on i.transferencia_id=t.id join productos p on p.id=i.producto_id left join empleados ee on ee.id=t.responsable_entrega_id left join empleados er on er.id=t.responsable_recibe_id order by t.id desc limit 200''').fetchall();c.close();return render_template('stock_transfers.html',depositos=deps,productos=prods,empleados=empleados,rows=hist)
 
+@app.route('/farmacia/transferencias/<int:tid>/editar',methods=['GET','POST'])
+def transferencia_deposito_editar(tid):
+ c=db();t=c.execute('select * from transferencias_deposito where id=?',(tid,)).fetchone()
+ if not t:c.close();flash('Transferencia no encontrada.');return redirect('/farmacia/transferencias')
+ if t['estado']=='ANULADA':c.close();flash('Una transferencia anulada no puede modificarse.');return redirect('/farmacia/transferencias')
+ empleados=c.execute("select id,nombre,cargo from empleados where estado='ACTIVO' order by nombre").fetchall()
+ if request.method=='POST':
+  try:
+   rent=int(request.form.get('responsable_entrega_id') or 0);rrec=int(request.form.get('responsable_recibe_id') or 0);obs=(request.form.get('observacion') or '').strip()
+   if not rent or not rrec:raise ValueError('Seleccione ambos responsables.')
+   c.execute('update transferencias_deposito set responsable_entrega_id=?,responsable_recibe_id=?,observacion=? where id=?',(rent,rrec,obs,tid));c.commit();c.close();audit('EDITAR_TRANSFERENCIA_DEPOSITO',str(tid));flash('Transferencia actualizada.');return redirect('/farmacia/transferencias')
+  except Exception as e:c.rollback();flash('No se pudo modificar: '+str(e))
+ c.close();return render_template('stock_transfer_edit.html',t=t,empleados=empleados)
+
+@app.post('/farmacia/transferencias/<int:tid>/anular')
+def transferencia_deposito_anular(tid):
+ c=db();t=c.execute('select * from transferencias_deposito where id=?',(tid,)).fetchone()
+ if not t:c.close();flash('Transferencia no encontrada.');return redirect('/farmacia/transferencias')
+ if t['estado']=='ANULADA':c.close();flash('La transferencia ya está anulada.');return redirect('/farmacia/transferencias')
+ items=c.execute('select * from transferencia_deposito_items where transferencia_id=?',(tid,)).fetchall();principal=_deposito_principal(c);prid=int(principal['id']) if principal else 0
+ try:
+  for i in items:
+   pid=int(i['producto_id']);qty=float(i['cantidad'] or 0);disp_dest=_stock_en_deposito(c,pid,int(t['destino_id']))
+   if disp_dest+1e-9<qty:raise ValueError(f'No se puede anular: el depósito destino ya no dispone de {qty:g} unidades del producto ID {pid}.')
+  for i in items:
+   pid=int(i['producto_id']);qty=float(i['cantidad'] or 0)
+   if int(t['destino_id'])!=prid:c.execute('update stock_deposito set stock=stock-? where producto_id=? and deposito_id=?',(qty,pid,int(t['destino_id'])))
+   if int(t['origen_id'])!=prid:c.execute('insert into stock_deposito(producto_id,deposito_id,stock) values(?,?,?) on conflict(producto_id,deposito_id) do update set stock=stock+excluded.stock',(pid,int(t['origen_id']),qty))
+  motivo=(request.form.get('motivo') or '').strip();c.execute("update transferencias_deposito set estado='ANULADA',anulado_por=?,anulado_en=?,motivo_anulacion=? where id=?",(session.get('user'),now(),motivo,tid));c.commit();c.close();audit('ANULAR_TRANSFERENCIA_DEPOSITO',str(tid));flash('Transferencia anulada y stock revertido correctamente.')
+ except Exception as e:c.rollback();c.close();flash(str(e))
+ return redirect('/farmacia/transferencias')
+
 @app.get('/farmacia/transferencias/<int:tid>/pdf')
 def transferencia_deposito_pdf(tid):
  from reportlab.lib.pagesizes import A4
@@ -7428,7 +7511,7 @@ def inventario_depositos():
    st=_stock_en_deposito(c,p['id'],d['id'])
    if st or did:inv.append({'deposito':d['nombre'],'codigo':p['codigo'],'producto':p['nombre'],'clasificacion':p['categoria'] or p['tipo_producto'] or '','iva':p['iva_pct'],'stock':st,'costo':p['costo_pyg'],'valor':st*float(p['costo_pyg'] or 0)})
  c.close();return render_template('stock_inventory_deposits.html',rows=inv,depositos=deps,deposito_id=did,q=q)
-ROUTE_MODULE.update({'depositos_stock':'STOCK','deposito_estado':'STOCK','transferencias_deposito':'STOCK','transferencia_deposito_pdf':'STOCK','inventario_depositos':'STOCK'})
+ROUTE_MODULE.update({'depositos_stock':'STOCK','deposito_estado':'STOCK','deposito_editar':'STOCK','deposito_eliminar':'STOCK','transferencias_deposito':'STOCK','transferencia_deposito_editar':'STOCK','transferencia_deposito_anular':'STOCK','transferencia_deposito_pdf':'STOCK','inventario_depositos':'STOCK'})
 
 
 if __name__=='__main__':
