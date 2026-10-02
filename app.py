@@ -1,5 +1,5 @@
 from flask import Flask,render_template,request,redirect,session,flash,jsonify,send_file
-import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets
+import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets,unicodedata
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from pathlib import Path
@@ -6050,6 +6050,125 @@ def marangatu_exportar():
  out=io.BytesIO()
  with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:z.writestr(base+'.csv',data)
  out.seek(0);return send_file(out,as_attachment=True,download_name=base+'.zip',mimetype='application/zip')
+
+# ===== V13.10.30: Centro Contable-Fiscal Paraguay / Marangatu =====
+def init_v131030_contabilidad_fiscal_py():
+ c=db();c.executescript("""
+ CREATE TABLE IF NOT EXISTS fiscal_obligaciones(id INTEGER PRIMARY KEY,codigo TEXT NOT NULL,nombre TEXT NOT NULL,activa INTEGER DEFAULT 1,periodicidad TEXT DEFAULT 'MENSUAL',observacion TEXT,UNIQUE(codigo));
+ CREATE TABLE IF NOT EXISTS retenciones_fiscales(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT NOT NULL DEFAULT 'RECIBIDA',impuesto TEXT,agente_ruc TEXT,agente_nombre TEXT,comprobante TEXT,numero_retencion TEXT,base_imponible REAL DEFAULT 0,porcentaje REAL DEFAULT 0,importe REAL DEFAULT 0,moneda TEXT DEFAULT 'PYG',origen TEXT DEFAULT 'MANUAL',periodo TEXT,estado TEXT DEFAULT 'REGISTRADA',observacion TEXT,creado_en TEXT,usuario TEXT,UNIQUE(tipo,numero_retencion,agente_ruc));
+ CREATE TABLE IF NOT EXISTS fiscal_importaciones(id INTEGER PRIMARY KEY,fecha TEXT,modulo TEXT,archivo TEXT,periodo TEXT,registros INTEGER DEFAULT 0,errores INTEGER DEFAULT 0,usuario TEXT,detalle TEXT);
+ """)
+ for cod,nom,per in [('955','Registro mensual de comprobantes / RG 90','MENSUAL'),('IVA','Impuesto al Valor Agregado','MENSUAL'),('IRE','Impuesto a la Renta Empresarial','ANUAL'),('948','Estados Financieros - si corresponde según RUC','ANUAL')]:c.execute('insert or ignore into fiscal_obligaciones(codigo,nombre,periodicidad) values(?,?,?)',(cod,nom,per))
+ c.commit();c.close()
+init_v131030_contabilidad_fiscal_py()
+
+def _fiscal_periodo(periodo):return _rg90_periodo(periodo)
+def _iva_resumen(periodo):
+ periodo,y,m,desde,hasta=_fiscal_periodo(periodo);c=db()
+ def one(tabla):return c.execute(f"select coalesce(sum(gravado_10),0) g10,coalesce(sum(iva_10),0) i10,coalesce(sum(gravado_5),0) g5,coalesce(sum(iva_5),0) i5,coalesce(sum(exento_iva),0) ex,coalesce(sum(total_pyg),0) total from {tabla} where fecha between ? and ? and estado!='ANULADA'",(desde,hasta)).fetchone()
+ compras=one('compras');ventas=one('ventas');c.close();debito=float(ventas['i10'] or 0)+float(ventas['i5'] or 0);credito=float(compras['i10'] or 0)+float(compras['i5'] or 0);return periodo,desde,hasta,compras,ventas,debito,credito,debito-credito
+
+@app.get('/contabilidad/fiscal')
+def contabilidad_fiscal():
+ periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m');periodo,desde,hasta,compras,ventas,debito,credito,saldo=_iva_resumen(periodo);c=db();oblig=c.execute('select * from fiscal_obligaciones order by codigo').fetchall();ret=c.execute("select coalesce(sum(case when tipo='RECIBIDA' then importe else 0 end),0) recibidas,coalesce(sum(case when tipo='PRACTICADA' then importe else 0 end),0) practicadas from retenciones_fiscales where periodo=? and estado!='ANULADA'",(periodo,)).fetchone();c.close();return render_template('accounting_fiscal_py.html',periodo=periodo,desde=desde,hasta=hasta,compras=compras,ventas=ventas,debito=debito,credito=credito,saldo=saldo,obligaciones=oblig,retenciones=ret)
+
+@app.route('/contabilidad/retenciones',methods=['GET','POST'])
+def retenciones_fiscales():
+ periodo=request.values.get('periodo') or datetime.date.today().strftime('%Y-%m');c=db()
+ if request.method=='POST':
+  try:
+   fecha=request.form.get('fecha') or datetime.date.today().isoformat();tipo=(request.form.get('tipo') or 'RECIBIDA').upper();imp=(request.form.get('impuesto') or 'IVA').upper();ruc=(request.form.get('ruc') or '').strip();nombre=(request.form.get('nombre') or '').strip();nr=(request.form.get('numero_retencion') or '').strip();importe=float(request.form.get('importe') or 0);base=float(request.form.get('base_imponible') or 0);pct=float(request.form.get('porcentaje') or 0);per=fecha[:7]
+   if tipo not in ('RECIBIDA','PRACTICADA') or not nr or importe<0:raise ValueError('Complete tipo, número de retención e importe válido.')
+   c.execute('insert into retenciones_fiscales(fecha,tipo,impuesto,agente_ruc,agente_nombre,comprobante,numero_retencion,base_imponible,porcentaje,importe,moneda,origen,periodo,observacion,creado_en,usuario) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tipo,imp,ruc,nombre,request.form.get('comprobante'),nr,base,pct,importe,'PYG','MANUAL',per,request.form.get('observacion'),now(),session.get('user')));c.commit();audit('RETENCION_REGISTRO',f'{tipo} {nr} Gs. {importe:.0f}');flash('Retención registrada.')
+  except Exception as e:c.rollback();flash('No se pudo registrar: '+str(e))
+  finally:c.close()
+  return redirect('/contabilidad/retenciones?periodo='+periodo)
+ rows=c.execute("select * from retenciones_fiscales where periodo=? order by fecha desc,id desc",(periodo,)).fetchall();c.close();return render_template('accounting_withholdings.html',rows=rows,periodo=periodo)
+
+@app.post('/contabilidad/retenciones/<int:rid>/anular')
+def retencion_anular(rid):
+ c=db();c.execute("update retenciones_fiscales set estado='ANULADA' where id=?",(rid,));c.commit();c.close();audit('RETENCION_ANULAR',str(rid));return redirect(request.referrer or '/contabilidad/retenciones')
+
+def _norm_header(x):return ''.join(ch for ch in unicodedata.normalize('NFKD',str(x or '')).lower() if ch.isalnum() or ch==' ').strip()
+def _leer_retenciones_marangatu(f):
+ ext=os.path.splitext((f.filename or '').lower())[1];data=[]
+ if ext in ('.xlsx','.xlsm'):
+  from openpyxl import load_workbook
+  wb=load_workbook(f,read_only=True,data_only=True);ws=wb.active;data=[list(r) for r in ws.iter_rows(values_only=True)]
+ elif ext in ('.csv','.txt'):
+  raw=f.read();txt=None
+  for enc in ('utf-8-sig','cp1252','latin-1'):
+   try:txt=raw.decode(enc);break
+   except Exception:pass
+  if txt is None:raise ValueError('Codificación no reconocida.')
+  sample='\n'.join(txt.splitlines()[:5]);delim='\t' if ext=='.txt' else (';' if sample.count(';')>sample.count(',') else ',');data=[r for r in csv.reader(io.StringIO(txt),delimiter=delim)]
+ else:raise ValueError('Use XLSX, CSV o TXT exportado desde Marangatu.')
+ if not data:raise ValueError('Archivo vacío.')
+ aliases={'fecha':['fecha','fecha retencion','fecha de retencion'],'tipo':['tipo','tipo retencion'],'impuesto':['impuesto','tributo'],'ruc':['ruc','ruc agente','ruc retenedor'],'nombre':['razon social','nombre','agente','agente retencion'],'numero':['numero retencion','nro retencion','retencion','numero'],'comprobante':['comprobante','documento','factura'],'base':['base imponible','base'],'porcentaje':['porcentaje','tasa'],'importe':['importe retenido','monto retenido','importe','monto']};header_idx=None;mapping={}
+ for i,row in enumerate(data[:25]):
+  hs=[_norm_header(x) for x in row];mp={}
+  for key,vals in aliases.items():
+   for j,hv in enumerate(hs):
+    if hv in vals or any(v in hv for v in vals if len(v)>5):mp[key]=j;break
+  if 'fecha' in mp and 'importe' in mp and ('numero' in mp or 'ruc' in mp):header_idx=i;mapping=mp;break
+ if header_idx is None:raise ValueError('No se reconocieron las columnas del reporte de retenciones. Exporte el listado con encabezados desde Marangatu.')
+ return data[header_idx+1:],mapping
+
+def _parse_num(v):
+ t=str(v or '').strip().replace('Gs.','').replace(' ','')
+ if not t:return 0.0
+ if ',' in t and '.' in t:t=t.replace('.','').replace(',','.')
+ elif ',' in t:t=t.replace('.','').replace(',','.')
+ else:
+  parts=t.split('.')
+  if len(parts)>1 and all(len(x)==3 for x in parts[1:]):t=''.join(parts)
+ try:return float(t)
+ except:return 0.0
+
+def _parse_fecha(v):
+ if isinstance(v,(datetime.date,datetime.datetime)):return v.date().isoformat() if isinstance(v,datetime.datetime) else v.isoformat()
+ t=str(v or '').strip()
+ for fmt in ('%d/%m/%Y','%Y-%m-%d','%d-%m-%Y'):
+  try:return datetime.datetime.strptime(t[:10],fmt).date().isoformat()
+  except:pass
+ return ''
+
+@app.post('/contabilidad/retenciones/importar')
+def retenciones_importar():
+ f=request.files.get('archivo');tipo_default=(request.form.get('tipo') or 'RECIBIDA').upper()
+ if not f or not f.filename:flash('Seleccione el archivo exportado desde Marangatu.');return redirect('/contabilidad/retenciones')
+ c=db();ok=0;err=0
+ try:
+  rows,mp=_leer_retenciones_marangatu(f)
+  for row in rows:
+   try:
+    def val(k):return row[mp[k]] if k in mp and mp[k]<len(row) else ''
+    fecha=_parse_fecha(val('fecha'));importe=_parse_num(val('importe'));nr=str(val('numero') or '').strip();ruc=str(val('ruc') or '').strip();nombre=str(val('nombre') or '').strip();tipo=str(val('tipo') or tipo_default).upper();tipo='PRACTICADA' if 'PRACT' in tipo else 'RECIBIDA';impuesto=str(val('impuesto') or 'IVA').upper()
+    if not fecha or importe<0 or not (nr or ruc):err+=1;continue
+    c.execute('insert or ignore into retenciones_fiscales(fecha,tipo,impuesto,agente_ruc,agente_nombre,comprobante,numero_retencion,base_imponible,porcentaje,importe,moneda,origen,periodo,creado_en,usuario) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tipo,impuesto,ruc,nombre,str(val('comprobante') or ''),nr,_parse_num(val('base')),_parse_num(val('porcentaje')),importe,'PYG','MARANGATU',fecha[:7],now(),session.get('user')));ok+=c.execute('select changes()').fetchone()[0]
+   except Exception:err+=1
+  c.execute('insert into fiscal_importaciones(fecha,modulo,archivo,periodo,registros,errores,usuario,detalle) values(?,?,?,?,?,?,?,?)',(now(),'RETENCIONES',secure_filename(f.filename),'',ok,err,session.get('user'),'Importación desde archivo Marangatu'));c.commit();flash(f'Importación finalizada: {ok} retención(es) nuevas; {err} fila(s) observadas.')
+ except Exception as e:c.rollback();flash('No se pudo importar: '+str(e))
+ finally:c.close()
+ return redirect('/contabilidad/retenciones')
+
+@app.get('/contabilidad/retenciones/exportar')
+def retenciones_exportar():
+ periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m');c=db();rows=c.execute("select fecha,tipo,impuesto,agente_ruc,agente_nombre,comprobante,numero_retencion,base_imponible,porcentaje,importe,moneda,estado from retenciones_fiscales where periodo=? order by fecha,id",(periodo,)).fetchall();c.close();return _tabular_csv(['Fecha','Tipo','Impuesto','RUC','Agente','Comprobante','Nro Retencion','Base','Porcentaje','Importe','Moneda','Estado'],rows,f'retenciones_{periodo}.csv')
+
+@app.get('/contabilidad/conciliacion-fiscal')
+def conciliacion_fiscal():
+ periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m');periodo,y,m,desde,hasta=_fiscal_periodo(periodo);c=db();compras=c.execute("select co.id,co.fecha,co.numero,co.total_pyg,t.nombre tercero,exists(select 1 from asientos a where a.origen_tipo='COMPRA' and a.origen_id=co.id) contabilizado from compras co left join terceros t on t.id=co.proveedor_id where co.fecha between ? and ? and co.estado!='ANULADA' order by co.fecha,co.id",(desde,hasta)).fetchall();ventas=c.execute("select v.id,v.fecha,v.numero,v.total_pyg,t.nombre tercero,exists(select 1 from asientos a where a.origen_tipo in ('VENTA','FACTURA') and a.origen_id=v.id) contabilizado from ventas v left join terceros t on t.id=v.cliente_id where v.fecha between ? and ? and v.estado!='ANULADA' order by v.fecha,v.id",(desde,hasta)).fetchall();c.close();return render_template('accounting_tax_reconciliation.html',periodo=periodo,compras=compras,ventas=ventas)
+
+@app.get('/contabilidad/iva-papel-trabajo')
+def iva_papel_trabajo():
+ periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m');periodo,desde,hasta,compras,ventas,debito,credito,saldo=_iva_resumen(periodo);return render_template('accounting_vat_workpaper.html',periodo=periodo,desde=desde,hasta=hasta,compras=compras,ventas=ventas,debito=debito,credito=credito,saldo=saldo)
+
+@app.get('/contabilidad/estados/notas-utilidades')
+def notas_utilidades():
+ anio=int(request.args.get('anio') or datetime.date.today().year);c=db();desde=f'{anio}-01-01';hasta=f'{anio}-12-31';res=c.execute("select coalesce(sum(case when pc.tipo='INGRESO' then d.haber_pyg-d.debe_pyg when pc.tipo='EGRESO' then -(d.debe_pyg-d.haber_pyg) else 0 end),0) r from asiento_det d join asientos a on a.id=d.asiento_id left join plan_cuentas pc on pc.codigo=d.cuenta where a.fecha between ? and ? and a.estado='CONFIRMADO'",(desde,hasta)).fetchone()['r'];c.close();return render_template('accounting_notes_profits.html',anio=anio,resultado=res)
+
+ROUTE_MODULE.update({'contabilidad_fiscal':'CONTABILIDAD','retenciones_fiscales':'CONTABILIDAD','retencion_anular':'CONTABILIDAD','retenciones_importar':'CONTABILIDAD','retenciones_exportar':'CONTABILIDAD','conciliacion_fiscal':'CONTABILIDAD','iva_papel_trabajo':'CONTABILIDAD','notas_utilidades':'CONTABILIDAD'})
 
 @app.get('/rrhh/informes/excel')
 def rrhh_informes_excel():
