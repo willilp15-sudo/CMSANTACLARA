@@ -1,0 +1,12 @@
+{% extends 'base.html' %}{% block title %}Libro IVA {{tipo|title}}{% endblock %}{% block content %}
+<h2>{% if tipo=='COMPRAS' %}📘{% else %}📗{% endif %} Libro IVA {{tipo|title}}</h2>
+<form method="get" class="card" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+ <label>Año<br><input type="number" name="anio" value="{{anio}}" min="2000" max="2100"></label>
+ <label>Mes<br><select name="mes"><option value="">Todo el año</option>{% for n,nom in [(1,'Enero'),(2,'Febrero'),(3,'Marzo'),(4,'Abril'),(5,'Mayo'),(6,'Junio'),(7,'Julio'),(8,'Agosto'),(9,'Septiembre'),(10,'Octubre'),(11,'Noviembre'),(12,'Diciembre')] %}<option value="{{n}}" {% if mes==n %}selected{% endif %}>{{nom}}</option>{% endfor %}</select></label>
+ <button class="btn" type="submit">🔎 Filtrar</button><a class="btn secondary" href="/libros">← Libros IVA</a>
+</form>
+<p class="muted">Período: {{desde}} al {{hasta}} · Una fila por comprobante. Los registros repetidos del mismo comprobante se consolidan para la presentación del libro.</p>
+<div class="card table"><table><thead><tr><th>Fecha</th><th>Comprobante</th><th>{% if tipo=='COMPRAS' %}Proveedor{% else %}Cliente{% endif %}</th><th>RUC</th><th>Gravado 10%</th><th>IVA 10%</th><th>Gravado 5%</th><th>IVA 5%</th><th>Exento</th><th>Total Gs.</th></tr></thead><tbody>
+{% for r in rows %}<tr><td>{{r.fecha}}</td><td>{{r.numero}}</td><td>{{r.nombre}}</td><td>{{r.ruc}}</td><td>{{'{:,.0f}'.format(r.gravado_10 or 0)}}</td><td>{{'{:,.0f}'.format(r.iva_10 or 0)}}</td><td>{{'{:,.0f}'.format(r.gravado_5 or 0)}}</td><td>{{'{:,.0f}'.format(r.iva_5 or 0)}}</td><td>{{'{:,.0f}'.format(r.exento_iva or 0)}}</td><td><b>{{'{:,.0f}'.format(r.total_pyg or 0)}}</b></td></tr>{% else %}<tr><td colspan="10">No hay comprobantes en el período seleccionado.</td></tr>{% endfor %}</tbody>
+<tfoot><tr><th colspan="4">TOTALES</th><th>{{'{:,.0f}'.format(rows|sum(attribute='gravado_10'))}}</th><th>{{'{:,.0f}'.format(rows|sum(attribute='iva_10'))}}</th><th>{{'{:,.0f}'.format(rows|sum(attribute='gravado_5'))}}</th><th>{{'{:,.0f}'.format(rows|sum(attribute='iva_5'))}}</th><th>{{'{:,.0f}'.format(rows|sum(attribute='exento_iva'))}}</th><th>{{'{:,.0f}'.format(rows|sum(attribute='total_pyg'))}}</th></tr></tfoot></table></div>
+{% endblock %}

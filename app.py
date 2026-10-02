@@ -1020,9 +1020,51 @@ def finanzas():
 @app.route('/contabilidad')
 def contabilidad():
  c=db();asi=c.execute('select * from asientos order by id desc').fetchall();det=c.execute('select d.*,p.nombre cuenta_nombre,a.numero,a.fecha,a.concepto from asiento_det d join asientos a on a.id=d.asiento_id left join plan_cuentas p on p.codigo=d.cuenta order by d.id desc').fetchall();bal=c.execute('select p.codigo,p.nombre,coalesce(sum(d.debe_pyg),0) debe,coalesce(sum(d.haber_pyg),0) haber,coalesce(sum(d.debe_pyg-d.haber_pyg),0) saldo from plan_cuentas p left join asiento_det d on d.cuenta=p.codigo group by p.codigo,p.nombre order by p.codigo').fetchall();c.close();return render_template('accounting.html',asi=asi,det=det,bal=bal)
+def _periodo_libro_args():
+ hoy=datetime.date.today(); anio=request.args.get('anio',type=int) or hoy.year; mes=request.args.get('mes',type=int)
+ if mes is not None and not (1 <= mes <= 12): mes=None
+ if mes:
+  import calendar
+  desde=f'{anio:04d}-{mes:02d}-01'; hasta=f'{anio:04d}-{mes:02d}-{calendar.monthrange(anio,mes)[1]:02d}'
+ else: desde=f'{anio:04d}-01-01'; hasta=f'{anio:04d}-12-31'
+ return anio,mes,desde,hasta
+
+def _libro_consolidado(c,tipo,desde,hasta):
+ tabla='compras' if tipo=='COMPRA' else 'ventas'; fk='proveedor_id' if tipo=='COMPRA' else 'cliente_id'
+ return c.execute(f'''select min(x.id) id,x.fecha,x.numero,x.{fk} tercero_id,coalesce(t.nombre,'') nombre,coalesce(t.ruc,'') ruc,
+  coalesce(max(x.moneda),'PYG') moneda,coalesce(max(x.tipo_cambio),1) tipo_cambio,
+  sum(coalesce(x.gravado_10,0)) gravado_10,sum(coalesce(x.iva_10,0)) iva_10,
+  sum(coalesce(x.gravado_5,0)) gravado_5,sum(coalesce(x.iva_5,0)) iva_5,sum(coalesce(x.exento_iva,0)) exento_iva,
+  max(coalesce(x.total,0)) total,max(coalesce(x.total_pyg,0)) total_pyg,count(*) filas_origen
+  from {tabla} x left join terceros t on t.id=x.{fk}
+  where x.fecha between ? and ? and coalesce(x.estado,'CONFIRMADA')<>'ANULADA'
+  group by x.fecha,x.numero,x.{fk},t.nombre,t.ruc order by x.fecha,x.numero''',(desde,hasta)).fetchall()
+
 @app.route('/libros')
 def libros():
- c=db();compras=c.execute('select x.*,t.nombre from compras x join terceros t on t.id=x.proveedor_id order by fecha,id').fetchall();ventas=c.execute('select x.*,t.nombre from ventas x join terceros t on t.id=x.cliente_id order by fecha,id').fetchall();c.close();return render_template('books.html',compras=compras,ventas=ventas)
+ return render_template('books.html')
+
+@app.route('/libros/compras')
+def libro_compras():
+ anio,mes,desde,hasta=_periodo_libro_args();c=db();rows=_libro_consolidado(c,'COMPRA',desde,hasta);c.close()
+ return render_template('book_tax.html',tipo='COMPRAS',rows=rows,anio=anio,mes=mes,desde=desde,hasta=hasta)
+
+@app.route('/libros/ventas')
+def libro_ventas():
+ anio,mes,desde,hasta=_periodo_libro_args();c=db();rows=_libro_consolidado(c,'VENTA',desde,hasta);c.close()
+ return render_template('book_tax.html',tipo='VENTAS',rows=rows,anio=anio,mes=mes,desde=desde,hasta=hasta)
+
+@app.route('/contabilidad/comparativo')
+def contabilidad_comparativo():
+ anio,mes,desde,hasta=_periodo_libro_args();tipo=(request.args.get('tipo') or 'COMPRAS').upper()
+ if tipo not in ('COMPRAS','VENTAS'): tipo='COMPRAS'
+ c=db(); docs=_libro_consolidado(c,'COMPRA' if tipo=='COMPRAS' else 'VENTA',desde,hasta)
+ origen='COMPRA' if tipo=='COMPRAS' else 'VENTA'
+ diario=c.execute('''select a.fecha,a.numero,a.concepto,a.origen_id,sum(coalesce(d.debe_pyg,0)) debe,sum(coalesce(d.haber_pyg,0)) haber
+  from asientos a join asiento_det d on d.asiento_id=a.id where a.fecha between ? and ? and a.estado='CONFIRMADO' and a.origen_tipo=?
+  group by a.id,a.fecha,a.numero,a.concepto,a.origen_id order by a.fecha,a.id''',(desde,hasta,origen)).fetchall(); c.close()
+ total_docs=sum(float(r['total_pyg'] or 0) for r in docs); total_debe=sum(float(r['debe'] or 0) for r in diario); total_haber=sum(float(r['haber'] or 0) for r in diario)
+ return render_template('accounting_comparative.html',tipo=tipo,docs=docs,diario=diario,anio=anio,mes=mes,desde=desde,hasta=hasta,total_docs=total_docs,total_debe=total_debe,total_haber=total_haber)
 @app.get('/api/tc')
 def api_tc():
  c=db();r=c.execute('select tipo from tipos_cambio where fecha=? and moneda=?',(request.args.get('fecha'),request.args.get('moneda'))).fetchone();c.close();return jsonify({'tipo':r['tipo'] if r else None})
