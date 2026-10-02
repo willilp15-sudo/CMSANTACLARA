@@ -7419,7 +7419,7 @@ def transferencia_deposito_pdf(tid):
  sf=Table([[left[i],right[i]] for i in range(mx)],colWidths=[85*mm,85*mm]);sf.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'BOTTOM')]));story += [sf,Spacer(1,4*mm),Table([['RESPONSABLE QUE ENTREGA','RESPONSABLE QUE RECIBE']],colWidths=[85*mm,85*mm],style=[('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,0),(-1,-1),'Helvetica-Bold')])]
  doc.build(story);out.seek(0);inline=request.args.get('inline')=='1';return send_file(out,as_attachment=not inline,download_name=f"Transferencia_{t['numero']}.pdf",mimetype='application/pdf')
 
-''@app.get('/farmacia/inventario-depositos')
+@app.get('/farmacia/inventario-depositos')
 def inventario_depositos():
  c=db();did=int(request.args.get('deposito_id') or 0);q=(request.args.get('q') or '').strip();deps=c.execute('select * from depositos_stock where activo=1 order by es_principal desc,nombre').fetchall();pat='%'+q+'%';prods=c.execute("select * from productos where coalesce(activo,1)=1 and (codigo like ? or nombre like ? or coalesce(categoria,'') like ? or coalesce(tipo_producto,'') like ?) order by nombre",(pat,pat,pat,pat)).fetchall();inv=[]
  for d in [x for x in deps if not did or int(x['id'])==did]:
