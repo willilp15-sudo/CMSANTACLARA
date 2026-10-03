@@ -1275,7 +1275,20 @@ def hospital_admisiones():
   if aseg_id:_registrar_visacion(c,aseg_id,pid,tipo,aid,mid)
   if cama:c.execute("update camas set estado='OCUPADA' where id=?",(cama,))
   c.commit();audit('INGRESO_PACIENTE',str(aid));flash(f'Ingreso de paciente N.º {aid:06d} registrado correctamente.');return redirect('/ingreso-pacientes')
- rows=c.execute('''select a.*,p.nombre paciente,m.nombre medico,ca.codigo cama,t.nombre facturado_a from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id left join terceros t on t.id=a.facturado_a_tercero_id where a.tipo in ('INTERNACION','QUIROFANO') order by a.id desc''').fetchall();med=c.execute('select * from medicos where coalesce(activo,1)=1 order by nombre').fetchall();aseg=c.execute('select * from aseguradoras where coalesce(activo,1)=1 order by nombre').fetchall();camas=c.execute("select c.*,h.nombre habitacion from camas c join habitaciones h on h.id=c.habitacion_id where c.estado='LIBRE' and coalesce(c.activo,1)=1 order by h.nombre,c.codigo").fetchall();mons=c.execute('select * from monedas').fetchall();terceros=c.execute("select id,nombre,ruc from terceros where tipo in ('CLIENTE','AMBOS') order by nombre").fetchall();hoy=datetime.date.today().isoformat();hora=datetime.datetime.now().strftime('%H:%M');c.close();return render_template('hospital_admissions.html',rows=rows,med=med,aseg=aseg,camas=camas,mons=mons,terceros=terceros,hoy=hoy,hora=hora)
+ q=(request.args.get('q') or '').strip();estado=(request.args.get('estado') or '').strip().upper();tipo_f=(request.args.get('tipo_f') or '').strip().upper()
+ params=[];where=["a.tipo in ('INTERNACION','QUIROFANO')"]
+ if q:
+  qid=q.upper().replace('INT-','').lstrip('0') or '0';like='%'+q+'%'
+  where.append("(cast(a.id as text)=? or ('INT-'||printf('%06d',a.id)) like upper(?) or p.nombre like ? or coalesce(p.documento,'') like ? or coalesce(a.numero_carnet,'') like ?)");params.extend([qid,like,like,like,like])
+ if estado:where.append('upper(a.estado)=?');params.append(estado)
+ if tipo_f in ('INTERNACION','QUIROFANO'):where.append('a.tipo=?');params.append(tipo_f)
+ sql='''select a.*,p.nombre paciente,p.documento,m.nombre medico,ca.codigo cama,t.nombre facturado_a,
+   exists(select 1 from cargos_paciente cp where cp.admision_id=a.id) tiene_cargos,
+   exists(select 1 from enfermeria e where e.admision_id=a.id) tiene_enfermeria,
+   exists(select 1 from facturas_sanatorio fs where fs.admision_id=a.id) tiene_factura,
+   exists(select 1 from solicitudes_farmacia sf where sf.admision_id=a.id) tiene_farmacia
+   from admisiones a join pacientes p on p.id=a.paciente_id left join medicos m on m.id=a.medico_id left join camas ca on ca.id=a.cama_id left join terceros t on t.id=a.facturado_a_tercero_id where '''+' and '.join(where)+' order by a.id desc limit 500'
+ rows=c.execute(sql,params).fetchall();med=c.execute('select * from medicos where coalesce(activo,1)=1 order by nombre').fetchall();aseg=c.execute('select * from aseguradoras where coalesce(activo,1)=1 order by nombre').fetchall();camas=c.execute("select c.*,h.nombre habitacion from camas c join habitaciones h on h.id=c.habitacion_id where c.estado='LIBRE' and coalesce(c.activo,1)=1 order by h.nombre,c.codigo").fetchall();mons=c.execute('select * from monedas').fetchall();terceros=c.execute("select id,nombre,ruc from terceros where tipo in ('CLIENTE','AMBOS') order by nombre").fetchall();hoy=datetime.date.today().isoformat();hora=datetime.datetime.now().strftime('%H:%M');c.close();return render_template('hospital_admissions.html',rows=rows,med=med,aseg=aseg,camas=camas,mons=mons,terceros=terceros,hoy=hoy,hora=hora,q=q,estado=estado,tipo_f=tipo_f)
 @app.route('/admisiones/<int:aid>/editar',methods=['GET','POST'])
 def editar_admision(aid):
  c=db();_asegurar_campos_ingreso_paciente(c);a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
@@ -1308,11 +1321,13 @@ def editar_admision(aid):
 def eliminar_admision(aid):
  c=db();a=c.execute('select * from admisiones where id=?',(aid,)).fetchone()
  if not a:c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
- refs=[('cargos_paciente','admision_id'),('enfermeria','admision_id'),('facturas_sanatorio','admision_id')]
+ refs=[('cargos_paciente','admision_id'),('enfermeria','admision_id'),('facturas_sanatorio','admision_id'),('solicitudes_farmacia','admision_id'),('internacion_traslados','admision_id'),('remisiones_internas','admision_id')]
  for tab,col in refs:
   try:n=c.execute(f'select count(*) from {tab} where {col}=?',(aid,)).fetchone()[0]
   except Exception:n=0
-  if n:c.close();flash('No se puede eliminar: la admisión tiene movimientos relacionados. Puede anularla si corresponde.');return redirect('/admisiones')
+  if n:c.close();flash('No se puede eliminar: la internación tiene movimientos relacionados. Use Anular solo después de revisar/revertir esos movimientos.');return redirect('/admisiones')
+ try:c.execute("delete from seguro_visaciones where origen_id=? and origen_tipo in ('INTERNACION','QUIROFANO')",(aid,))
+ except Exception:pass
  if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
  c.execute('delete from admisiones where id=?',(aid,));audit_change(c,'ELIMINAR','ADMISION',aid,snapshot(a),{});c.commit();c.close();flash('Admisión eliminada.');return redirect('/admisiones')
 
@@ -1322,7 +1337,13 @@ def anular_admision(aid):
  if not a:c.close();flash('Admisión no encontrada.');return redirect('/admisiones')
  if not motivo:c.close();flash('Debe indicar el motivo de anulación.');return redirect('/admisiones')
  fac=c.execute('select 1 from facturas_sanatorio where admision_id=? limit 1',(aid,)).fetchone()
- if fac:c.close();flash('No se puede anular una admisión ya facturada. Debe realizar la corrección mediante el documento fiscal correspondiente.');return redirect('/admisiones')
+ if fac:c.close();flash('No se puede anular una internación ya facturada. Debe realizar la corrección mediante el documento fiscal correspondiente.');return redirect('/admisiones')
+ # Una anulación administrativa no debe ocultar consumos clínicos o de stock existentes.
+ refs=[('cargos_paciente','admision_id'),('enfermeria','admision_id'),('solicitudes_farmacia','admision_id')]
+ for tab,col in refs:
+  try:n=c.execute(f'select count(*) from {tab} where {col}=?',(aid,)).fetchone()[0]
+  except Exception:n=0
+  if n:c.close();flash('La internación tiene cargos, enfermería o movimientos de farmacia. Revierta esos movimientos antes de anularla para mantener la trazabilidad y el stock correctos.');return redirect('/admisiones')
  c.execute("update admisiones set estado='ANULADA' where id=?",(aid,))
  if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
  audit_change(c,'ANULAR','ADMISION',aid,snapshot(a),{'estado':'ANULADA'},motivo);c.commit();c.close();flash('Admisión anulada correctamente.');return redirect('/admisiones')
