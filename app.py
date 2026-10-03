@@ -8121,6 +8121,69 @@ def _imp_gasparini_compras_sin_cabecera(vals):
         for x in grp:x['ruc']=ruc_estable
     return out
 
+
+def _imp_gasparini_cuentas_sin_cabecera(vals,tipo):
+    """Importa los estados de CxC/CxP Gasparini sin cabecera entregados por Santa Clara.
+    No genera stock, asientos ni SIFEN. Conserva documento, tercero, fechas, moneda,
+    importe/saldo y datos fuente para auditoría.
+    """
+    import re, json
+    if not vals or tipo not in ('CXC','CXP'): return []
+    muestra=[list(r) for r in vals[:20] if r]
+    if not muestra: return []
+    lens=[len(r) for r in muestra]
+    if tipo=='CXC' and max(lens)<55: return []
+    if tipo=='CXP' and not (30<=max(lens)<=45): return []
+    def c(r,i): return str(r[i] or '').strip() if 0<=i<len(r) else ''
+    def fecha(v):
+        v=str(v or '').strip()
+        m=re.match(r'(\d{1,2})/(\d{1,2})/(\d{4})',v)
+        return f'{m.group(3)}-{int(m.group(2)):02d}-{int(m.group(1)):02d}' if m else v[:10]
+    def dec(a,b=''):
+        a=str(a or '').strip().replace('.',''); b=str(b or '').strip()
+        try:
+            sign=-1 if a.startswith('-') else 1
+            aa=a.lstrip('+-') or '0'; val=float(aa)
+            if b.isdigit() and b: val+=float('0.'+b)
+            return sign*val
+        except:return 0.0
+    def doc(est,pto,nro):
+        nro=str(nro or '').strip()
+        if re.fullmatch(r'\d{1,8}',nro) and re.fullmatch(r'\d{1,3}',str(est or '').strip()) and re.fullmatch(r'\d{1,3}',str(pto or '').strip()):
+            return f'{int(est):03d}-{int(pto):03d}-{int(nro):07d}'
+        return nro
+    out=[]
+    for r in vals:
+        r=list(r)
+        if tipo=='CXC':
+            if len(r)<55 or not c(r,11): continue
+            documento=doc(c(r,14),c(r,15),c(r,1)); nombre=c(r,11); f=fecha(c(r,2))
+            moneda=(c(r,56) or 'Gs').upper().replace('GS','PYG')
+            importe=abs(dec(c(r,4),c(r,5))); saldo=abs(dec(c(r,27),c(r,28))) or abs(dec(c(r,6),c(r,7)))
+            # En esta exportación el identificador fiscal/documental del cliente está en la zona 39.
+            rr=c(r,39); ruc=rr if re.fullmatch(r'\d{5,10}',rr) else ''
+            venc=fecha(c(r,8)); fuente=c(r,0)
+        else:
+            if len(r)<30 or not c(r,5): continue
+            nombre=c(r,5); f=fecha(c(r,3)); documento=doc(c(r,9),c(r,10),c(r,1)); fuente=c(r,0)
+            ci=next((i for i,v in enumerate(r) if str(v or '').strip().upper() in ('GS','PYG','USD','US$')),None)
+            if ci is None: continue
+            moneda=c(r,ci).upper().replace('GS','PYG').replace('US$','USD')
+            importe=abs(dec(c(r,6),c(r,7))); saldo=abs(dec(c(r,ci+1),c(r,ci+2))) or importe
+            venc=fecha(c(r,11))
+            # RUC + DV se ubican después del bloque de auditoría; se detectan por patrón.
+            ruc=''
+            for i in range(ci+5,min(len(r)-1,ci+18)):
+                a,b=c(r,i),c(r,i+1)
+                if re.fullmatch(r'\d{6,9}',a) and re.fullmatch(r'\d',b): ruc=a+'-'+b; break
+        if not documento or not nombre or importe<=0: continue
+        out.append({'documento':documento,'fecha':f,'vencimiento':venc,'ruc':ruc,'tercero':nombre,
+                    'moneda':moneda,'tipo_cambio':'1','importe':str(importe),'saldo':str(saldo),
+                    'referencia':'Estado de cuenta histórico Gasparini','_cuenta_fuente_id':fuente,
+                    '_raw_source_json':json.dumps(r,ensure_ascii=False,default=str)})
+    # Se exige coincidencia suficiente para no confundir otros CSV sin cabecera.
+    return out if len(out)>=max(2,len(vals)//3) else []
+
 def _imp_rows(file, tipo=None):
     name=(file.filename or '').lower();data=file.read();vals=[]
     sig=data[:16]
@@ -8159,6 +8222,9 @@ def _imp_rows(file, tipo=None):
     except Exception as ex:
         raise ValueError('No se pudo interpretar el archivo. Formato real no reconocido: '+str(ex))
     if not vals:return []
+    cuenta_rows=_imp_gasparini_cuentas_sin_cabecera(vals,tipo) if tipo in ('CXC','CXP') else []
+    if cuenta_rows:
+        return cuenta_rows
     libro_rows=_imp_libro_iva_resumen(vals,tipo) if tipo in ('COMPRA','VENTA') else []
     if libro_rows:
         return libro_rows
@@ -8200,9 +8266,10 @@ def _tercero_import(c,ruc,nombre,tipo):
     cur=c.execute('insert into terceros(tipo,ruc,nombre,moneda) values(?,?,?,?)',(tipo,ruc,nombre,'PYG'));return cur.lastrowid
 
 def _importar_cuentas(tipo,file):
-    rows=_imp_rows(file);c=db();actualizados=nuevos=errores=0;detalle=[]
+    rows=_imp_rows(file,tipo);c=db();actualizados=nuevos=errores=0;detalle=[]
     try:
       c.execute('''create table if not exists importacion_cuentas_log(id integer primary key,fecha text,tipo text,archivo text,accion text,registro_id int,documento text,tercero text,antes text,despues text,usuario text)''')
+      c.execute('''create table if not exists importacion_cuentas_detalle(id integer primary key,tipo text,registro_id int,documento text,fecha text,vencimiento text,ruc text,tercero text,moneda text,importe real,saldo real,referencia text,fuente_id text,raw_json text,creado_en text,usuario text)''')
       for n,r in enumerate(rows,2):
        try:
         doc=_imp_norm(r.get('documento'));ruc=_imp_norm(r.get('ruc'));nom=_imp_norm(r.get('tercero'))
@@ -8231,6 +8298,8 @@ def _importar_cuentas(tipo,file):
         else:
           before={};cur=c.execute(f'insert into {tab}({fk},tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(bid,tid,moneda,tc,imp,saldo,imp*tc,estado));rid=cur.lastrowid;nuevos+=1;accion='CREAR'
         c.execute('insert into importacion_cuentas_log(fecha,tipo,archivo,accion,registro_id,documento,tercero,antes,despues,usuario) values(?,?,?,?,?,?,?,?,?,?)',(now(),tipo,file.filename,accion,rid,doc,nom or ruc,json.dumps(before,ensure_ascii=False,default=str),json.dumps(after,ensure_ascii=False),session.get('user')))
+        c.execute('delete from importacion_cuentas_detalle where tipo=? and registro_id=?',(tipo,rid))
+        c.execute('insert into importacion_cuentas_detalle(tipo,registro_id,documento,fecha,vencimiento,ruc,tercero,moneda,importe,saldo,referencia,fuente_id,raw_json,creado_en,usuario) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(tipo,rid,doc,_imp_norm(r.get('fecha')),_imp_norm(r.get('vencimiento')),ruc,nom,moneda,imp,saldo,_imp_norm(r.get('referencia')),_imp_norm(r.get('_cuenta_fuente_id')),_imp_norm(r.get('_raw_source_json')),now(),session.get('user')))
        except Exception as e:
         errores+=1;detalle.append(f'Fila {n}: {e}')
       c.commit()
