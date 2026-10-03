@@ -473,8 +473,8 @@ def compras():
   return redirect('/compras')
  q=(request.args.get('q') or '').strip(); buscado=bool(q); rows=[]
  if buscado:
-  like='%'+q+'%'
-  rows=c.execute("select x.*,t.nombre tercero from compras x join terceros t on t.id=x.proveedor_id where x.numero like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(like,like,like,like)).fetchall()
+  like='%'+q+'%'; qnorm=q.upper().strip(); qid=qnorm[4:] if qnorm.startswith('CMP-') else qnorm
+  rows=c.execute("select x.*,t.nombre tercero,t.ruc tercero_ruc from compras x join terceros t on t.id=x.proveedor_id where cast(x.id as text)=? or ('CMP-' || printf('%06d',x.id)) like ? or x.numero like ? or coalesce(t.ruc,'') like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(qid,like,like,like,like,like,like)).fetchall()
  ters=c.execute("select * from terceros where tipo in ('PROVEEDOR','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('transaction.html',kind='Compra',rows=rows,ters=ters,prods=prods,mons=mons,buscado=buscado,q=q)
 
 
@@ -8629,5 +8629,64 @@ def sifen_preparacion():
  c.close();return render_template('sifen_readiness.html',checks=checks,bloqueos=bloqueos)
 
 ROUTE_MODULE.update({'puesta_en_marcha':'CONFIG_SANATORIO','puesta_marcha_reset':'CONFIG_SANATORIO','puesta_marcha_importar':'CONFIG_SANATORIO','sifen_preparacion':'FACTURACION'})
+
+# ===== V13.10.31: MAESTRO CONTABLE ORDENADO + BUSQUEDA INTERNA =====
+@app.get('/ventas/registros')
+def ventas_registros():
+    q=(request.args.get('q') or '').strip(); rows=[]; c=db()
+    if q:
+        like='%'+q+'%'; qnorm=q.upper().strip(); qid=qnorm[4:] if qnorm.startswith('VTA-') else qnorm
+        rows=c.execute("""select v.*,coalesce(t.nombre,'') tercero,coalesce(t.ruc,'') tercero_ruc
+          from ventas v left join terceros t on t.id=v.cliente_id
+          where cast(v.id as text)=? or ('VTA-' || printf('%06d',v.id)) like ? or v.numero like ?
+             or coalesce(v.cdc,'') like ? or coalesce(t.ruc,'') like ? or coalesce(t.nombre,'') like ?
+             or coalesce(v.estado,'') like ? or v.fecha like ? order by v.id desc limit 200""",
+          (qid,like,like,like,like,like,like,like)).fetchall()
+    c.close(); return render_template('sales_registry.html',q=q,rows=rows,buscado=bool(q))
+
+@app.get('/contabilidad/asientos')
+def contabilidad_asientos():
+    q=(request.args.get('q') or '').strip(); c=db(); pars=[]
+    sql="select a.*,coalesce(sum(d.debe_pyg),0) debe,coalesce(sum(d.haber_pyg),0) haber from asientos a left join asiento_det d on d.asiento_id=a.id"
+    if q:
+        like='%'+q+'%'; sql+=" where cast(a.id as text)=? or a.numero like ? or a.concepto like ? or coalesce(a.origen_tipo,'') like ?";pars=[q,like,like,like]
+    sql+=' group by a.id order by a.fecha desc,a.id desc limit 300'; rows=c.execute(sql,pars).fetchall(); c.close()
+    return render_template('accounting_entries.html',rows=rows,q=q)
+
+@app.route('/contabilidad/centros-costos',methods=['GET','POST'])
+def centros_costos():
+    c=db();c.execute("CREATE TABLE IF NOT EXISTS centros_costos(id INTEGER PRIMARY KEY,codigo TEXT UNIQUE NOT NULL,nombre TEXT NOT NULL,activo INTEGER DEFAULT 1,creado_en TEXT)")
+    if request.method=='POST':
+        codigo=(request.form.get('codigo') or '').strip().upper();nombre=(request.form.get('nombre') or '').strip()
+        if codigo and nombre:
+            c.execute("insert into centros_costos(codigo,nombre,activo,creado_en) values(?,?,1,?) on conflict(codigo) do update set nombre=excluded.nombre,activo=1",(codigo,nombre,now()));c.commit();audit('CENTRO_COSTO',codigo)
+        c.close();return redirect('/contabilidad/centros-costos')
+    rows=c.execute('select * from centros_costos order by codigo').fetchall();c.close();return render_template('accounting_cost_centers.html',rows=rows)
+
+@app.get('/contabilidad/cierre/<tipo>')
+def contabilidad_cierre(tipo):
+    if tipo not in ('mensual','anual','asientos'): return 'Tipo de cierre no válido',404
+    return render_template('accounting_closing.html',tipo=tipo)
+
+@app.get('/contabilidad/auditoria/<tipo>')
+def contabilidad_auditoria(tipo):
+    periodo=request.args.get('periodo') or datetime.date.today().strftime('%Y-%m'); desde=periodo+'-01'
+    try:
+        y,m=map(int,periodo.split('-')); hasta=(datetime.date(y+1,1,1) if m==12 else datetime.date(y,m+1,1))-datetime.timedelta(days=1);hasta=hasta.isoformat()
+    except: desde='1900-01-01';hasta='2099-12-31'
+    c=db();rows=[];headers=[];titulo='Auditoría contable'
+    if tipo=='sin-contabilizar':
+        titulo='Documentos sin contabilizar';headers=['Tipo','ID interno','Fecha','Comprobante','Tercero','Total Gs.']
+        rows=c.execute("""select 'COMPRA','CMP-'||printf('%06d',co.id),co.fecha,co.numero,coalesce(t.nombre,''),co.total_pyg from compras co left join terceros t on t.id=co.proveedor_id where co.fecha between ? and ? and coalesce(co.estado,'')!='ANULADA' and not exists(select 1 from asientos a where a.origen_tipo='COMPRA' and a.origen_id=co.id) union all select 'VENTA','VTA-'||printf('%06d',v.id),v.fecha,v.numero,coalesce(t.nombre,''),v.total_pyg from ventas v left join terceros t on t.id=v.cliente_id where v.fecha between ? and ? and coalesce(v.estado,'')!='ANULADA' and not exists(select 1 from asientos a where a.origen_tipo in ('VENTA','FACTURA') and a.origen_id=v.id) order by 3""",(desde,hasta,desde,hasta)).fetchall()
+    elif tipo=='asientos-sin-documento':
+        titulo='Asientos sin documento de origen';headers=['ID','Fecha','Asiento','Concepto','Origen'];rows=c.execute("select id,fecha,numero,concepto,coalesce(origen_tipo,'') from asientos where fecha between ? and ? and (coalesce(origen_tipo,'')='' or origen_id is null) order by fecha,id",(desde,hasta)).fetchall()
+    elif tipo=='trazabilidad':
+        titulo='Trazabilidad / Auditoría';headers=['Fecha','Usuario','Acción','Detalle'];rows=c.execute("select fecha,usuario,accion,detalle from auditoria where substr(fecha,1,10) between ? and ? order by id desc limit 1000",(desde,hasta)).fetchall()
+    else:
+        titulo='Diferencias ERP ↔ Marangatu';headers=['Información'];rows=[('Use la conciliación fiscal y cargue/importa los archivos de Marangatu para identificar diferencias.',)]
+    c.close();return render_template('accounting_audit.html',tipo=tipo,titulo=titulo,headers=headers,rows=rows,periodo=periodo)
+
+ROUTE_MODULE.update({'ventas_registros':'VENTAS','contabilidad_asientos':'CONTABILIDAD','centros_costos':'CONTABILIDAD','contabilidad_cierre':'CONTABILIDAD','contabilidad_auditoria':'CONTABILIDAD'})
+
 
 # ===== V13.10.10: caja universal + correlatividad por punto vinculado =====
