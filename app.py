@@ -8690,3 +8690,124 @@ ROUTE_MODULE.update({'ventas_registros':'VENTAS','contabilidad_asientos':'CONTAB
 
 
 # ===== V13.10.10: caja universal + correlatividad por punto vinculado =====
+
+# ===== V13.10.32: UMT + CONTROL INTERNO DE LIMPIEZA =====
+MODULES.update({'UMT':'UMT / Banco de Sangre','LIMPIEZA':'Limpieza / Control Interno'})
+
+def init_v131032_umt_limpieza():
+ c=db(); c.executescript('''
+ CREATE TABLE IF NOT EXISTS umt_componentes(id INTEGER PRIMARY KEY,codigo TEXT UNIQUE NOT NULL,nombre TEXT NOT NULL,dias_alerta INTEGER DEFAULT 7,activo INTEGER DEFAULT 1);
+ CREATE TABLE IF NOT EXISTS umt_unidades(id INTEGER PRIMARY KEY,codigo_interno TEXT UNIQUE,numero_bolsa TEXT UNIQUE NOT NULL,componente_id INTEGER NOT NULL,grupo_abo TEXT NOT NULL,factor_rh TEXT NOT NULL,fecha_ingreso TEXT NOT NULL,fecha_extraccion TEXT,fecha_vencimiento TEXT NOT NULL,procedencia TEXT,estado TEXT DEFAULT 'DISPONIBLE',paciente TEXT,observacion TEXT,creado_por TEXT,creado_en TEXT);
+ CREATE TABLE IF NOT EXISTS umt_movimientos(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,unidad_id INTEGER NOT NULL,tipo TEXT NOT NULL,estado_anterior TEXT,estado_nuevo TEXT,destino TEXT,responsable TEXT,observacion TEXT,usuario TEXT);
+ CREATE TABLE IF NOT EXISTS umt_canjes(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,unidad_entregada_id INTEGER NOT NULL,destino TEXT,responsable TEXT,numero_bolsa_recibida TEXT,unidad_recibida_id INTEGER,observacion TEXT,usuario TEXT);
+ CREATE TABLE IF NOT EXISTS limpieza_productos(id INTEGER PRIMARY KEY,codigo TEXT UNIQUE NOT NULL,nombre TEXT NOT NULL,unidad TEXT DEFAULT 'UN',stock_min REAL DEFAULT 0,activo INTEGER DEFAULT 1,observacion TEXT);
+ CREATE TABLE IF NOT EXISTS limpieza_movimientos(id INTEGER PRIMARY KEY,fecha TEXT NOT NULL,producto_id INTEGER NOT NULL,tipo TEXT NOT NULL,cantidad REAL NOT NULL,sector TEXT,responsable TEXT,documento TEXT,observacion TEXT,usuario TEXT);
+ ''')
+ for cod,nom,dias in [('GR','Glóbulos Rojos',7),('PFC','Plasma Fresco Congelado',15),('PLAQ','Plaquetas',2),('CRIO','Crioprecipitado',15)]:
+  c.execute('insert or ignore into umt_componentes(codigo,nombre,dias_alerta,activo) values(?,?,?,1)',(cod,nom,dias))
+ # Permisos del rol administrador; otros roles se configuran desde Usuarios y Roles.
+ rid=c.execute("select id from roles where nombre='ADMINISTRADOR'").fetchone()
+ if rid:
+  for m in ('UMT','LIMPIEZA'):
+   for a in ACTIONS:c.execute('insert or ignore into permisos_rol(rol_id,modulo,accion,permitido) values(?,?,?,1)',(rid[0],m,a))
+ c.commit();c.close()
+init_v131032_umt_limpieza()
+
+def _umt_estado_visual(r):
+ if (r['estado'] or '').upper()!='DISPONIBLE': return (r['estado'] or '').upper()
+ try:
+  dias=(datetime.date.fromisoformat(r['fecha_vencimiento'])-datetime.date.today()).days
+  if dias<0:return 'VENCIDO'
+  if dias==0:return 'VENCE HOY'
+  alerta=int(r['dias_alerta'] or 7)
+  if dias<=alerta:return 'PRÓXIMO A VENCER'
+ except: pass
+ return 'DISPONIBLE'
+
+@app.route('/umt',methods=['GET','POST'])
+def umt_maestro():
+ c=db()
+ if request.method=='POST':
+  if not user_has('UMT','CREAR'):c.close();return ('Acceso no autorizado',403)
+  bolsa=(request.form.get('numero_bolsa') or '').strip(); comp=int(request.form.get('componente_id') or 0); abo=(request.form.get('grupo_abo') or '').strip().upper(); rh=(request.form.get('factor_rh') or '').strip()
+  fi=request.form.get('fecha_ingreso') or datetime.date.today().isoformat(); fv=request.form.get('fecha_vencimiento') or ''
+  if not bolsa or not comp or abo not in ('A','B','AB','O') or rh not in ('+','-') or not fv:
+   c.close();flash('Complete bolsa, hemocomponente, grupo ABO/Rh y vencimiento.');return redirect('/umt')
+  try:
+   cur=c.execute('''insert into umt_unidades(numero_bolsa,componente_id,grupo_abo,factor_rh,fecha_ingreso,fecha_extraccion,fecha_vencimiento,procedencia,estado,observacion,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?)''',(bolsa,comp,abo,rh,fi,request.form.get('fecha_extraccion') or None,fv,(request.form.get('procedencia') or '').strip(),'DISPONIBLE',(request.form.get('observacion') or '').strip(),session.get('user'),now()))
+   uid=cur.lastrowid; codigo=f'UMT-{uid:06d}';c.execute('update umt_unidades set codigo_interno=? where id=?',(codigo,uid));c.execute('insert into umt_movimientos(fecha,unidad_id,tipo,estado_nuevo,responsable,observacion,usuario) values(?,?,?,?,?,?,?)',(now(),uid,'INGRESO','DISPONIBLE',session.get('name') or session.get('user'),'Alta de unidad',session.get('user')));c.commit();audit('UMT_INGRESO',codigo);flash('Unidad registrada: '+codigo)
+  except Exception as e:c.rollback();flash('No se pudo registrar la unidad: '+str(e))
+  finally:c.close()
+  return redirect('/umt')
+ q=(request.args.get('q') or '').strip(); estado=(request.args.get('estado') or '').strip().upper(); pars=[]
+ sql='''select u.*,c.nombre componente,c.dias_alerta from umt_unidades u join umt_componentes c on c.id=u.componente_id where 1=1'''
+ if q:sql+=' and (u.codigo_interno like ? or u.numero_bolsa like ? or u.grupo_abo like ? or u.procedencia like ?)';like='%'+q+'%';pars += [like]*4
+ if estado and estado in ('DISPONIBLE','RESERVADO','UTILIZADO','CANJEADO','BAJA'):sql+=' and u.estado=?';pars.append(estado)
+ sql+=' order by case when u.estado="DISPONIBLE" then 0 else 1 end,u.fecha_vencimiento,u.id desc'; raw=c.execute(sql,pars).fetchall(); comps=c.execute('select * from umt_componentes where activo=1 order by nombre').fetchall();c.close()
+ rows=[dict(r,estado_visual=_umt_estado_visual(r)) for r in raw]
+ resumen={k:sum(1 for r in rows if r['estado_visual']==k) for k in ['DISPONIBLE','PRÓXIMO A VENCER','VENCE HOY','VENCIDO','RESERVADO']}
+ return render_template('umt_master.html',rows=rows,componentes=comps,q=q,estado=estado,resumen=resumen,hoy=datetime.date.today().isoformat())
+
+@app.post('/umt/<int:uid>/estado')
+def umt_estado(uid):
+ if not user_has('UMT','EDITAR'):return ('Acceso no autorizado',403)
+ nuevo=(request.form.get('estado') or '').upper(); permitidos=('DISPONIBLE','RESERVADO','UTILIZADO','BAJA')
+ if nuevo not in permitidos:flash('Estado no permitido.');return redirect('/umt')
+ c=db();u=c.execute('select * from umt_unidades where id=?',(uid,)).fetchone()
+ if not u:c.close();return ('Unidad no encontrada',404)
+ if _umt_estado_visual(dict(u,dias_alerta=7))=='VENCIDO' and nuevo in ('RESERVADO','UTILIZADO'):
+  c.close();flash('Una unidad vencida no puede reservarse ni utilizarse.');return redirect('/umt')
+ anterior=u['estado'];c.execute('update umt_unidades set estado=?,paciente=?,observacion=case when ?<>"" then ? else observacion end where id=?',(nuevo,(request.form.get('paciente') or '').strip(),(request.form.get('observacion') or '').strip(),(request.form.get('observacion') or '').strip(),uid));c.execute('insert into umt_movimientos(fecha,unidad_id,tipo,estado_anterior,estado_nuevo,destino,responsable,observacion,usuario) values(?,?,?,?,?,?,?,?,?)',(now(),uid,'CAMBIO_ESTADO',anterior,nuevo,(request.form.get('paciente') or '').strip(),(request.form.get('responsable') or session.get('name') or '').strip(),(request.form.get('observacion') or '').strip(),session.get('user')));c.commit();c.close();audit('UMT_ESTADO',f'{uid}:{anterior}->{nuevo}');return redirect('/umt')
+
+@app.post('/umt/<int:uid>/canje')
+def umt_canje(uid):
+ if not user_has('UMT','EDITAR'):return ('Acceso no autorizado',403)
+ c=db();u=c.execute('select * from umt_unidades where id=?',(uid,)).fetchone()
+ if not u or u['estado']!='DISPONIBLE':c.close();flash('Solo una unidad disponible puede enviarse a canje.');return redirect('/umt')
+ destino=(request.form.get('destino') or '').strip(); responsable=(request.form.get('responsable') or '').strip(); recibida=(request.form.get('numero_bolsa_recibida') or '').strip()
+ c.execute("update umt_unidades set estado='CANJEADO' where id=?",(uid,));c.execute('insert into umt_canjes(fecha,unidad_entregada_id,destino,responsable,numero_bolsa_recibida,observacion,usuario) values(?,?,?,?,?,?,?)',(now(),uid,destino,responsable,recibida,(request.form.get('observacion') or '').strip(),session.get('user')));c.execute("insert into umt_movimientos(fecha,unidad_id,tipo,estado_anterior,estado_nuevo,destino,responsable,observacion,usuario) values(?,?,?,?,?,?,?,?,?)",(now(),uid,'CANJE','DISPONIBLE','CANJEADO',destino,responsable,(request.form.get('observacion') or '').strip(),session.get('user')));c.commit();c.close();audit('UMT_CANJE',str(uid));flash('Canje registrado. Si recibió otra bolsa, regístrela como nueva unidad para conservar su trazabilidad.');return redirect('/umt')
+
+@app.route('/umt/componentes',methods=['GET','POST'])
+def umt_componentes():
+ c=db()
+ if request.method=='POST':
+  if not user_has('UMT','ADMINISTRAR'):c.close();return ('Acceso no autorizado',403)
+  codigo=(request.form.get('codigo') or '').strip().upper();nombre=(request.form.get('nombre') or '').strip();dias=int(request.form.get('dias_alerta') or 7)
+  if codigo and nombre:c.execute('insert into umt_componentes(codigo,nombre,dias_alerta,activo) values(?,?,?,1) on conflict(codigo) do update set nombre=excluded.nombre,dias_alerta=excluded.dias_alerta,activo=1',(codigo,nombre,dias));c.commit()
+  c.close();return redirect('/umt/componentes')
+ rows=c.execute('select * from umt_componentes order by nombre').fetchall();c.close();return render_template('umt_components.html',rows=rows)
+
+@app.get('/umt/movimientos')
+def umt_movimientos():
+ c=db();rows=c.execute('''select m.*,u.codigo_interno,u.numero_bolsa,c.nombre componente,u.grupo_abo,u.factor_rh from umt_movimientos m join umt_unidades u on u.id=m.unidad_id join umt_componentes c on c.id=u.componente_id order by m.id desc limit 1000''').fetchall();c.close();return render_template('umt_movements.html',rows=rows)
+
+@app.route('/limpieza',methods=['GET','POST'])
+def limpieza_maestro():
+ c=db()
+ if request.method=='POST':
+  if not user_has('LIMPIEZA','CREAR'):c.close();return ('Acceso no autorizado',403)
+  codigo=(request.form.get('codigo') or '').strip().upper();nombre=(request.form.get('nombre') or '').strip();unidad=(request.form.get('unidad') or 'UN').strip().upper();minimo=float(request.form.get('stock_min') or 0)
+  if codigo and nombre:
+   try:c.execute('insert into limpieza_productos(codigo,nombre,unidad,stock_min,activo,observacion) values(?,?,?,?,1,?)',(codigo,nombre,unidad,minimo,(request.form.get('observacion') or '').strip()));c.commit();audit('LIMPIEZA_PRODUCTO',codigo)
+   except Exception as e:c.rollback();flash('No se pudo registrar: '+str(e))
+  c.close();return redirect('/limpieza')
+ q=(request.args.get('q') or '').strip();pars=[];where=' where p.activo=1'
+ if q:where+=' and (p.codigo like ? or p.nombre like ?)';like='%'+q+'%';pars=[like,like]
+ rows=c.execute('''select p.*,coalesce(sum(case when m.tipo='ENTRADA' then m.cantidad else -m.cantidad end),0) stock_actual from limpieza_productos p left join limpieza_movimientos m on m.producto_id=p.id'''+where+' group by p.id order by p.nombre',pars).fetchall();c.close();return render_template('cleaning_stock.html',rows=rows,q=q)
+
+@app.post('/limpieza/<int:pid>/movimiento')
+def limpieza_movimiento(pid):
+ if not user_has('LIMPIEZA','EDITAR') and not user_has('LIMPIEZA','CREAR'):return ('Acceso no autorizado',403)
+ tipo=(request.form.get('tipo') or '').upper();qty=float(request.form.get('cantidad') or 0)
+ if tipo not in ('ENTRADA','SALIDA') or qty<=0:flash('Movimiento inválido.');return redirect('/limpieza')
+ c=db();p=c.execute('select * from limpieza_productos where id=? and activo=1',(pid,)).fetchone()
+ if not p:c.close();return ('Producto no encontrado',404)
+ actual=c.execute("select coalesce(sum(case when tipo='ENTRADA' then cantidad else -cantidad end),0) s from limpieza_movimientos where producto_id=?",(pid,)).fetchone()['s']
+ if tipo=='SALIDA' and qty>float(actual or 0):c.close();flash('Salida superior al stock interno disponible.');return redirect('/limpieza')
+ c.execute('insert into limpieza_movimientos(fecha,producto_id,tipo,cantidad,sector,responsable,documento,observacion,usuario) values(?,?,?,?,?,?,?,?,?)',(now(),pid,tipo,qty,(request.form.get('sector') or '').strip(),(request.form.get('responsable') or '').strip(),(request.form.get('documento') or '').strip(),(request.form.get('observacion') or '').strip(),session.get('user')));c.commit();c.close();audit('LIMPIEZA_'+tipo,f'{p["codigo"]}:{qty}');flash('Movimiento interno registrado. No genera inventario ni asiento contable.');return redirect('/limpieza')
+
+@app.get('/limpieza/movimientos')
+def limpieza_movimientos():
+ c=db();rows=c.execute('''select m.*,p.codigo,p.nombre,p.unidad from limpieza_movimientos m join limpieza_productos p on p.id=m.producto_id order by m.id desc limit 1000''').fetchall();c.close();return render_template('cleaning_movements.html',rows=rows)
+
+ROUTE_MODULE.update({'umt_maestro':'UMT','umt_estado':'UMT','umt_canje':'UMT','umt_componentes':'UMT','umt_movimientos':'UMT','limpieza_maestro':'LIMPIEZA','limpieza_movimiento':'LIMPIEZA','limpieza_movimientos':'LIMPIEZA'})
