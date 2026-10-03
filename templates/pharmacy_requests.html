@@ -1,1 +1,30 @@
-{% extends 'base.html' %}{% block title %}Farmacia Interna · Solicitudes{% endblock %}{% block content %}<h2>Solicitudes de Enfermería</h2><table><tr><th>ID</th><th>Paciente</th><th>Sector</th><th>Producto</th><th>Solicitado</th><th>Stock</th><th>Estado</th><th>Acción</th></tr>{% for r in rows %}<tr><td>{{r.id}}</td><td>{{r.paciente}}</td><td>{{r.tipo}}</td><td>{{r.producto}}</td><td>{{r.cantidad_solicitada}}</td><td>{{r.stock}}</td><td>{{r.item_estado}}</td><td>{% if r.item_estado=='PENDIENTE' %}<form method="post" action="/farmacia/autorizar/{{r.item_id}}"><input type="number" step="0.01" name="cantidad_autorizada" value="{{r.cantidad_solicitada}}" min="0"><button>Autorizar</button></form>{% elif r.item_estado in ['AUTORIZADA','PARCIAL'] %}<form method="post" action="/farmacia/entregar/{{r.item_id}}"><input type="number" step="0.01" name="cantidad_entregada" value="{{r.cantidad_autorizada-r.cantidad_entregada}}" min="0"><button>Entregar y cargar a cuenta</button></form>{% endif %}</td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Farmacia Interna · Solicitudes{% endblock %}
+{% block content %}
+<h2>Solicitudes de Enfermería</h2>
+<p>Farmacia puede autorizar, entregar y estornar artículos. El estorno reintegra la mercadería al stock y registra un cargo negativo en la cuenta del paciente, manteniendo la trazabilidad.</p>
+<table>
+<tr><th>ID</th><th>Paciente</th><th>Sector</th><th>Producto</th><th>Solicitado</th><th>Entregado</th><th>Devuelto</th><th>Pend. devolución</th><th>Stock</th><th>Estado</th><th>Acción</th></tr>
+{% for r in rows %}
+{% set dev = r.cantidad_devuelta or 0 %}
+{% set pend_dev = (r.cantidad_entregada or 0) - dev %}
+<tr>
+<td>#{{r.id}}</td><td>{{r.paciente}}</td><td>{{r.tipo}}</td><td>{{r.producto}}</td><td>{{r.cantidad_solicitada}}</td><td>{{r.cantidad_entregada or 0}}</td><td>{{dev}}</td><td>{{pend_dev}}</td><td>{{r.stock}}</td><td>{{r.item_estado}}</td>
+<td>
+{% if r.item_estado=='PENDIENTE' %}
+<form method="post" action="/farmacia/autorizar/{{r.item_id}}"><input type="number" step="0.01" name="cantidad_autorizada" value="{{r.cantidad_solicitada}}" min="0"><button>Autorizar</button></form>
+{% elif r.item_estado in ['AUTORIZADA','PARCIAL'] %}
+<form method="post" action="/farmacia/entregar/{{r.item_id}}"><input type="number" step="0.01" name="cantidad_entregada" value="{{r.cantidad_autorizada-r.cantidad_entregada}}" min="0"><button>Entregar y cargar a cuenta</button></form>
+{% endif %}
+{% if pend_dev > 0 %}
+<details style="margin-top:8px"><summary class="btn secondary" style="cursor:pointer">↩ Estornar / Devolver</summary>
+<form method="post" action="/farmacia/estornar/{{r.item_id}}" style="margin-top:8px;min-width:240px" onsubmit="return confirm('¿Confirma el estorno? La mercadería volverá al stock y se descontará de la cuenta del paciente.')">
+<label>Cantidad a devolver<input type="number" step="0.01" min="0.01" max="{{pend_dev}}" name="cantidad_devuelta" value="{{pend_dev}}" required></label>
+<label>Motivo<input name="motivo" placeholder="Ej.: solicitado por error" required></label>
+<button>Confirmar estorno</button>
+</form></details>
+{% endif %}
+</td></tr>
+{% endfor %}
+</table>
+{% endblock %}

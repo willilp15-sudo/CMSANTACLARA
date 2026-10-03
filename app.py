@@ -1669,6 +1669,9 @@ def init_modular():
  CREATE TABLE IF NOT EXISTS solicitudes_farmacia(id INTEGER PRIMARY KEY,fecha TEXT,admision_id INT,solicitante TEXT,estado TEXT DEFAULT 'PENDIENTE',observacion TEXT,autorizado_por TEXT,autorizado_en TEXT);
  CREATE TABLE IF NOT EXISTS solicitud_farmacia_items(id INTEGER PRIMARY KEY,solicitud_id INT,producto_id INT,cantidad_solicitada REAL,cantidad_autorizada REAL DEFAULT 0,cantidad_entregada REAL DEFAULT 0,estado TEXT DEFAULT 'PENDIENTE');
  ''')
+ # V13.10.34: cantidad acumulada devuelta/estornada por Farmacia. Migración aditiva.
+ cols_sf=[r['name'] for r in c.execute('pragma table_info(solicitud_farmacia_items)').fetchall()]
+ if 'cantidad_devuelta' not in cols_sf:c.execute('alter table solicitud_farmacia_items add column cantidad_devuelta REAL DEFAULT 0')
  defaults={
  'ADMINISTRADOR':list(MODULES),
  'RECEPCION':['PACIENTES','CONSULTORIO','URGENCIAS','FACTURACION'],
@@ -1774,7 +1777,7 @@ def modular_guard():
   'alta':('ADMISION','ALTA'),'trasladar_internacion':('ADMISION','TRASLADAR'),
   'hospital_enfermeria':('ENFERMERIA','VER'),'enfermeria_solicitar_farmacia':('ENFERMERIA','SOLICITAR'),
   'farmacia_solicitudes':('FARMACIA','VER'),'farmacia_autorizar':('FARMACIA','AUTORIZAR'),
-  'farmacia_entregar':('FARMACIA','ENTREGAR'),
+  'farmacia_entregar':('FARMACIA','ENTREGAR'),'farmacia_estornar':('FARMACIA','ENTREGAR'),
   'consultas_medicas':('CONSULTORIO','CREAR' if request.method=='POST' else 'VER'),
   'mis_pacientes':('CONSULTORIO','VER'),'llamar_paciente':('CONSULTORIO','LLAMAR'),
   'historia_clinica_v12':('HISTORIA','HISTORIA' if request.method=='POST' else 'VER'),
@@ -1909,6 +1912,40 @@ def farmacia_entregar(item_id):
  c.execute('update productos set stock=stock-? where id=?',(qty,i['producto_id']));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(now()[:10],i['producto_id'],'SALIDA',-qty,i['costo_pyg'],'FARMACIA_PACIENTE',i['admision_id']))
  c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(now()[:10],i['admision_id'],'PRODUCTO',i['producto_id'],i['nombre'],qty,price,a['moneda'],tc,total,total*tc,float(i['iva_pct'] or 0)))
  newent=i['cantidad_entregada']+qty;estado='ENTREGADA' if newent>=i['cantidad_autorizada'] else 'PARCIAL';c.execute('update solicitud_farmacia_items set cantidad_entregada=?,estado=? where id=?',(newent,estado,item_id));c.execute('update solicitudes_farmacia set estado=? where id=?',(estado,i['solicitud_id']));audit_change(c,'ENTREGAR','FARMACIA',item_id,despues={'cantidad':qty,'admision':i['admision_id']});c.commit();c.close();return redirect('/farmacia-solicitudes')
+
+
+@app.post('/farmacia/estornar/<int:item_id>')
+def farmacia_estornar(item_id):
+ c=db()
+ i=c.execute("""select i.*,s.admision_id,s.id solicitud_id,p.nombre,p.stock,p.precio_pyg,p.costo_pyg,p.iva_pct,a.moneda,a.tipo_cambio
+  from solicitud_farmacia_items i join solicitudes_farmacia s on s.id=i.solicitud_id
+  join productos p on p.id=i.producto_id join admisiones a on a.id=s.admision_id where i.id=?""",(item_id,)).fetchone()
+ if not i:
+  c.close();flash('Pedido de Farmacia no encontrado.');return redirect('/farmacia-solicitudes')
+ entregada=float(i['cantidad_entregada'] or 0);devuelta=float(i['cantidad_devuelta'] or 0);disponible=entregada-devuelta
+ try:qty=float(request.form.get('cantidad_devuelta') or 0)
+ except:qty=0
+ motivo=(request.form.get('motivo') or '').strip()
+ if qty<=0 or qty>disponible+1e-9:
+  c.close();flash('Cantidad de devolución inválida. No puede devolver más de lo entregado pendiente de estorno.');return redirect('/farmacia-solicitudes')
+ if not motivo:
+  c.close();flash('Debe indicar el motivo del estorno/devolución.');return redirect('/farmacia-solicitudes')
+ cargos=c.execute("""select * from cargos_paciente where admision_id=? and tipo='PRODUCTO' and referencia_id=? and coalesce(facturado,0)=0 and cantidad>0 order by id desc""",(i['admision_id'],i['producto_id'])).fetchall()
+ disponible_cuenta=sum(float(x['cantidad'] or 0) for x in cargos)
+ if disponible_cuenta+1e-9<qty:
+  c.close();flash('No se puede estornar: la cantidad ya fue facturada/cerrada o no existe saldo suficiente en la cuenta del paciente.');return redirect('/farmacia-solicitudes')
+ tc=float(i['tipo_cambio'] or 1);price=float(i['precio_pyg'] or 0)/tc;total=qty*price
+ c.execute('update productos set stock=stock+? where id=?',(qty,i['producto_id']))
+ c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(now()[:10],i['producto_id'],'ENTRADA_ESTORNO',qty,float(i['costo_pyg'] or 0),'ESTORNO_FARMACIA',item_id))
+ c.execute("""insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct)
+  values(?,?,?,?,?,?,?,?,?,?,?,?)""",(now()[:10],i['admision_id'],'PRODUCTO',i['producto_id'],'ESTORNO · '+i['nombre']+' · '+motivo,-qty,price,i['moneda'],tc,-total,-total*tc,float(i['iva_pct'] or 0)))
+ nueva_dev=devuelta+qty;restante=entregada-nueva_dev;estado='DEVUELTA' if restante<=1e-9 else 'DEVOLUCION_PARCIAL'
+ c.execute('update solicitud_farmacia_items set cantidad_devuelta=?,estado=? where id=?',(nueva_dev,estado,item_id))
+ its=c.execute('select cantidad_entregada,coalesce(cantidad_devuelta,0) cantidad_devuelta from solicitud_farmacia_items where solicitud_id=?',(i['solicitud_id'],)).fetchall()
+ cab='DEVUELTA' if its and all(float(x['cantidad_entregada'] or 0)>0 and float(x['cantidad_entregada'] or 0)-float(x['cantidad_devuelta'] or 0)<=1e-9 for x in its) else 'DEVOLUCION_PARCIAL'
+ c.execute('update solicitudes_farmacia set estado=? where id=?',(cab,i['solicitud_id']))
+ audit_change(c,'ESTORNAR','FARMACIA',item_id,antes={'entregada':entregada,'devuelta':devuelta},despues={'devuelta':nueva_dev,'cantidad_estorno':qty,'admision':i['admision_id'],'motivo':motivo})
+ c.commit();c.close();flash(f'Estorno realizado: {qty:g} unidad(es) de {i["nombre"]} volvieron al stock y se descontaron de la cuenta del paciente.');return redirect('/farmacia-solicitudes')
 
 @app.post('/trasladar-internacion/<int:aid>')
 def trasladar_internacion(aid):
@@ -5854,7 +5891,11 @@ def rrhh_novedades():
         if tipo in ('ANTICIPO','PRESTAMO') and monto>0:
          cta_fin,_=_cuenta_financiera(c,medio,cuenta_id);cfg=c.execute('select * from tesoreria_config where id=1').fetchone();cta_ant=cfg['cuenta_anticipo_personal'];asi=asiento(c,fecha,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,'PYG',1,[(cta_ant,monto,0,monto,'Anticipo al funcionario'),(cta_fin,0,monto,monto,'Salida de fondos')]);mov=c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,'EGRESO',medio,'PYG',1,monto,monto,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,cuenta_id)).lastrowid;c.execute('update rrhh_novedades set asiento_id=?,movimiento_financiero_id=? where id=?',(asi,mov,nid))
         c.commit();flash('Novedad registrada y, cuando corresponde, integrada con Tesorería y Contabilidad.');c.close();return redirect('/rrhh/novedades?periodo='+periodo)
-    emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();rows=c.execute('''select n.*,e.nombre from rrhh_novedades n join empleados e on e.id=n.empleado_id where n.periodo=? order by n.fecha desc,n.id desc''',(periodo,)).fetchall();c.close();return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo,bancos=bancos)
+    emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall()
+    bancos=c.execute("select * from cuentas_bancarias where activo=1 order by banco,alias").fetchall()
+    rows=c.execute('''select n.*,e.nombre from rrhh_novedades n join empleados e on e.id=n.empleado_id where n.periodo=? order by n.fecha desc,n.id desc''',(periodo,)).fetchall()
+    c.close()
+    return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo,bancos=bancos)
 
 @app.route('/rrhh/liquidaciones')
 def rrhh_liquidaciones():
