@@ -8093,8 +8093,9 @@ def _imp_gasparini_compras_sin_cabecera(vals):
             'documento':doc,'fecha':_c(r,2),'ruc':ruc,'tercero':_c(r,5),
             'moneda':_c(r,21) or 'Gs','tipo_cambio':'1','condicion':'CONTADO',
             'forma_pago':'IMPORTACION_HISTORICA','referencia':'Importación detallada Gasparini/Santa Clara','saldo':'0',
-            # Código de artículo de la fuente (columna 14 en base cero) y no la cuenta contable.
-            'producto_codigo':_c(r,14),'producto_nombre':_c(r,13),'clasificacion':clas,
+            # Código individual del artículo en la exportación fuente: columna 36 (respaldo 38).
+            # La columna 14 es un código de clasificación/cuenta repetido y NO identifica al producto.
+            'producto_codigo':(('' if ((_c(r,36) or _c(r,38)) in ('0','1')) else (_c(r,36) or _c(r,38)))),'producto_nombre':_c(r,13),'clasificacion':clas,
             'cantidad':_c(r,6),'costo_unitario':_c(r,8),'importe':_c(r,10),'iva_pct':str(iva),
             'timbrado':_c(r,34),'lote':_c(r,46),'producto_vencimiento':_c(r,45),
             'marca_laboratorio':_c(r,65),'unidad_fuente':_c(r,66),
