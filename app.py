@@ -1338,12 +1338,21 @@ def anular_admision(aid):
  if not motivo:c.close();flash('Debe indicar el motivo de anulación.');return redirect('/admisiones')
  fac=c.execute('select 1 from facturas_sanatorio where admision_id=? limit 1',(aid,)).fetchone()
  if fac:c.close();flash('No se puede anular una internación ya facturada. Debe realizar la corrección mediante el documento fiscal correspondiente.');return redirect('/admisiones')
- # Una anulación administrativa no debe ocultar consumos clínicos o de stock existentes.
- refs=[('cargos_paciente','admision_id'),('enfermeria','admision_id'),('solicitudes_farmacia','admision_id')]
- for tab,col in refs:
-  try:n=c.execute(f'select count(*) from {tab} where {col}=?',(aid,)).fetchone()[0]
-  except Exception:n=0
-  if n:c.close();flash('La internación tiene cargos, enfermería o movimientos de farmacia. Revierta esos movimientos antes de anularla para mantener la trazabilidad y el stock correctos.');return redirect('/admisiones')
+ # V13.10.38: bloquear solo efectos económicos/stock todavía vigentes.
+ # Los registros históricos (incluidos estornos y notas de enfermería) se conservan para trazabilidad.
+ try:
+  cargo_pend=c.execute("""select coalesce(sum(coalesce(total_pyg,0)),0) saldo
+   from cargos_paciente where admision_id=? and coalesce(facturado,0)=0""",(aid,)).fetchone()['saldo']
+ except Exception: cargo_pend=0
+ if abs(float(cargo_pend or 0))>0.5:
+  c.close();flash('La internación todavía tiene cargos pendientes en la cuenta del paciente. Revierta o regularice esos cargos antes de anular.');return redirect('/admisiones')
+ try:
+  farm_pend=c.execute("""select coalesce(sum(max(0,coalesce(i.cantidad_entregada,0)-coalesce(i.cantidad_devuelta,0))),0) pendiente
+   from solicitudes_farmacia s join solicitud_farmacia_items i on i.solicitud_id=s.id
+   where s.admision_id=?""",(aid,)).fetchone()['pendiente']
+ except Exception: farm_pend=0
+ if float(farm_pend or 0)>1e-9:
+  c.close();flash('La internación todavía tiene medicamentos o insumos entregados sin estorno total. Complete el estorno antes de anular.');return redirect('/admisiones')
  c.execute("update admisiones set estado='ANULADA' where id=?",(aid,))
  if a['cama_id']:c.execute("update camas set estado='LIBRE' where id=?",(a['cama_id'],))
  audit_change(c,'ANULAR','ADMISION',aid,snapshot(a),{'estado':'ANULADA'},motivo);c.commit();c.close();flash('Admisión anulada correctamente.');return redirect('/admisiones')
