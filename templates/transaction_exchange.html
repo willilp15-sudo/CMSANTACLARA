@@ -6,6 +6,6 @@
 <label style="display:flex;gap:8px;align-items:center;margin:15px 0"><input type="checkbox" name="afectar_stock" value="1" style="width:auto"> Afectar stock con los movimientos importados</label>
 <p class="muted"><b>Importante:</b> deje desmarcado “Afectar stock” cuando importe históricos y su inventario actual ya esté cargado. Los servicios no controlan stock. Si un documento existente tiene cobros/pagos aplicados, el sistema lo protege y no reemplaza su detalle automáticamente.</p>
 <button type="submit">⬆ Importar y actualizar</button></form>
-<h3>Columnas reconocidas</h3><p>Documento/Factura, Fecha, RUC, Cliente/Proveedor, Moneda, Tipo Cambio, Condición, Forma Pago, Referencia, Saldo, Código Producto, Producto/Descripción, Clasificación, Cantidad, Precio/Costo Unitario, IVA, Timbrado y vencimientos.</p>
+<h3>Columnas reconocidas</h3><p>Documento/Factura, Fecha, RUC, Cliente/Proveedor, Moneda, Tipo Cambio, Condición, Forma Pago, Referencia, Saldo, Código Producto, Producto/Descripción, Clasificación, Cantidad, Precio/Costo Unitario, IVA, Timbrado y vencimientos. Para el CSV detallado de Santa Clara/Gasparini también conserva lote, vencimiento del producto, marca/laboratorio e identificadores de origen.</p>
 <p>Formatos admitidos: XLS, XLSX, XLSM, CSV, TXT, TSV, XML y Excel/HTML. El sistema intenta detectar el formato real aunque la extensión sea .xls.</p></div>
 {% endblock %}

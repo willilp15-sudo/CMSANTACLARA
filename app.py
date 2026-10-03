@@ -8050,19 +8050,27 @@ def _imp_gasparini_libro_ventas_16(vals, tipo=None):
     return out
 
 def _imp_gasparini_compras_sin_cabecera(vals):
-    """Reconoce el CSV detallado de Compras Gasparini sin fila de encabezados.
-    Mapea únicamente campos verificables del archivo; no inventa forma de pago.
+    """Reconoce el CSV detallado de Compras Gasparini/Santa Clara sin cabecera.
+    Conserva factura, proveedor, RUC/DV, timbrado, producto, cantidad, costo,
+    IVA, clasificación, lote y vencimiento. El registro bruto también queda
+    disponible para trazabilidad de la importación.
     """
-    import re
+    import re, json
     if not vals or len(vals[0]) < 80:
         return []
     muestra=vals[:min(25,len(vals))]
+    def _c(r,i): return str(r[i] or '').strip() if i < len(r) else ''
     def factura(row):
+        # La exportación puede traer el comprobante completo al final; si no,
+        # se reconstruye con establecimiento + punto + número verificables.
         for v in reversed(row[-8:]):
             t=str(v or '').strip()
             if re.fullmatch(r'\d{3}-\d{3}-\d{6,8}',t): return t
+        est=_c(row,15); pto=_c(row,16); nro=_c(row,1)
+        if re.fullmatch(r'\d{1,3}',est) and re.fullmatch(r'\d{1,3}',pto) and re.fullmatch(r'\d{1,8}',nro):
+            return f'{int(est):03d}-{int(pto):03d}-{int(nro):07d}'
         return ''
-    ok=sum(1 for r in muestra if len(r)>=80 and factura(r) and len(r)>21 and str(r[2]).strip() and str(r[5]).strip() and str(r[13]).strip())
+    ok=sum(1 for r in muestra if len(r)>=80 and factura(r) and _c(r,2) and _c(r,5) and _c(r,13))
     if ok < max(2, len(muestra)//2):
         return []
     out=[]
@@ -8070,37 +8078,37 @@ def _imp_gasparini_compras_sin_cabecera(vals):
         if len(r)<22: continue
         doc=factura(r)
         if not doc: continue
-        # RUC + DV: en esta exportación aparecen cerca del final; buscar el par más plausible.
-        ruc=''
-        for i in range(max(0,len(r)-30),len(r)-1):
-            a=str(r[i] or '').strip(); b=str(r[i+1] or '').strip()
-            if re.fullmatch(r'\d{6,9}',a) and re.fullmatch(r'\d',b):
-                ruc=a+'-'+b
-        desc_iva=' '.join(str(x or '') for x in r[-20:]).lower()
+        # En esta variante verificada: RUC y DV están en 74/75.
+        rr=_c(r,74); dv=_c(r,75); ruc=''
+        if re.fullmatch(r'\d{6,9}',rr) and re.fullmatch(r'\d',dv): ruc=rr+'-'+dv
+        if not ruc:
+            for i in range(max(0,len(r)-30),len(r)-1):
+                a=_c(r,i); b=_c(r,i+1)
+                if re.fullmatch(r'\d{6,9}',a) and re.fullmatch(r'\d',b): ruc=a+'-'+b
+        # La descripción tributaria aparece en la zona 61/62.
+        desc_iva=' '.join(_c(r,i) for i in (60,61,62,77,78,79) if i<len(r)).lower()
         iva=5 if '5%' in desc_iva else (10 if '10%' in desc_iva else 0)
-        clas=str(r[54] or '').strip() if len(r)>54 else ''
+        clas=_c(r,54)
         out.append({
-            'documento':doc,
-            'fecha':str(r[2] or '').strip(),
-            'ruc':ruc,
-            'tercero':str(r[5] or '').strip(),
-            'moneda':str(r[21] or '').strip() or 'Gs',
-            'tipo_cambio':'1',
-            'condicion':'CREDITO',
-            'forma_pago':'',
-            'referencia':'',
-            # Sin información de pago/cobro en este archivo: se importa pendiente completo
-            # y luego CxP puede actualizarse con el archivo específico de cuentas pendientes.
-            'saldo':'',
-            'producto_codigo':str(r[36] or '').strip() if len(r)>36 else '',
-            'producto_nombre':str(r[13] or '').strip(),
-            'clasificacion':clas,
-            'cantidad':str(r[6] or '').strip(),
-            'costo_unitario':str(r[8] or '').strip(),
-            'importe':str(r[10] or '').strip(),
-            'iva_pct':str(iva),
-            '_gasparini_detallado':'1',
+            'documento':doc,'fecha':_c(r,2),'ruc':ruc,'tercero':_c(r,5),
+            'moneda':_c(r,21) or 'Gs','tipo_cambio':'1','condicion':'CONTADO',
+            'forma_pago':'IMPORTACION_HISTORICA','referencia':'Importación detallada Gasparini/Santa Clara','saldo':'0',
+            # Código de artículo de la fuente (columna 14 en base cero) y no la cuenta contable.
+            'producto_codigo':_c(r,14),'producto_nombre':_c(r,13),'clasificacion':clas,
+            'cantidad':_c(r,6),'costo_unitario':_c(r,8),'importe':_c(r,10),'iva_pct':str(iva),
+            'timbrado':_c(r,34),'lote':_c(r,46),'producto_vencimiento':_c(r,45),
+            'marca_laboratorio':_c(r,65),'unidad_fuente':_c(r,66),
+            'compra_id_fuente':_c(r,0),'item_id_fuente':_c(r,36),
+            'cuenta_clasificacion_fuente':_c(r,62),'usuario_fuente':_c(r,57),
+            '_gasparini_detallado':'1','_raw_source_json':json.dumps(list(r),ensure_ascii=False,default=str),
         })
+    por_compra={}
+    for x in out:
+        por_compra.setdefault(x.get('compra_id_fuente') or x.get('documento'),[]).append(x)
+    for grp in por_compra.values():
+        rucs={x.get('ruc') for x in grp if x.get('ruc')}
+        ruc_estable=next(iter(rucs)) if len(rucs)==1 else ''
+        for x in grp:x['ruc']=ruc_estable
     return out
 
 def _imp_rows(file, tipo=None):
@@ -8287,7 +8295,15 @@ def plantilla_cuentas(tipo):
 
 # ===== V13.9.67 - Importacion detallada de Compras y Ventas =====
 def init_v13967_importacion_detallada():
- c=db();c.execute('''CREATE TABLE IF NOT EXISTS importacion_transacciones_log(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT,archivo TEXT,documento TEXT,tercero TEXT,accion TEXT,detalle TEXT,usuario TEXT)''');c.commit();c.close()
+ c=db();c.execute('''CREATE TABLE IF NOT EXISTS importacion_transacciones_log(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT,archivo TEXT,documento TEXT,tercero TEXT,accion TEXT,detalle TEXT,usuario TEXT)''')
+ # V13.10.36: metadatos del detalle de compras importadas. No modifica SIFEN.
+ cols={x['name'] for x in c.execute('pragma table_info(compra_items)').fetchall()}
+ for col,typ in [('codigo_fuente','TEXT'),('clasificacion_fuente','TEXT'),('lote','TEXT'),('fecha_vencimiento_producto','TEXT'),('marca_laboratorio','TEXT'),('unidad_fuente','TEXT')]:
+  if col not in cols:c.execute(f'alter table compra_items add column {col} {typ}')
+ c.execute('''CREATE TABLE IF NOT EXISTS compra_importacion_fuente(
+   id INTEGER PRIMARY KEY,compra_id INTEGER,item_id INTEGER,archivo TEXT,compra_id_fuente TEXT,item_id_fuente TEXT,
+   cuenta_clasificacion_fuente TEXT,usuario_fuente TEXT,raw_json TEXT,creado_en TEXT)''')
+ c.commit();c.close()
 init_v13967_importacion_detallada()
 
 # Alias adicionales para archivos Gasparini/Excel detallados.
@@ -8334,6 +8350,10 @@ def _imp_producto_tx(c,r,tipo):
  cur=c.execute('insert into productos(codigo,nombre,iva_pct,stock,costo_pyg,precio_pyg) values(?,?,?,?,?,?)',(codigo,nom or codigo,iva,0,_imp_num(r.get('costo_unitario')),_imp_num(r.get('precio_unitario'))))
  pid=cur.lastrowid
  if 'codigo_barras' in cols and barra:c.execute('update productos set codigo_barras=? where id=?',(barra,pid))
+ if 'categoria' in cols and clas:c.execute('update productos set categoria=? where id=?',(clas,pid))
+ if tipo=='COMPRA' and ('MEDIC' in clas or 'FARM' in clas):
+  if 'lote_control' in cols:c.execute('update productos set lote_control=1 where id=?',(pid,))
+  if 'vencimiento_control' in cols:c.execute('update productos set vencimiento_control=1 where id=?',(pid,))
  if es_serv:
   if 'tipo_producto' in cols:c.execute("update productos set tipo_producto='SERVICIO' where id=?",(pid,))
   if 'clasificacion' in cols:c.execute("update productos set clasificacion='SERVICIO' where id=?",(pid,))
@@ -8352,7 +8372,10 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
   doc=_imp_norm(r.get('documento'));ruc=_imp_norm(r.get('ruc'));ter=_imp_norm(r.get('tercero'))
   if not doc:
    errores+=1;mensajes.append('Fila sin Documento/Factura');continue
-  groups.setdefault((doc,ruc or ter),[]).append(r)
+  # En el CSV detallado, el ID de compra de origen es la agrupación más segura:
+  # evita separar una factura por campos variables de líneas individuales.
+  origen=_imp_norm(r.get('compra_id_fuente'))
+  groups.setdefault((doc,('SRC:'+origen) if origen else (ruc or ter)),[]).append(r)
  try:
   for (doc,_),grp in groups.items():
    try:
@@ -8372,7 +8395,7 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
      if pct==10:g10+=base;i10+=iv;grav+=base
      elif pct==5:g5+=base;i5+=iv;grav+=base
      else:exento+=bruto
-     detalles.append((p,pid,qty,unit,base,pct,bruto))
+     detalles.append((p,pid,qty,unit,base,pct,bruto,r))
     # En el Libro IVA Gasparini conservar exactamente los importes fiscales de origen.
     # El cálculo desde precio IVA incluido puede diferir centavos por redondeo.
     if ((tipo=='COMPRA' and r0.get('_gasparini_libro_iva_16')=='1') or
@@ -8410,15 +8433,18 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
     saldo=max(0,min(total,saldo_importado));entrega=max(0,total-saldo)
     if tipo=='COMPRA':
      c.execute('''update compras set fecha=?,proveedor_id=?,numero=?,moneda=?,tipo_cambio=?,gravado=?,iva=?,exento=?,total=?,total_pyg=?,gravado_10=?,iva_10=?,gravado_5=?,iva_5=?,exento_iva=?,condicion_pago=?,fecha_vencimiento=?,entrega_inicial=?,medio_pago_inicial=?,referencia_pago=?,timbrado=?,timbrado_vencimiento=?,estado='CONFIRMADA' where id=?''',(fecha,terid,doc,mon,tc,grav,iva,exento,total,total*tc,g10,i10,g5,i5,exento,condicion,_imp_fecha(r0.get('fecha_vencimiento')) if _imp_norm(r0.get('fecha_vencimiento')) else None,entrega,forma,ref,_imp_norm(r0.get('timbrado')),_imp_norm(r0.get('timbrado_vencimiento')),xid))
-     for p,pid,q,u,base,pct,bruto in detalles:
-      c.execute('insert into compra_items(compra_id,producto_id,cantidad,costo,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?)',(xid,pid,q,u,base,base*tc,pct))
+     for p,pid,q,u,base,pct,bruto,src in detalles:
+      cur_item=c.execute('insert into compra_items(compra_id,producto_id,cantidad,costo,total,total_pyg,iva_pct,codigo_fuente,clasificacion_fuente,lote,fecha_vencimiento_producto,marca_laboratorio,unidad_fuente) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(xid,pid,q,u,base,base*tc,pct,_imp_norm(src.get('producto_codigo')),_imp_norm(src.get('clasificacion')),_imp_norm(src.get('lote')),_imp_fecha(src.get('producto_vencimiento')) if _imp_norm(src.get('producto_vencimiento')) else None,_imp_norm(src.get('marca_laboratorio')),_imp_norm(src.get('unidad_fuente'))))
+      item_id=cur_item.lastrowid
+      if src.get('_raw_source_json'):
+       c.execute('insert into compra_importacion_fuente(compra_id,item_id,archivo,compra_id_fuente,item_id_fuente,cuenta_clasificacion_fuente,usuario_fuente,raw_json,creado_en) values(?,?,?,?,?,?,?,?,?)',(xid,item_id,file.filename,_imp_norm(src.get('compra_id_fuente')),_imp_norm(src.get('item_id_fuente')),_imp_norm(src.get('cuenta_clasificacion_fuente')),_imp_norm(src.get('usuario_fuente')),src.get('_raw_source_json'),now()))
       if afectar_stock and _producto_controla_stock(p):c.execute('update productos set stock=stock+? where id=?',(q,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',q,(base/q*tc if q else 0),'COMPRA',xid))
      if saldo>0:c.execute('insert into cxp(compra_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(xid,terid,mon,tc,total,saldo,total*tc))
      asiento(c,fecha,'Compra importada '+doc,'COMPRA',xid,mon,tc,[('1.1.03',grav*tc+exento*tc,0,grav+exento,'Compra importada'),('1.1.04',iva*tc,0,iva,'IVA crédito'),('2.1.01',0,saldo*tc,saldo,'Proveedor'),('1.1.01',0,entrega*tc,entrega,'Pagado')])
     else:
      c.execute('''update ventas set fecha=?,cliente_id=?,numero=?,moneda=?,tipo_cambio=?,gravado=?,iva=?,exento=?,total=?,total_pyg=?,gravado_10=?,iva_10=?,gravado_5=?,iva_5=?,exento_iva=?,condicion_venta=?,forma_cobro=?,referencia_cobro=?,entrega_inicial=?,fecha_vencimiento=?,estado='CONFIRMADA' where id=?''',(fecha,terid,doc,mon,tc,grav,iva,exento,total,total*tc,g10,i10,g5,i5,exento,condicion,forma,ref,entrega,_imp_fecha(r0.get('fecha_vencimiento')) if _imp_norm(r0.get('fecha_vencimiento')) else None,xid))
      costg=0
-     for p,pid,q,u,base,pct,bruto in detalles:
+     for p,pid,q,u,base,pct,bruto,src in detalles:
       cost=(q*float(p['costo_pyg'] or 0)) if _producto_controla_stock(p) else 0;costg+=cost;c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(xid,pid,q,u,bruto,bruto*tc,cost,pct))
       if afectar_stock and _producto_controla_stock(p):c.execute('update productos set stock=stock-? where id=?',(q,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'SALIDA',-q,p['costo_pyg'],'VENTA',xid))
      c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(xid,terid,mon,tc,total,saldo,total*tc,'PAGADO' if saldo<=.0001 else 'PENDIENTE'))
