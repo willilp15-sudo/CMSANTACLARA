@@ -8372,6 +8372,138 @@ def plantilla_cuentas(tipo):
  bio=io.BytesIO();wb.save(bio);bio.seek(0)
  return send_file(bio,as_attachment=True,download_name=f'Plantilla_{tipo}_Santa_Clara.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
+
+# ===== V13.10.41 - Tesorería / Programación de Pagos =====
+def init_v131041_programacion_pagos():
+ c=db()
+ c.execute("""CREATE TABLE IF NOT EXISTS programacion_pagos(
+  id INTEGER PRIMARY KEY,fecha_programada TEXT NOT NULL,proveedor_id INTEGER NOT NULL,
+  medio TEXT NOT NULL,cuenta_bancaria_id INTEGER,moneda TEXT NOT NULL,prioridad TEXT DEFAULT 'NORMAL',
+  referencia TEXT,observacion TEXT,estado TEXT DEFAULT 'PROGRAMADO',total REAL DEFAULT 0,
+  autorizado_por TEXT,autorizado_en TEXT,pagado_por TEXT,pagado_en TEXT,pago_lote_id INTEGER,
+  cancelado_por TEXT,cancelado_en TEXT,motivo_cancelacion TEXT,creado_por TEXT,creado_en TEXT)""")
+ c.execute("""CREATE TABLE IF NOT EXISTS programacion_pagos_det(
+  id INTEGER PRIMARY KEY,programacion_id INTEGER NOT NULL,cxp_id INTEGER NOT NULL,compra_id INTEGER,
+  factura TEXT,importe_programado REAL NOT NULL,saldo_al_programar REAL NOT NULL)""")
+ c.execute("CREATE INDEX IF NOT EXISTS idx_prog_pago_estado_fecha ON programacion_pagos(estado,fecha_programada)")
+ c.execute("CREATE INDEX IF NOT EXISTS idx_prog_pago_det_cxp ON programacion_pagos_det(cxp_id)")
+ c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.10.41-programacion-pagos',?)",(now(),))
+ c.commit();c.close()
+init_v131041_programacion_pagos()
+
+def _programado_cxp(c,cxp_id,excluir=None):
+ sql="""select coalesce(sum(d.importe_programado),0) from programacion_pagos_det d
+ join programacion_pagos p on p.id=d.programacion_id
+ where d.cxp_id=? and p.estado in ('PROGRAMADO','AUTORIZADO')"""; ps=[cxp_id]
+ if excluir: sql+=' and p.id<>?';ps.append(excluir)
+ return float(c.execute(sql,ps).fetchone()[0] or 0)
+
+def _saldo_cuenta_tesoreria(c,cuenta_id,moneda=None):
+ if not cuenta_id:return None
+ sql="select coalesce(sum(case when tipo='INGRESO' then importe else -importe end),0) from caja_banco where cuenta_bancaria_id=?";ps=[cuenta_id]
+ if moneda:sql+=' and moneda=?';ps.append(moneda)
+ return float(c.execute(sql,ps).fetchone()[0] or 0)
+
+@app.route('/tesoreria/programacion-pagos',methods=['GET','POST'])
+def programacion_pagos():
+ c=db()
+ if request.method=='POST':
+  try:
+   proveedor_id=int(request.form['proveedor_id']);ids=[int(x) for x in request.form.getlist('cxp_ids')]
+   if not ids:raise ValueError('Seleccione al menos una factura para programar.')
+   fecha=request.form.get('fecha_programada') or '';medio=(request.form.get('medio') or '').upper();prioridad=(request.form.get('prioridad') or 'NORMAL').upper()
+   if not fecha:raise ValueError('Indique la fecha programada de pago.')
+   cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None
+   if medio!='EFECTIVO' and not cuenta_id:raise ValueError('Seleccione la cuenta bancaria de donde saldrá el dinero.')
+   qs=','.join('?'*len(ids));rows=c.execute(f"""select x.*,coalesce(cp.numero,'-') factura,t.nombre proveedor
+    from cxp x join terceros t on t.id=x.tercero_id left join compras cp on cp.id=x.compra_id
+    where x.id in ({qs}) and x.tercero_id=? and x.saldo>0.0001""",ids+[proveedor_id]).fetchall()
+   if len(rows)!=len(ids):raise ValueError('Una o más facturas ya no están pendientes o no pertenecen al proveedor.')
+   monedas={(r['moneda'] or 'PYG').upper() for r in rows}
+   if len(monedas)!=1:raise ValueError('Una programación debe contener facturas de una sola moneda.')
+   mon=next(iter(monedas));apps=[]
+   for r in rows:
+    disp=max(0,float(r['saldo'])-_programado_cxp(c,r['id']))
+    imp=float(request.form.get('aplica_'+str(r['id'])) or 0)
+    if imp<0 or imp>disp+0.0001:raise ValueError(f"Importe programado inválido para {r['factura']}. Disponible para programar: {disp:,.2f} {mon}")
+    if imp>0:apps.append((r,imp))
+   if not apps:raise ValueError('Indique un importe en al menos una factura.')
+   total=sum(x[1] for x in apps)
+   cur=c.execute("""insert into programacion_pagos(fecha_programada,proveedor_id,medio,cuenta_bancaria_id,moneda,prioridad,referencia,observacion,estado,total,creado_por,creado_en)
+    values(?,?,?,?,?,?,?,?,?,?,?,?)""",(fecha,proveedor_id,medio,cuenta_id,mon,prioridad,request.form.get('referencia',''),request.form.get('observacion',''),'PROGRAMADO',total,session.get('user'),now()));pid=cur.lastrowid
+   for r,imp in apps:c.execute("insert into programacion_pagos_det(programacion_id,cxp_id,compra_id,factura,importe_programado,saldo_al_programar) values(?,?,?,?,?,?)",(pid,r['id'],r['compra_id'],r['factura'],imp,float(r['saldo'])))
+   c.commit();audit('PROGRAMACION_PAGO_CREAR',f'Programación {pid} / {len(apps)} factura(s) / {total} {mon}');flash(f'Programación Nº {pid} registrada. No se movieron fondos ni saldos de CxP.')
+  except Exception as ex:c.rollback();flash(str(ex))
+  c.close();return redirect('/tesoreria/programacion-pagos')
+ proveedor_id=int(request.args.get('proveedor_id') or 0)
+ proveedores=c.execute("""select distinct t.id,t.nombre,t.ruc from cxp x join terceros t on t.id=x.tercero_id
+  where x.saldo>0.0001 order by t.nombre""").fetchall();pendientes=[]
+ if proveedor_id:
+  rr=c.execute("""select x.*,coalesce(cp.numero,'-') factura,cp.fecha fecha_factura,cp.fecha_vencimiento,t.nombre proveedor
+   from cxp x join terceros t on t.id=x.tercero_id left join compras cp on cp.id=x.compra_id
+   where x.tercero_id=? and x.saldo>0.0001 order by coalesce(cp.fecha_vencimiento,cp.fecha),x.id""",(proveedor_id,)).fetchall()
+  pendientes=[dict(r,programado=_programado_cxp(c,r['id']),disponible=max(0,float(r['saldo'])-_programado_cxp(c,r['id']))) for r in rr]
+ bancos=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall()
+ saldos={b['id']:_saldo_cuenta_tesoreria(c,b['id'],b['moneda']) for b in bancos}
+ rows=c.execute("""select p.*,t.nombre proveedor,t.ruc,b.banco,b.alias,b.numero_cuenta,
+  (select count(*) from programacion_pagos_det d where d.programacion_id=p.id) documentos
+  from programacion_pagos p join terceros t on t.id=p.proveedor_id left join cuentas_bancarias b on b.id=p.cuenta_bancaria_id
+  order by case p.estado when 'AUTORIZADO' then 0 when 'PROGRAMADO' then 1 else 2 end,p.fecha_programada,p.id desc limit 300""").fetchall()
+ hoy=datetime.date.today();h7=(hoy+datetime.timedelta(days=7)).isoformat();h30=(hoy+datetime.timedelta(days=30)).isoformat();hs=hoy.isoformat()
+ resumen=c.execute("""select coalesce(sum(case when fecha_programada=? and estado in ('PROGRAMADO','AUTORIZADO') then total else 0 end),0) hoy,
+  coalesce(sum(case when fecha_programada between ? and ? and estado in ('PROGRAMADO','AUTORIZADO') then total else 0 end),0) siete,
+  coalesce(sum(case when fecha_programada between ? and ? and estado in ('PROGRAMADO','AUTORIZADO') then total else 0 end),0) treinta
+  from programacion_pagos""",(hs,hs,h7,hs,h30)).fetchone()
+ c.close();return render_template('treasury_payment_schedule.html',proveedores=proveedores,proveedor_id=proveedor_id,pendientes=pendientes,bancos=bancos,saldos=saldos,rows=rows,resumen=resumen,hoy=hs)
+
+@app.post('/tesoreria/programacion-pagos/<int:pid>/autorizar')
+def programacion_pago_autorizar(pid):
+ c=db();p=c.execute("select * from programacion_pagos where id=?",(pid,)).fetchone()
+ if not p or p['estado']!='PROGRAMADO':flash('La programación no está disponible para autorizar.');c.close();return redirect('/tesoreria/programacion-pagos')
+ det=c.execute('select d.*,x.saldo from programacion_pagos_det d join cxp x on x.id=d.cxp_id where d.programacion_id=?',(pid,)).fetchall()
+ for d in det:
+  reservado_otros=_programado_cxp(c,d['cxp_id'],pid)
+  if float(d['importe_programado'])>max(0,float(d['saldo'])-reservado_otros)+0.0001:
+   flash('No se puede autorizar: cambió el saldo disponible de una factura.');c.close();return redirect('/tesoreria/programacion-pagos')
+ c.execute("update programacion_pagos set estado='AUTORIZADO',autorizado_por=?,autorizado_en=? where id=?",(session.get('user'),now(),pid));c.commit();c.close();audit('PROGRAMACION_PAGO_AUTORIZAR',str(pid));flash(f'Programación Nº {pid} autorizada. Aún no se movieron fondos.');return redirect('/tesoreria/programacion-pagos')
+
+@app.post('/tesoreria/programacion-pagos/<int:pid>/cancelar')
+def programacion_pago_cancelar(pid):
+ motivo=(request.form.get('motivo') or '').strip()
+ if not motivo:flash('Indique el motivo de cancelación.');return redirect('/tesoreria/programacion-pagos')
+ c=db();p=c.execute("select * from programacion_pagos where id=?",(pid,)).fetchone()
+ if not p or p['estado'] not in ('PROGRAMADO','AUTORIZADO'):flash('Solo se pueden cancelar programaciones pendientes.');c.close();return redirect('/tesoreria/programacion-pagos')
+ c.execute("update programacion_pagos set estado='CANCELADO',cancelado_por=?,cancelado_en=?,motivo_cancelacion=? where id=?",(session.get('user'),now(),motivo,pid));c.commit();c.close();audit('PROGRAMACION_PAGO_CANCELAR',f'{pid}: {motivo}');flash(f'Programación Nº {pid} cancelada.');return redirect('/tesoreria/programacion-pagos')
+
+@app.post('/tesoreria/programacion-pagos/<int:pid>/pagar')
+def programacion_pago_ejecutar(pid):
+ c=db()
+ try:
+  p=c.execute("select p.*,t.nombre proveedor from programacion_pagos p join terceros t on t.id=p.proveedor_id where p.id=?",(pid,)).fetchone()
+  if not p or p['estado']!='AUTORIZADO':raise ValueError('La programación debe estar AUTORIZADA antes de ejecutar el pago.')
+  det=c.execute("select d.*,x.saldo,x.moneda,x.tipo_cambio_origen from programacion_pagos_det d join cxp x on x.id=d.cxp_id where d.programacion_id=? order by d.id",(pid,)).fetchall()
+  if not det:raise ValueError('La programación no tiene facturas.')
+  for d in det:
+   if float(d['importe_programado'])>float(d['saldo'])+0.0001:raise ValueError('El saldo de la factura '+str(d['factura'])+' cambió y ya no alcanza para ejecutar el pago.')
+  fecha=request.form.get('fecha_pago') or now()[:10];mon=p['moneda'];total=sum(float(d['importe_programado']) for d in det);tc=1.0 if mon=='PYG' else tc_dnit(c,fecha,mon,'VENTA');pyg=round(total*tc,2)
+  medio=p['medio'];cuenta_id=p['cuenta_bancaria_id'];haber,_=_cuenta_financiera(c,medio,cuenta_id);debe='2.1.01'
+  orig=sum(float(d['importe_programado'])*float(d['tipo_cambio_origen'] or 1) for d in det);lines=[(debe,orig,0,total,'Cancelación facturas programadas'),(haber,0,pyg,total,'Pago programado a proveedor')];dif=pyg-orig
+  if abs(dif)>0.01:lines.append(('5.2.01',dif,0,0,'Pérdida por diferencia de cambio') if dif>0 else ('4.2.01',0,-dif,0,'Ganancia por diferencia de cambio'))
+  cur=c.execute("insert into pagos_proveedores_lotes(fecha,proveedor_id,documento,medio,moneda,tipo_cambio,importe,importe_pyg,cuenta_bancaria_id,cuenta_debe,cuenta_haber,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,p['proveedor_id'],p['referencia'] or ('PROGRAMACION '+str(pid)),medio,mon,tc,total,pyg,cuenta_id,debe,haber,session.get('user'),now()));lote=cur.lastrowid
+  aid=asiento(c,fecha,'Pago programado a proveedor','PAGO_PROVEEDOR_MULTIPLE',lote,mon,tc,lines);c.execute('update pagos_proveedores_lotes set asiento_id=? where id=?',(aid,lote))
+  for d in det:
+   ant=float(d['saldo']);imp=float(d['importe_programado']);rest=max(0,ant-imp);c.execute("update cxp set saldo=?,estado=? where id=?",(rest,'PAGADO' if rest<=0.0001 else 'PENDIENTE',d['cxp_id']));c.execute("insert into pagos_proveedores_det(lote_id,cxp_id,compra_id,factura,importe_aplicado,saldo_anterior,saldo_restante) values(?,?,?,?,?,?,?)",(lote,d['cxp_id'],d['compra_id'],d['factura'],imp,ant,rest))
+  c.execute("insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,'EGRESO',?,?,?,?,?,'Pago programado a proveedor','PAGO_PROVEEDOR_MULTIPLE',?,?)",(fecha,medio,mon,tc,total,pyg,lote,cuenta_id))
+  c.execute("update programacion_pagos set estado='PAGADO',pagado_por=?,pagado_en=?,pago_lote_id=? where id=?",(session.get('user'),now(),lote,pid));c.commit();audit('PROGRAMACION_PAGO_EJECUTAR',f'{pid} -> lote {lote} / {total} {mon}');flash(f'Pago de la programación Nº {pid} ejecutado correctamente.')
+ except Exception as ex:c.rollback();flash(str(ex))
+ c.close();return redirect('/tesoreria/programacion-pagos')
+
+@app.get('/tesoreria/programacion-pagos/<int:pid>')
+def programacion_pago_detalle(pid):
+ c=db();p=c.execute("""select p.*,t.nombre proveedor,t.ruc,b.banco,b.alias,b.numero_cuenta from programacion_pagos p join terceros t on t.id=p.proveedor_id left join cuentas_bancarias b on b.id=p.cuenta_bancaria_id where p.id=?""",(pid,)).fetchone();det=c.execute("select d.*,x.saldo saldo_actual from programacion_pagos_det d join cxp x on x.id=d.cxp_id where d.programacion_id=? order by d.id",(pid,)).fetchall();c.close()
+ if not p:return ('Programación no encontrada',404)
+ return render_template('treasury_payment_schedule_detail.html',p=p,det=det)
+
 # ===== V13.9.67 - Importacion detallada de Compras y Ventas =====
 def init_v13967_importacion_detallada():
  c=db();c.execute('''CREATE TABLE IF NOT EXISTS importacion_transacciones_log(id INTEGER PRIMARY KEY,fecha TEXT,tipo TEXT,archivo TEXT,documento TEXT,tercero TEXT,accion TEXT,detalle TEXT,usuario TEXT)''')
