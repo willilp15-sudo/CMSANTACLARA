@@ -1,4 +1,4 @@
-from flask import Flask,render_template,request,redirect,session,flash,jsonify,send_file
+from flask import Flask,render_template,request,redirect,session,flash,jsonify,send_file,make_response
 import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets,unicodedata
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -257,7 +257,7 @@ def tc_fecha(c,fecha,moneda,tc_form):
 
 @app.before_request
 def auth():
- if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping') and 'user' not in session:return redirect('/login')
+ if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw') and 'user' not in session:return redirect('/login')
 @app.route('/login',methods=['GET','POST'])
 def login():
  if request.method=='POST':
@@ -1776,7 +1776,7 @@ ROUTE_MODULE.update({'editar_admision':'ADMISION','eliminar_admision':'ADMISION'
 @app.before_request
 def modular_guard():
  # Rutas públicas / autenticación.
- publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping'}
+ publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw'}
  if request.endpoint in publicos:return
  if not session.get('user'):return redirect('/login')
  if request.endpoint=='cambiar_mi_clave':return
@@ -5927,6 +5927,87 @@ def rrhh_anular_contrato(i):
     if r and r['estado']!='ANULADO':c.execute("update rrhh_contratos set estado='ANULADO',anulado_por=?,anulado_en=? where id=?",(session.get('user'),now(),i));c.commit();audit('RRHH_CONTRATO_ANULAR',r['numero']);flash('Contrato anulado administrativamente. Su número no será reutilizado.')
     c.close();return redirect('/rrhh/contratos')
 
+# ===== V13.10.43: Santa Clara Asistencia movil / PWA =====
+def init_v131043_asistencia_movil():
+    c=db()
+    cols={r['name'] for r in c.execute('pragma table_info(empleados)').fetchall()}
+    for col,defn in [('asistencia_pin_hash','TEXT'),('asistencia_movil_activa','INTEGER DEFAULT 0')]:
+        if col not in cols:c.execute(f'alter table empleados add column {col} {defn}')
+    c.executescript('''
+    CREATE TABLE IF NOT EXISTS rrhh_marcaciones_movil(
+      id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,fecha TEXT NOT NULL,hora TEXT NOT NULL,tipo TEXT NOT NULL,
+      dispositivo TEXT,ip TEXT,creado_en TEXT NOT NULL,UNIQUE(empleado_id,fecha,tipo));
+    CREATE INDEX IF NOT EXISTS ix_rrhh_marcaciones_fecha ON rrhh_marcaciones_movil(fecha,empleado_id);
+    ''')
+    c.execute("INSERT OR IGNORE INTO schema_migrations(version,aplicado_en) VALUES('13.10.43-asistencia-movil',?)",(now(),))
+    c.commit();c.close()
+init_v131043_asistencia_movil()
+
+def _asistencia_mobile_required(): return session.get('mobile_employee_id')
+
+@app.route('/asistencia/login',methods=['GET','POST'])
+def asistencia_mobile_login():
+    if request.method=='POST':
+        doc=(request.form.get('documento') or '').strip();pin=(request.form.get('pin') or '').strip();c=db()
+        e=c.execute("select id,nombre,documento,asistencia_pin_hash,asistencia_movil_activa from empleados where estado='ACTIVO' and trim(coalesce(documento,''))=? limit 1",(doc,)).fetchone();c.close()
+        if e and e['asistencia_movil_activa'] and e['asistencia_pin_hash'] and check_password_hash(e['asistencia_pin_hash'],pin):
+            session['mobile_employee_id']=e['id'];session['mobile_employee_name']=e['nombre'];session.permanent=True;return redirect('/asistencia')
+        flash('Documento o PIN incorrecto, o acceso móvil no habilitado.')
+    return render_template('attendance_mobile_login.html')
+
+@app.get('/asistencia/logout')
+def asistencia_mobile_logout():
+    session.pop('mobile_employee_id',None);session.pop('mobile_employee_name',None);return redirect('/asistencia/login')
+
+@app.get('/asistencia')
+def asistencia_mobile():
+    eid=_asistencia_mobile_required()
+    if not eid:return redirect('/asistencia/login')
+    hoy=datetime.date.today().isoformat();c=db();e=c.execute("select id,nombre,documento,cargo,departamento from empleados where id=? and estado='ACTIVO'",(eid,)).fetchone()
+    if not e:session.pop('mobile_employee_id',None);c.close();return redirect('/asistencia/login')
+    a=c.execute('select * from rrhh_asistencias where empleado_id=? and fecha=?',(eid,hoy)).fetchone();marks=c.execute('select * from rrhh_marcaciones_movil where empleado_id=? and fecha=? order by hora',(eid,hoy)).fetchall();c.close()
+    return render_template('attendance_mobile.html',empleado=e,asistencia=a,marcaciones=marks,hoy=hoy)
+
+@app.post('/asistencia/marcar')
+def asistencia_mobile_marcar():
+    eid=_asistencia_mobile_required()
+    if not eid:return jsonify(ok=False,error='Sesión vencida'),401
+    tipo=(request.form.get('tipo') or '').upper()
+    if tipo not in ('ENTRADA','SALIDA','INICIO_DESCANSO','FIN_DESCANSO'):return jsonify(ok=False,error='Tipo de marcación inválido'),400
+    ahora=datetime.datetime.now();fecha=ahora.date().isoformat();hora=ahora.strftime('%H:%M:%S');c=db()
+    try:
+        e=c.execute("select id,nombre from empleados where id=? and estado='ACTIVO' and asistencia_movil_activa=1",(eid,)).fetchone()
+        if not e:raise ValueError('Acceso móvil no habilitado.')
+        if c.execute('select 1 from rrhh_marcaciones_movil where empleado_id=? and fecha=? and tipo=?',(eid,fecha,tipo)).fetchone():raise ValueError('Esta marcación ya fue registrada hoy.')
+        c.execute('insert into rrhh_marcaciones_movil(empleado_id,fecha,hora,tipo,dispositivo,ip,creado_en) values(?,?,?,?,?,?,?)',(eid,fecha,hora,tipo,(request.headers.get('User-Agent') or '')[:250],request.headers.get('X-Forwarded-For',request.remote_addr or '')[:100],now()))
+        a=c.execute('select * from rrhh_asistencias where empleado_id=? and fecha=?',(eid,fecha)).fetchone()
+        if not a:c.execute("insert into rrhh_asistencias(empleado_id,fecha,estado,registrado_por,creado_en) values(?,?,'PRESENTE','APP_MOVIL',?)",(eid,fecha,now()))
+        if tipo=='ENTRADA':c.execute("update rrhh_asistencias set hora_entrada=coalesce(hora_entrada,?),estado='PRESENTE',registrado_por='APP_MOVIL' where empleado_id=? and fecha=?",(hora,eid,fecha))
+        elif tipo=='SALIDA':c.execute("update rrhh_asistencias set hora_salida=?,registrado_por='APP_MOVIL' where empleado_id=? and fecha=?",(hora,eid,fecha))
+        c.commit();return jsonify(ok=True,hora=hora,tipo=tipo)
+    except Exception as ex:c.rollback();return jsonify(ok=False,error=str(ex)),400
+    finally:c.close()
+
+@app.post('/rrhh/asistencia/movil-config')
+def rrhh_asistencia_movil_config():
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    eid=int(request.form.get('empleado_id') or 0);activo=1 if request.form.get('activo')=='1' else 0;pin=(request.form.get('pin') or '').strip();c=db()
+    if not c.execute('select 1 from empleados where id=?',(eid,)).fetchone():c.close();flash('Funcionario no encontrado.');return redirect('/rrhh/asistencia')
+    if pin:
+        if len(pin)<4 or not pin.isdigit():c.close();flash('El PIN debe tener al menos 4 dígitos.');return redirect('/rrhh/asistencia')
+        c.execute('update empleados set asistencia_pin_hash=?,asistencia_movil_activa=? where id=?',(generate_password_hash(pin),activo,eid))
+    else:c.execute('update empleados set asistencia_movil_activa=? where id=?',(activo,eid))
+    c.commit();c.close();audit('RRHH_ASISTENCIA_MOVIL',f'empleado={eid};activo={activo}');flash('Acceso móvil actualizado.');return redirect('/rrhh/asistencia')
+
+@app.get('/manifest.webmanifest')
+def asistencia_manifest():
+    return jsonify(name='Santa Clara Asistencia',short_name='Asistencia',start_url='/asistencia',display='standalone',background_color='#ffffff',theme_color='#0b6b57',icons=[{'src':'/static/asistencia-icon-192.png','sizes':'192x192','type':'image/png'},{'src':'/static/asistencia-icon-512.png','sizes':'512x512','type':'image/png'}])
+
+@app.get('/sw.js')
+def asistencia_sw():
+    js="""const C='santa-clara-asistencia-v1';self.addEventListener('install',e=>e.waitUntil(caches.open(C).then(c=>c.addAll(['/asistencia/login','/static/asistencia-mobile.css','/static/asistencia-icon-192.png']))));self.addEventListener('fetch',e=>{if(e.request.method==='GET')e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))})"""
+    r=make_response(js);r.headers['Content-Type']='application/javascript';r.headers['Service-Worker-Allowed']='/';return r
+
 @app.route('/rrhh/asistencia',methods=['GET','POST'])
 def rrhh_asistencia():
     if request.method=='POST' and not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
@@ -5935,7 +6016,7 @@ def rrhh_asistencia():
     if request.method=='POST':
         f=request.form;c.execute('''insert into rrhh_asistencias(empleado_id,fecha,hora_entrada,hora_salida,estado,minutos_tardanza,horas_extra,observacion,registrado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?)
         on conflict(empleado_id,fecha) do update set hora_entrada=excluded.hora_entrada,hora_salida=excluded.hora_salida,estado=excluded.estado,minutos_tardanza=excluded.minutos_tardanza,horas_extra=excluded.horas_extra,observacion=excluded.observacion,registrado_por=excluded.registrado_por''',(f['empleado_id'],f['fecha'],f.get('hora_entrada'),f.get('hora_salida'),f.get('estado','PRESENTE'),int(f.get('minutos_tardanza') or 0),float(f.get('horas_extra') or 0),f.get('observacion'),session.get('user'),now()));c.commit();flash('Asistencia guardada.')
-    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();bancos=c.execute("select * from cuentas_bancarias where activo=1 order by banco,alias").fetchall();rows=c.execute('''select a.*,e.nombre from rrhh_asistencias a join empleados e on e.id=a.empleado_id where a.fecha between ? and ? order by a.fecha desc,e.nombre''',(desde,hasta)).fetchall();c.close();return render_template('rrhh_attendance.html',emps=emps,rows=rows,desde=desde,hasta=hasta)
+    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();emps=c.execute("select id,nombre,documento,coalesce(asistencia_movil_activa,0) asistencia_movil_activa from empleados where estado='ACTIVO' order by nombre").fetchall();bancos=c.execute("select * from cuentas_bancarias where activo=1 order by banco,alias").fetchall();rows=c.execute('''select a.*,e.nombre from rrhh_asistencias a join empleados e on e.id=a.empleado_id where a.fecha between ? and ? order by a.fecha desc,e.nombre''',(desde,hasta)).fetchall();c.close();return render_template('rrhh_attendance.html',emps=emps,rows=rows,desde=desde,hasta=hasta)
 
 @app.route('/rrhh/novedades',methods=['GET','POST'])
 def rrhh_novedades():
