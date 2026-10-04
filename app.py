@@ -138,6 +138,43 @@ def pdf_logo(width=120,height=82):
   im=Image(ruta,width=width,height=height); im.hAlign='LEFT'; return im
  return None
 
+# ===== V13.10.44: QR de validación para documentos internos =====
+def _doc_validation_table(c):
+ c.execute("""CREATE TABLE IF NOT EXISTS documentos_validacion(
+  id INTEGER PRIMARY KEY, codigo TEXT UNIQUE NOT NULL, token TEXT UNIQUE NOT NULL,
+  tipo TEXT NOT NULL, referencia TEXT, detalle TEXT, estado TEXT DEFAULT 'VALIDO',
+  emitido_por TEXT, emitido_en TEXT NOT NULL)""")
+
+def _doc_qr_block(tipo, referencia='', detalle=''):
+ """Registra el documento interno y devuelve un bloque QR para ReportLab.
+ No se usa para KuDE/DE SIFEN, que conservan exclusivamente su QR fiscal.
+ """
+ from reportlab.graphics.barcode.qr import QrCodeWidget
+ from reportlab.graphics.shapes import Drawing
+ from reportlab.platypus import Table,TableStyle,Paragraph
+ from reportlab.lib import colors
+ from reportlab.lib.styles import getSampleStyleSheet
+ from reportlab.lib.units import mm
+ token=secrets.token_urlsafe(20)
+ codigo='SC-'+datetime.datetime.now().strftime('%Y%m%d')+'-'+secrets.token_hex(4).upper()
+ c=db();_doc_validation_table(c)
+ c.execute('insert into documentos_validacion(codigo,token,tipo,referencia,detalle,estado,emitido_por,emitido_en) values(?,?,?,?,?,?,?,?)',
+           (codigo,token,str(tipo or 'DOCUMENTO'),str(referencia or ''),str(detalle or ''),'VALIDO',session.get('user') or 'SISTEMA',now()))
+ c.commit();c.close()
+ url=request.url_root.rstrip('/')+'/validar-documento/'+token
+ q=QrCodeWidget(url); b=q.getBounds(); w=b[2]-b[0]; hq=b[3]-b[1]
+ d=Drawing(24*mm,24*mm,transform=[24*mm/w,0,0,24*mm/hq,0,0]);d.add(q)
+ st=getSampleStyleSheet(); txt=Paragraph('<b>VALIDACIÓN DIGITAL</b><br/>Escanee para verificar este documento.<br/><font size="7">Código: '+codigo+'</font>',st['Normal'])
+ t=Table([[d,txt]],colWidths=[28*mm,120*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.5,colors.grey),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
+ return t
+
+@app.get('/validar-documento/<token>')
+def validar_documento_publico(token):
+ c=db();_doc_validation_table(c)
+ r=c.execute('select * from documentos_validacion where token=?',(token,)).fetchone();c.close()
+ if not r:return render_template('document_validation.html',doc=None),404
+ return render_template('document_validation.html',doc=r)
+
 @app.get('/branding/logo')
 def branding_logo():
  ruta=logo_path_actual()
@@ -1691,7 +1728,7 @@ def exportar_consultas_pdf():
  from flask import send_file
  from io import BytesIO
  c=db(); desde,hasta,rows,resumen=_filtros_consultas(c); c.close(); out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=landscape(A4),leftMargin=24,rightMargin=24,topMargin=24,bottomMargin=24); st=getSampleStyleSheet(); story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Informe de Consultas',st['Title']),Paragraph(f'Período: {desde} al {hasta}',st['Normal']),Spacer(1,10)]
- data=[['Fecha','Paciente','Médico','Especialidad','Precio Gs.','Honorario Gs.','Margen Gs.']]+[[r['fecha'],r['paciente'],r['medico'],r['especialidad'],_money_local(r['precio_pyg'],'PYG'),_money_local(r['honorario_pyg'],'PYG'),_money_local(r['margen_pyg'],'PYG')] for r in rows]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.25,colors.grey),('FONTSIZE',(0,0),(-1,-1),8),('VALIGN',(0,0),(-1,-1),'TOP')])); story.append(t); doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'consultas_{desde}_{hasta}.pdf',mimetype='application/pdf')
+ data=[['Fecha','Paciente','Médico','Especialidad','Precio Gs.','Honorario Gs.','Margen Gs.']]+[[r['fecha'],r['paciente'],r['medico'],r['especialidad'],_money_local(r['precio_pyg'],'PYG'),_money_local(r['honorario_pyg'],'PYG'),_money_local(r['margen_pyg'],'PYG')] for r in rows]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.25,colors.grey),('FONTSIZE',(0,0),(-1,-1),8),('VALIGN',(0,0),(-1,-1),'TOP')])); story.append(t); story += [Spacer(1,10),_doc_qr_block('INFORME DE CONSULTAS',f'{desde} a {hasta}')]; doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'consultas_{desde}_{hasta}.pdf',mimetype='application/pdf')
 
 @app.get('/liquidacion-medica/<int:i>.pdf')
 def liquidacion_medica_pdf(i):
@@ -1703,7 +1740,7 @@ def liquidacion_medica_pdf(i):
  from io import BytesIO
  c=db(); l=c.execute('''select l.*,m.nombre medico,m.especialidad from liquidaciones_medicas l join medicos m on m.id=l.medico_id where l.id=?''',(i,)).fetchone(); qs=c.execute('''select q.*,p.nombre paciente,e.nombre especialidad from consultas q join pacientes p on p.id=q.paciente_id join especialidades e on e.id=q.especialidad_id where q.liquidacion_id=? order by q.hora,q.id''',(i,)).fetchall(); c.close()
  if not l: return 'Liquidación no encontrada',404
- out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4); st=getSampleStyleSheet(); story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Liquidación Médica',st['Title']),Paragraph(f"Médico: {l['medico']} | Fecha: {l['fecha']}",st['Normal']),Spacer(1,10)]; data=[['Paciente','Especialidad','Precio Gs.','Honorario Gs.']]+[[q['paciente'],q['especialidad'],_money_local(q['precio_pyg'],'PYG'),_money_local(q['honorario_pyg'],'PYG')] for q in qs]+[['','','TOTAL',_money_local(l['total_honorario_pyg'],'PYG')]]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.3,colors.grey),('ALIGN',(2,1),(-1,-1),'RIGHT')])); story.append(t); doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'liquidacion_medica_{i}.pdf',mimetype='application/pdf')
+ out=BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4); st=getSampleStyleSheet(); story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Centro Médico Santa Clara - Liquidación Médica',st['Title']),Paragraph(f"Médico: {l['medico']} | Fecha: {l['fecha']}",st['Normal']),Spacer(1,10)]; data=[['Paciente','Especialidad','Precio Gs.','Honorario Gs.']]+[[q['paciente'],q['especialidad'],_money_local(q['precio_pyg'],'PYG'),_money_local(q['honorario_pyg'],'PYG')] for q in qs]+[['','','TOTAL',_money_local(l['total_honorario_pyg'],'PYG')]]; t=Table(data,repeatRows=1); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.3,colors.grey),('ALIGN',(2,1),(-1,-1),'RIGHT')])); story.append(t); story += [Spacer(1,10),_doc_qr_block('LIQUIDACION MEDICA',str(i),str(l['medico']))]; doc.build(story); out.seek(0); return send_file(out,as_attachment=True,download_name=f'liquidacion_medica_{i}.pdf',mimetype='application/pdf')
 
 
 # ===== V11: arquitectura modular, roles y farmacia interna =====
@@ -2443,7 +2480,7 @@ def laboratorio_liquidacion_pdf(lid):
            Paragraph(f"Total bruto: Gs. {float(liq['total_bruto_pyg'] or 0):,.0f}",st['Normal']),
            Paragraph(f"A pagar a Laboratorio LACED: Gs. {float(liq['total_laced_pyg'] or 0):,.0f}",st['Heading3']),
            Paragraph(f"Participación Centro Médico Santa Clara: Gs. {float(liq['total_santa_clara_pyg'] or 0):,.0f}",st['Normal']),
-           Spacer(1,8),Paragraph('Servicios normales: 80% LACED / 20% Santa Clara. Estudios admisionales: 85% LACED / 15% Santa Clara.',st['Normal'])]
+           Spacer(1,8),Paragraph('Servicios normales: 80% LACED / 20% Santa Clara. Estudios admisionales: 85% LACED / 15% Santa Clara.',st['Normal']),Spacer(1,10),_doc_qr_block('LIQUIDACION LABORATORIO LACED',str(lid))]
  doc.build(story);out.seek(0)
  audit('PDF_LIQUIDACION_LABORATORIO',str(lid))
  return send_file(out,as_attachment=True,download_name=f'liquidacion_laboratorio_LACED_{lid}.pdf',mimetype='application/pdf')
@@ -2811,7 +2848,7 @@ def recibo_pdf(rid):
  comp=[['Comprobante','Concepto','Entidad / Cuenta','Referencia','Importe'],[r['factura'],'Cobro de factura',entidad,r['referencia'] or '',f"{float(r['importe'] or 0):,.0f}"],['','','','TOTAL COBRADO',f"{float(r['importe'] or 0):,.0f}"]]
  t=Table(comp,colWidths=[34*mm,46*mm,45*mm,31*mm,30*mm],rowHeights=[8*mm,18*mm,9*mm]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTNAME',(-2,-1),(-1,-1),'Helvetica-Bold'),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t,Spacer(1,2*mm),Paragraph('<b>Son:</b> '+monto_letras(r['importe']),st['Normal'])]
  _kude_footer(story,inst,None,None,False)
- doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
+ story += [Spacer(1,10),_doc_qr_block('RECIBO',str(r['numero']))];doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
 
 
 # ===== V13.4.7: recibos históricos, cuentas receptoras y PDF de informes =====
@@ -2854,7 +2891,7 @@ def informe_pdf(tipo):
  buf=io.BytesIO();doc=SimpleDocTemplate(buf,pagesize=landscape(A4),rightMargin=10*mm,leftMargin=10*mm,topMargin=10*mm,bottomMargin=10*mm);styles=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('CENTRO MÉDICO SANTA CLARA',styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'Período: {desde} al {hasta} · Generado: {now().replace("T"," ")}',styles['Normal']),Spacer(1,5*mm)]
  data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),0.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]));story.append(tbl);story.append(Spacer(1,4*mm));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));
  for h,v in _report_totals(headers,rows): story.append(Paragraph(f'<b>{h}:</b> Gs. {_money_local(v,"PYG")}',styles['Normal']))
- doc.build(story);buf.seek(0);return send_file(buf,mimetype='application/pdf',as_attachment=True,download_name=f'{tipo}_{desde}_{hasta}.pdf')
+ story += [Spacer(1,10),_doc_qr_block('INFORME '+str(tipo).upper(),f'{desde} a {hasta}')];doc.build(story);buf.seek(0);return send_file(buf,mimetype='application/pdf',as_attachment=True,download_name=f'{tipo}_{desde}_{hasta}.pdf')
 
 # ===== V13.9.2: búsqueda bajo demanda de productos =====
 @app.get('/api/productos/buscar')
@@ -3104,7 +3141,7 @@ def contabilidad_pdf(tipo):
    canvas.setLineWidth(.45);canvas.rect(22,y-10,w-44,11,stroke=1,fill=0)
    canvas.setFont('Helvetica-Bold',6.6);canvas.drawString(28,y-7,'Asiento');canvas.drawString(83,y-7,'Cuenta');canvas.drawRightString(w-108,y-7,'Importe Debe');canvas.drawRightString(w-28,y-7,'Importe Haber')
    canvas.restoreState()
-  doc.build(story,onFirstPage=_cab,onLaterPages=_cab);bio.seek(0)
+  story += [Spacer(1,10),_doc_qr_block('INFORME CONTABLE '+str(tipo).upper(),f'{desde} a {hasta}')];doc.build(story,onFirstPage=_cab,onLaterPages=_cab);bio.seek(0)
   return send_file(bio,as_attachment=False,download_name=f'{tipo}_RUBRICADO_{desde}_{hasta}.pdf',mimetype='application/pdf')
  # Resto de informes: conserva tabla completa, con identidad y foliado rubricado.
  doc=SimpleDocTemplate(bio,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=30,bottomMargin=30)
@@ -3126,7 +3163,7 @@ def contabilidad_pdf(tipo):
    canvas.drawString(20,15,f'{empresa} - RUC {ruc or "-"} - {titulo}');canvas.drawRightString(landscape(A4)[0]-20,15,f'Pág.: {doc.page}')
   else: canvas.drawRightString(landscape(A4)[0]-20,15,f'Página {doc.page}')
   canvas.restoreState()
- doc.build(story,onFirstPage=_pie,onLaterPages=_pie);bio.seek(0)
+ story += [Spacer(1,10),_doc_qr_block('INFORME CONTABLE '+str(tipo).upper(),f'{desde} a {hasta}')];doc.build(story,onFirstPage=_pie,onLaterPages=_pie);bio.seek(0)
  suf='_RUBRICADO' if modo=='rubricado' else ''
  return send_file(bio,as_attachment=False,download_name=f'{tipo}{suf}_{desde}_{hasta}.pdf',mimetype='application/pdf')
 
@@ -4293,7 +4330,7 @@ def arqueo_caja_pdf(apertura_id):
  resumen=[['RESUMEN',''],['SALDO INICIAL',gs(ap['saldo_inicial'])],['DOCUMENTOS',gs(ar['documentos'])],['RESULTADO ESPERADO',gs(ar['resultado_esperado'])],['EFECTIVO',gs(ar['efectivo'])],['EQUIVALENTE DE EFECTIVO',gs(ar['equiv_efectivo'])],['TOTAL',gs(ar['total'])],['DIFERENCIA',gs(ar['diferencia'])],['FALTANTE',gs(abs(ar['diferencia'])) if ar['diferencia']<0 else gs(0)],['SOBRANTE',gs(ar['diferencia']) if ar['diferencia']>0 else gs(0)]];rt=Table(resumen,colWidths=[55*mm,35*mm]);rt.setStyle(TableStyle([('SPAN',(0,0),(-1,0)),('BACKGROUND',(0,0),(-1,0),blue),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7)]))
  obs='<b>OBSERVACIONES:</b><br/>'+((ar['observaciones'] or '').replace('\n','<br/>'))+'<br/><br/>ENTREGADO A ADMINISTRACIÓN '+gs(ar['entregado_admin'])+'<br/>SALDO PARA CAJA DEL SIGUIENTE '+gs(ar['saldo_siguiente']);ot=Table([[Paragraph(obs,st['Normal'])]],colWidths=[90*mm],rowHeights=[48*mm]);ot.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.5,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP')]))
  story += [Table([[rt,ot]],colWidths=[92*mm,92*mm]),Spacer(1,4*mm),Paragraph('Se finaliza el presente arqueo de caja con un total de Guaraníes <b>'+monto_letras(ar['total'])+'</b>, pasando a firmar en señal de conformidad.',st['Normal']),Spacer(1,10*mm),Table([['_______________________________','_______________________________'],['Encargado de Caja','Supervisor Administrativo']],colWidths=[90*mm,90*mm],style=[('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,1),(-1,1),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),8)])]
- doc.build(story);buf.seek(0);return send_file(buf,as_attachment=True,download_name='arqueo_caja_%s.pdf'%ar['id'],mimetype='application/pdf')
+ story += [Spacer(1,10),_doc_qr_block('ARQUEO DE CAJA',str(ar['id']))];doc.build(story);buf.seek(0);return send_file(buf,as_attachment=True,download_name='arqueo_caja_%s.pdf'%ar['id'],mimetype='application/pdf')
 
 ROUTE_MODULE.update({'arqueo_caja_diario':'CAJA','arqueo_caja_pdf':'CAJA'})
 
@@ -6067,7 +6104,7 @@ def rrhh_liquidacion_pdf(i):
     if not l:return ('Liquidación no encontrada',404)
     out=io.BytesIO();doc=SimpleDocTemplate(out,pagesize=A4);st=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Recibo de Liquidación de Salario',st['Title']),Paragraph(f"Funcionario: {l['nombre']} · CI: {l['documento'] or '-'} · Periodo: {l['periodo']}",st['Normal']),Spacer(1,12)]
     data=[['Concepto','Haberes Gs.','Descuentos Gs.'],['Salario base',_money_local(l['salario_base']),''],['Bonificaciones',_money_local(l['bonificaciones']),''],['Horas extra',_money_local(l['horas_extra']),''],['Otros haberes',_money_local(l['otros_haberes']),''],['IPS obrero','',_money_local(l['ips_obrero'])],['Anticipos','',_money_local(l['anticipos'])],['Préstamos','',_money_local(l['prestamos'])],['Otros descuentos','',_money_local(l['otros_descuentos'])],['NETO A COBRAR',_money_local(l['neto']),'']]
-    t=Table(data,colWidths=[230,120,120]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.4,colors.grey),('ALIGN',(1,1),(-1,-1),'RIGHT'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]));story += [t,Spacer(1,40),Paragraph('Firma del funcionario: ______________________________',st['Normal'])];doc.build(story);out.seek(0);return send_file(out,as_attachment=True,download_name=f"liquidacion_{l['periodo']}_{i}.pdf",mimetype='application/pdf')
+    t=Table(data,colWidths=[230,120,120]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.4,colors.grey),('ALIGN',(1,1),(-1,-1),'RIGHT'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]));story += [t,Spacer(1,24),_doc_qr_block('LIQUIDACION DE SALARIO',str(i),str(l['nombre'])),Spacer(1,20),Paragraph('Firma del funcionario: ______________________________',st['Normal'])];doc.build(story);out.seek(0);return send_file(out,as_attachment=True,download_name=f"liquidacion_{l['periodo']}_{i}.pdf",mimetype='application/pdf')
 
 @app.route('/rrhh/configuracion',methods=['GET','POST'])
 def rrhh_configuracion():
@@ -7498,7 +7535,7 @@ def seguro_visaciones_pdf():
         data.append([f"{r['fecha']} {r['hora']}",r['numero_visacion'],r['paciente'] or '-',r['paciente_documento'] or '-',r['aseguradora'] or '-',r['medico'] or '-',f"{r['origen_tipo']} #{r['origen_id']}",r['creado_por'] or '-'])
     t=Table(data,repeatRows=1,colWidths=[68,82,115,70,105,105,90,70])
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),.25,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]))
-    story.append(t);doc.build(story);out.seek(0)
+    story.append(t);story += [Spacer(1,10),_doc_qr_block('INFORME DE VISACIONES',periodo)];doc.build(story);out.seek(0)
     return send_file(out,as_attachment=True,download_name=f'visaciones_{desde or "inicio"}_{hasta or "actual"}.pdf',mimetype='application/pdf')
 
 @app.get('/seguros/visaciones/<int:vid>/archivo')
@@ -7819,7 +7856,7 @@ def transferencia_deposito_pdf(tid):
   return parts
  left=sig(t['firma_entrega'],t['responsable_entrega'],t['cargo_entrega']);right=sig(t['firma_recibe'],t['responsable_recibe'],t['cargo_recibe']);mx=max(len(left),len(right));left += ['']*(mx-len(left));right += ['']*(mx-len(right))
  sf=Table([[left[i],right[i]] for i in range(mx)],colWidths=[85*mm,85*mm]);sf.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'BOTTOM')]));story += [sf,Spacer(1,4*mm),Table([['RESPONSABLE QUE ENTREGA','RESPONSABLE QUE RECIBE']],colWidths=[85*mm,85*mm],style=[('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTNAME',(0,0),(-1,-1),'Helvetica-Bold')])]
- doc.build(story);out.seek(0);inline=request.args.get('inline')=='1';return send_file(out,as_attachment=not inline,download_name=f"Transferencia_{t['numero']}.pdf",mimetype='application/pdf')
+ story += [Spacer(1,10),_doc_qr_block('TRANSFERENCIA DE DEPOSITO',str(t['numero']))];doc.build(story);out.seek(0);inline=request.args.get('inline')=='1';return send_file(out,as_attachment=not inline,download_name=f"Transferencia_{t['numero']}.pdf",mimetype='application/pdf')
 
 @app.get('/farmacia/inventario-depositos')
 def inventario_depositos():
@@ -8465,7 +8502,7 @@ def _cuentas_pdf(tipo,headers,rows):
     b=io.BytesIO();doc=SimpleDocTemplate(b,pagesize=landscape(A4),leftMargin=20,rightMargin=20,topMargin=25,bottomMargin=25);st=getSampleStyleSheet()
     data=[headers]+[[str(v if v is not None else '') for v in r] for r in rows]
     t=Table(data,repeatRows=1);t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP')]))
-    doc.build([Paragraph('CENTRO MÉDICO SANTA CLARA',st['Title']),Paragraph('Cuentas por Cobrar' if tipo=='CXC' else 'Cuentas por Pagar',st['Heading2']),Spacer(1,8),t]);b.seek(0)
+    story=[Paragraph('CENTRO MÉDICO SANTA CLARA',st['Title']),Paragraph('Cuentas por Cobrar' if tipo=='CXC' else 'Cuentas por Pagar',st['Heading2']),Spacer(1,8),t,Spacer(1,10),_doc_qr_block('INFORME '+tipo,tipo)];doc.build(story);b.seek(0)
     return send_file(b,as_attachment=True,download_name=f'{tipo}_Santa_Clara.pdf',mimetype='application/pdf')
 
 @app.get('/finanzas/exportar/<tipo>/<formato>')
@@ -9239,3 +9276,59 @@ def limpieza_movimientos():
  c=db();rows=c.execute('''select m.*,p.codigo,p.nombre,p.unidad from limpieza_movimientos m join limpieza_productos p on p.id=m.producto_id order by m.id desc limit 1000''').fetchall();c.close();return render_template('cleaning_movements.html',rows=rows)
 
 ROUTE_MODULE.update({'umt_maestro':'UMT','umt_estado':'UMT','umt_canje':'UMT','umt_componentes':'UMT','umt_movimientos':'UMT','limpieza_maestro':'LIMPIEZA','limpieza_movimiento':'LIMPIEZA','limpieza_movimientos':'LIMPIEZA'})
+
+# ===== V13.10.44: Reinicio operativo seguro para migración inicial =====
+# SIFEN queda fuera del borrado: configuración, puntos, actividades, correlativos y eventos.
+def _reinicio_preservadas():
+    return {
+        'institucion_config','usuarios','roles','usuario_roles','permisos_rol','schema_migrations',
+        'sifen_config','sifen_puntos_expedicion','sifen_actividades_economicas','sifen_correlativos','sifen_eventos'
+    }
+
+def _reinicio_tablas(c):
+    return [r['name'] for r in c.execute("select name from sqlite_master where type='table' and name not like 'sqlite_%' order by name").fetchall()]
+
+def _crear_backup_reinicio():
+    carpeta=os.path.join(DATA_DIR,'backups');os.makedirs(carpeta,exist_ok=True)
+    destino=os.path.join(carpeta,'antes_reinicio_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
+    src=sqlite3.connect(DB);dst=sqlite3.connect(destino)
+    try: src.backup(dst)
+    finally: dst.close();src.close()
+    return destino
+
+@app.route('/administracion/reinicio-base',methods=['GET','POST'])
+def reinicio_base_operativa():
+    if not _admin_total(): return ('Acceso no autorizado',403)
+    c=db();pres=_reinicio_preservadas();tablas=_reinicio_tablas(c)
+    if request.method=='POST':
+        frase=(request.form.get('confirmacion') or '').strip().upper()
+        clave=(request.form.get('clave') or '')
+        u=c.execute('select * from usuarios where usuario=? and activo=1',(session.get('user'),)).fetchone()
+        if frase!='BORRAR BASE' or not u or not password_ok(u['clave'],clave):
+            c.close();flash('Confirmación inválida. Escriba BORRAR BASE y su contraseña de administrador.');return redirect('/administracion/reinicio-base')
+        backup=_crear_backup_reinicio()
+        borradas=[]
+        try:
+            c.execute('PRAGMA foreign_keys=OFF')
+            for t in tablas:
+                if t in pres or t.startswith('sifen_'): continue
+                c.execute('DELETE FROM "'+t.replace('"','""')+'"');borradas.append(t)
+            # Se conservan usuarios para no perder acceso, pero se eliminan vínculos a personas borradas.
+            ucols={x['name'] for x in c.execute('pragma table_info(usuarios)').fetchall()}
+            if 'persona_id' in ucols:c.execute('update usuarios set persona_id=NULL')
+            if 'persona_tipo' in ucols:c.execute('update usuarios set persona_tipo=NULL')
+            if c.execute("select 1 from sqlite_master where type='table' and name='sqlite_sequence'").fetchone():
+                for t in borradas:c.execute('delete from sqlite_sequence where name=?',(t,))
+            c.commit();c.execute('PRAGMA foreign_keys=ON')
+            c.execute('insert into auditoria(fecha,usuario,accion,detalle) values(?,?,?,?)',(now(),session.get('user','admin'),'REINICIO_BASE_OPERATIVA','Backup: '+backup+' | SIFEN preservado'))
+            c.commit();c.close()
+            flash('Base operativa reiniciada. SIFEN y seguridad fueron preservados. Backup: '+os.path.basename(backup))
+            return redirect('/administracion/puesta-en-marcha')
+        except Exception as e:
+            c.rollback();c.close();flash('No se realizó el reinicio: '+str(e));return redirect('/administracion/reinicio-base')
+    conteos=[]
+    for t in tablas:
+        try: n=c.execute('select count(*) n from "'+t.replace('"','""')+'"').fetchone()['n']
+        except Exception:n=0
+        conteos.append({'tabla':t,'registros':n,'preservada':t in pres or t.startswith('sifen_')})
+    c.close();return render_template('database_reset.html',conteos=conteos)

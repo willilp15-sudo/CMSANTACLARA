@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block content %}
+<h2>Reinicio operativo / Base limpia</h2>
+<div class="card"><p><strong>Uso exclusivo de Administrador.</strong> Esta operación elimina los datos operativos para una migración desde cero.</p><p><strong>NO se modifican:</strong> configuración SIFEN, puntos de expedición, actividades económicas, correlativos SIFEN, eventos SIFEN, configuración institucional ni usuarios/roles/permisos.</p><p>Antes del borrado se crea automáticamente un backup completo en la carpeta persistente de backups.</p></div>
+<div class="card"><h3>Vista previa</h3><table><tr><th>Tabla</th><th>Registros</th><th>Acción</th></tr>{% for x in conteos %}<tr><td>{{x.tabla}}</td><td>{{x.registros}}</td><td>{% if x.preservada %}<strong>PRESERVAR</strong>{% else %}BORRAR{% endif %}</td></tr>{% endfor %}</table></div>
+<div class="card"><h3>Confirmación</h3><form method="post"><label>Escriba exactamente <strong>BORRAR BASE</strong></label><input name="confirmacion" autocomplete="off" required><label>Contraseña del administrador</label><input type="password" name="clave" required><p><button type="submit" onclick="return confirm('Se creará un backup y se borrarán los datos operativos. ¿Continuar?')">Crear backup y reiniciar base operativa</button></p></form></div>
+{% endblock %}
