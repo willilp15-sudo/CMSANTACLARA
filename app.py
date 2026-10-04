@@ -1374,9 +1374,9 @@ def cuenta_paciente(aid):
     flash('Los productos y medicamentos deben solicitarse desde Enfermería y ser autorizados/entregados por Farmacia Interna.');c.close();return redirect(f'/cuenta-paciente/{aid}')
    x=c.execute('select * from productos where id=?',(ref,)).fetchone()
    if x['stock']<qty:flash('Stock insuficiente');c.close();return redirect(f'/cuenta-paciente/{aid}')
-   price=x['precio_pyg']/tc;desc=x['nombre'];c.execute('update productos set stock=stock-? where id=?',(qty,ref));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,ref,'SALIDA',-qty,x['costo_pyg'],'PACIENTE',aid))
+   tar=_precio_seguro(c,a['aseguradora_id'],'PRODUCTO',ref,fecha) if a['aseguradora_id'] else None;price=(tar['precio']/tc if tar and (tar['moneda'] or 'PYG')=='PYG' else (tar['precio'] if tar else x['precio_pyg']/tc));desc=x['nombre'];c.execute('update productos set stock=stock-? where id=?',(qty,ref));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,ref,'SALIDA',-qty,x['costo_pyg'],'PACIENTE',aid))
   else:
-   x=c.execute('select * from servicios where id=?',(ref,)).fetchone();price=x['precio_pyg']/tc;desc=x['nombre']
+   x=c.execute('select * from servicios where id=?',(ref,)).fetchone();tar=_precio_seguro(c,a['aseguradora_id'],'SERVICIO',ref,fecha) if a['aseguradora_id'] else None;price=(tar['precio']/tc if tar and (tar['moneda'] or 'PYG')=='PYG' else (tar['precio'] if tar else x['precio_pyg']/tc));desc=x['nombre']
   iva_pct=float(x['iva_pct'] or 0);total=qty*price;cargo_id=c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,tipo,ref,desc,qty,price,mon,tc,total,total*tc,iva_pct)).lastrowid
   if a['aseguradora_id'] and tipo=='SERVICIO':_registrar_visacion(c,a['aseguradora_id'],a['paciente_id'],'CARGO_SERVICIO',cargo_id,request.form.get('medico_id') or a['medico_id'])
   c.commit();return redirect(f'/cuenta-paciente/{aid}')
@@ -1573,6 +1573,51 @@ def init_consultorio():
  c.execute("INSERT OR IGNORE INTO plan_cuentas(codigo,nombre,tipo) VALUES('2.1.03','Honorarios Médicos a Pagar','PASIVO')")
  for r in c.execute("select distinct trim(especialidad) e from medicos where trim(coalesce(especialidad,''))<>''").fetchall(): c.execute('insert or ignore into especialidades(nombre) values(?)',(r['e'],))
  c.commit(); c.close()
+
+# ===== V13.10.42: tarifarios por aseguradora =====
+def init_v131042_tarifarios_seguros():
+ c=db();c.executescript("""
+ CREATE TABLE IF NOT EXISTS seguro_tarifarios(id INTEGER PRIMARY KEY,aseguradora_id INTEGER NOT NULL,nombre TEXT NOT NULL,fecha_desde TEXT NOT NULL,fecha_hasta TEXT,moneda TEXT NOT NULL DEFAULT 'PYG',activo INTEGER NOT NULL DEFAULT 1,observaciones TEXT,creado_por TEXT,creado_en TEXT);
+ CREATE TABLE IF NOT EXISTS seguro_tarifario_items(id INTEGER PRIMARY KEY,tarifario_id INTEGER NOT NULL,tipo TEXT NOT NULL,referencia_id INTEGER NOT NULL,precio REAL NOT NULL DEFAULT 0,iva_pct REAL DEFAULT 0,activo INTEGER NOT NULL DEFAULT 1,creado_por TEXT,creado_en TEXT,UNIQUE(tarifario_id,tipo,referencia_id));
+ CREATE INDEX IF NOT EXISTS ix_seguro_tarifa_vigencia ON seguro_tarifarios(aseguradora_id,activo,fecha_desde,fecha_hasta);
+ """);c.commit();c.close()
+init_v131042_tarifarios_seguros()
+
+def _precio_seguro(c,aseguradora_id,tipo,referencia_id,fecha=None):
+ if not aseguradora_id:return None
+ fecha=fecha or date.today().isoformat()
+ return c.execute("""select i.precio,t.moneda,t.id tarifario_id from seguro_tarifario_items i join seguro_tarifarios t on t.id=i.tarifario_id where t.aseguradora_id=? and i.tipo=? and i.referencia_id=? and t.activo=1 and i.activo=1 and t.fecha_desde<=? and (t.fecha_hasta is null or trim(t.fecha_hasta)='' or t.fecha_hasta>=?) order by t.fecha_desde desc,t.id desc limit 1""",(aseguradora_id,tipo,referencia_id,fecha,fecha)).fetchone()
+
+@app.route('/seguros/tarifarios',methods=['GET','POST'])
+def seguros_tarifarios():
+ c=db()
+ if request.method=='POST':
+  try:
+   op=request.form.get('op','crear')
+   if op=='crear':
+    aid=int(request.form['aseguradora_id']);nombre=request.form['nombre'].strip();desde=request.form['fecha_desde'];hasta=request.form.get('fecha_hasta') or None
+    if hasta and hasta<desde:raise ValueError('La fecha hasta no puede ser anterior a la fecha desde.')
+    c.execute('insert into seguro_tarifarios(aseguradora_id,nombre,fecha_desde,fecha_hasta,moneda,activo,observaciones,creado_por,creado_en) values(?,?,?,?,?,1,?,?,?)',(aid,nombre,desde,hasta,request.form.get('moneda') or 'PYG',request.form.get('observaciones'),session.get('user'),now()))
+   elif op=='item':
+    tid=int(request.form['tarifario_id']);tipo=request.form['tipo'];rid=int(request.form['referencia_id']);precio=float(request.form.get('precio') or 0);iva=float(request.form.get('iva_pct') or 0)
+    if precio<0:raise ValueError('El precio no puede ser negativo.')
+    c.execute("""insert into seguro_tarifario_items(tarifario_id,tipo,referencia_id,precio,iva_pct,activo,creado_por,creado_en) values(?,?,?,?,?,1,?,?) on conflict(tarifario_id,tipo,referencia_id) do update set precio=excluded.precio,iva_pct=excluded.iva_pct,activo=1,creado_por=excluded.creado_por,creado_en=excluded.creado_en""",(tid,tipo,rid,precio,iva,session.get('user'),now()))
+   elif op=='estado':c.execute('update seguro_tarifarios set activo=? where id=?',(int(request.form['activo']),int(request.form['tarifario_id'])))
+   elif op=='eliminar_item':c.execute('update seguro_tarifario_items set activo=0 where id=?',(int(request.form['item_id']),))
+   elif op=='aumento':
+    tid=int(request.form['tarifario_id']);pct=float(request.form.get('porcentaje') or 0)
+    if pct<=-100:raise ValueError('Porcentaje inválido.')
+    c.execute('update seguro_tarifario_items set precio=round(precio*(1+?/100.0),2) where tarifario_id=? and activo=1',(pct,tid))
+   c.commit();audit('TARIFARIO_SEGURO',op);flash('Tarifario actualizado correctamente.')
+  except Exception as e:c.rollback();flash('No se pudo actualizar el tarifario: '+str(e))
+  finally:c.close()
+  return redirect('/seguros/tarifarios'+(('?tarifario_id='+request.form.get('tarifario_id')) if request.form.get('tarifario_id') else ''))
+ tid=request.args.get('tarifario_id',type=int);asegs=c.execute('select * from aseguradoras where coalesce(activo,1)=1 order by nombre').fetchall()
+ tarifas=c.execute("select t.*,a.nombre aseguradora,(select count(*) from seguro_tarifario_items i where i.tarifario_id=t.id and i.activo=1) items from seguro_tarifarios t join aseguradoras a on a.id=t.aseguradora_id order by t.activo desc,t.fecha_desde desc,t.id desc").fetchall()
+ actual=c.execute('select * from seguro_tarifarios where id=?',(tid,)).fetchone() if tid else None;items=[]
+ if actual:items=c.execute("""select i.*,case i.tipo when 'PRODUCTO' then (select nombre from productos where id=i.referencia_id) when 'SERVICIO' then (select nombre from servicios where id=i.referencia_id) when 'CONSULTA' then (select nombre from especialidades where id=i.referencia_id) end descripcion from seguro_tarifario_items i where i.tarifario_id=? and i.activo=1 order by i.tipo,descripcion""",(tid,)).fetchall()
+ productos=c.execute('select id,codigo,nombre,precio_pyg,iva_pct from productos where coalesce(activo,1)=1 order by nombre').fetchall();servicios=c.execute('select id,codigo,nombre,precio_pyg,iva_pct from servicios order by nombre').fetchall();especialidades=c.execute('select id,nombre,precio_consulta from especialidades where coalesce(activo,1)=1 order by nombre').fetchall();mons=c.execute('select * from monedas where activa=1 order by codigo').fetchall();c.close()
+ return render_template('insurance_price_lists.html',asegs=asegs,tarifas=tarifas,actual=actual,items=items,productos=productos,servicios=servicios,especialidades=especialidades,mons=mons)
 
 @app.route('/consultas',methods=['GET','POST'])
 def consultas_medicas():
@@ -2131,6 +2176,9 @@ def agendamiento_v12():
    e=c.execute('select * from especialidades where nombre=?',(m['especialidad'],)).fetchone();eid=e['id'] if e else None
    precio=float((m['precio_consulta'] if m['precio_consulta'] else (e['precio_consulta'] if e else 0)) or 0)
    aseg=int(request.form['aseguradora_id']) if request.form.get('aseguradora_id') else None
+   if aseg and eid:
+    _tar=_precio_seguro(c,aseg,'CONSULTA',eid,fecha)
+    if _tar: precio=float(_tar['precio'])
    origen='SEGURO' if aseg else 'PARTICULAR'
    gid=c.execute("insert into agenda(fecha,hora,paciente_id,medico_id,especialidad_id,aseguradora_id,motivo,precio_pyg,cobrado,creado_por,creado_en,facturada,condicion_venta) values(?,?,?,?,?,?,?,?,0,?,?,0,?)",(fecha,hora,pid,mid,eid,aseg,request.form.get('motivo'),precio,session['user'],now(),origen)).lastrowid
    c.commit();audit('AGENDAMIENTO_REGISTRADO',f'Agenda {gid} / {origen}');flash('Turno registrado. Queda pendiente de facturación.')
