@@ -1,5 +1,5 @@
 from flask import Flask,render_template,request,redirect,session,flash,jsonify,send_file,make_response
-import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets,unicodedata
+import sqlite3,os,hashlib,datetime,shutil,io,threading,time,secrets,unicodedata,base64
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from pathlib import Path
@@ -179,6 +179,38 @@ def _doc_qr_block(tipo, referencia='', detalle='', estado='VALIDO'):
  st=getSampleStyleSheet(); txt=Paragraph('<b>VALIDACIÓN DIGITAL</b><br/>Escanee para verificar este documento.<br/><font size="7">Código: '+r['codigo']+'</font>',st['Normal'])
  t=Table([[d,txt]],colWidths=[28*mm,120*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.5,colors.grey),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
  return t
+
+def _doc_qr_data_uri(token):
+    """QR embebido para vistas HTML/impresión: no depende de una segunda petición ni de sesión."""
+    from reportlab.graphics.barcode.qr import QrCodeWidget
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderSVG
+    token=str(token or '').strip()
+    if not token:return ''
+    url=request.url_root.rstrip('/')+'/validar-documento/'+token
+    q=QrCodeWidget(url);b=q.getBounds();w=b[2]-b[0];h=b[3]-b[1];size=180
+    d=Drawing(size,size,transform=[size/w,0,0,size/h,0,0]);d.add(q)
+    raw=renderSVG.drawToString(d)
+    if isinstance(raw,str):raw=raw.encode('utf-8')
+    return 'data:image/svg+xml;base64,'+base64.b64encode(raw).decode('ascii')
+
+def _firma_responsable_recibo(c, usuario):
+    """Funcionario vinculado al usuario que emitió/cobró el recibo y su firma persistente."""
+    if not usuario:return None
+    try:
+        r=c.execute("select e.id,e.nombre,e.cargo,e.firma_imagen from empleados e join usuarios u on u.id=e.usuario_id where u.usuario=? order by (e.estado='ACTIVO') desc,e.id limit 1",(usuario,)).fetchone()
+        return dict(r) if r else None
+    except Exception:
+        return None
+
+def _firma_data_uri(firma_imagen):
+    if not firma_imagen:return ''
+    ruta=os.path.join(DATA_DIR,'rrhh','firmas',os.path.basename(str(firma_imagen)))
+    if not os.path.isfile(ruta):return ''
+    ext=os.path.splitext(ruta)[1].lower();mime='image/png' if ext=='.png' else 'image/jpeg'
+    try:
+        return 'data:'+mime+';base64,'+base64.b64encode(Path(ruta).read_bytes()).decode('ascii')
+    except Exception:return ''
 
 @app.get('/documento-qr/<token>.svg')
 def documento_qr_svg(token):
@@ -403,34 +435,37 @@ def _sifen_operacion_automatica(naturaleza,tipo_contribuyente,pais,operacion_sol
  return str(operacion_solicitada or '2') if str(operacion_solicitada or '') in ('1','2','3') else '2'
 
 def init_v131047_codigo_terceros():
- """Código estable para clientes/proveedores. Migración aditiva; no toca SIFEN."""
+ """Código estable para clientes/proveedores. V13.10.55 permite el mismo código en maestros distintos."""
  c=db()
  try:
   cols={r['name'] for r in c.execute('pragma table_info(terceros)').fetchall()}
   if 'codigo_registro' not in cols:c.execute('alter table terceros add column codigo_registro TEXT')
+  # Retira la restricción global de V47: Gasparini puede usar el mismo código en Cliente y Proveedor.
+  c.execute('drop index if exists ux_terceros_codigo_registro')
   rows=c.execute("select id,tipo,codigo_registro from terceros order by id").fetchall()
-  usados={str(r['codigo_registro']).strip().upper() for r in rows if r['codigo_registro'] and str(r['codigo_registro']).strip()}
+  usados={}
+  for r in rows:
+   tipo=str(r['tipo'] or 'CLIENTE').upper(); usados.setdefault(tipo,set())
+   if r['codigo_registro'] and str(r['codigo_registro']).strip(): usados[tipo].add(str(r['codigo_registro']).strip().upper())
   for r in rows:
    if r['codigo_registro'] and str(r['codigo_registro']).strip():continue
-   pref='PRO' if str(r['tipo'] or '').upper()=='PROVEEDOR' else 'CLI'
-   n=int(r['id']);codigo=f'{pref}-{n:06d}'
-   while codigo.upper() in usados:
-    n+=1;codigo=f'{pref}-{n:06d}'
-   c.execute('update terceros set codigo_registro=? where id=?',(codigo,r['id']));usados.add(codigo.upper())
-  c.execute("create unique index if not exists ux_terceros_codigo_registro on terceros(upper(codigo_registro)) where codigo_registro is not null and trim(codigo_registro)<>''")
+   tipo=str(r['tipo'] or 'CLIENTE').upper();pref='PRO' if tipo=='PROVEEDOR' else 'CLI';n=int(r['id']);codigo=f'{pref}-{n:06d}'
+   while codigo.upper() in usados.setdefault(tipo,set()):n+=1;codigo=f'{pref}-{n:06d}'
+   c.execute('update terceros set codigo_registro=? where id=?',(codigo,r['id']));usados[tipo].add(codigo.upper())
+  c.execute("create index if not exists ix_terceros_codigo_tipo on terceros(tipo,upper(codigo_registro))")
   c.commit()
  finally:c.close()
 
 def _codigo_tercero_nuevo(c,tipo,codigo_solicitado=None):
- codigo=(str(codigo_solicitado or '').strip().upper())
+ codigo=str(codigo_solicitado or '').strip()  # conservar exactamente ceros a la izquierda
+ tipo=str(tipo or 'CLIENTE').upper()
  if codigo:
-  dup=c.execute("select id from terceros where upper(trim(coalesce(codigo_registro,'')))=upper(trim(?)) limit 1",(codigo,)).fetchone()
+  dup=c.execute("select id from terceros where upper(trim(coalesce(codigo_registro,'')))=upper(trim(?)) and upper(coalesce(tipo,''))=? limit 1",(codigo,tipo)).fetchone()
   if not dup:return codigo
- pref='PRO' if str(tipo or '').upper()=='PROVEEDOR' else 'CLI'
- n=int(c.execute('select coalesce(max(id),0)+1 from terceros').fetchone()[0])
+ pref='PRO' if tipo=='PROVEEDOR' else 'CLI';n=int(c.execute('select coalesce(max(id),0)+1 from terceros').fetchone()[0])
  while True:
   codigo=f'{pref}-{n:06d}'
-  if not c.execute("select 1 from terceros where upper(coalesce(codigo_registro,''))=upper(?)",(codigo,)).fetchone():return codigo
+  if not c.execute("select 1 from terceros where upper(coalesce(codigo_registro,''))=upper(?) and upper(coalesce(tipo,''))=?",(codigo,tipo)).fetchone():return codigo
   n+=1
 
 @app.route('/proveedores',methods=['GET','POST'])
@@ -990,6 +1025,7 @@ def recibo_pago(rid):
  try:
   r=c.execute('''select rp.*,v.numero factura,t.nombre cliente,t.ruc,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from recibos_pago rp left join ventas v on v.id=rp.venta_id left join terceros t on t.id=rp.tercero_id left join cuentas_bancarias cb on cb.id=rp.cuenta_bancaria_id left join terminales_pos tp on tp.id=rp.terminal_pos_id where rp.id=?''',(rid,)).fetchone()
   inst=c.execute('select * from institucion_config where id=1').fetchone()
+  responsable=_firma_responsable_recibo(c,r['usuario'] if r and 'usuario' in r.keys() else None)
  finally:c.close()
  if not r:return 'Recibo no encontrado',404
  rd=dict(r); rd['importe_num']=float(rd.get('importe') or 0); rd['cliente']=rd.get('cliente') or 'CLIENTE/PACIENTE'; rd['factura']=rd.get('factura') or '-'
@@ -997,7 +1033,7 @@ def recibo_pago(rid):
  estado_doc='ANULADO' if str(rd.get('estado') or 'VIGENTE').upper()=='ANULADO' else 'VALIDO'
  detalle_doc=('Motivo: '+str(rd.get('motivo_anulacion') or '')) if estado_doc=='ANULADO' else ''
  dv=_doc_validation_record('RECIBO',str(rd.get('numero') or rid),detalle_doc,estado_doc)
- return render_template('receipt.html',r=rd,inst=empresa,monto_letras=monto_letras(rd['importe_num']),doc_validation=dv)
+ return render_template('receipt.html',r=rd,inst=empresa,monto_letras=monto_letras(rd['importe_num']),doc_validation=dv,qr_data_uri=_doc_qr_data_uri(dv['token']),responsable=responsable,firma_data_uri=_firma_data_uri(responsable.get('firma_imagen') if responsable else None))
 
 def cancelar(tipo,i):
  c=db();tab='cxc' if tipo=='COBRO' else 'cxp';r=c.execute(f'select * from {tab} where id=?',(i,)).fetchone()
@@ -2914,6 +2950,7 @@ def recibo_pdf(rid):
  try:
   r=c.execute("select rp.*,v.numero factura,t.nombre cliente,t.ruc,cb.banco,cb.numero_cuenta,cb.alias cuenta_alias,tp.nombre terminal_pos from recibos_pago rp left join ventas v on v.id=rp.venta_id left join terceros t on t.id=rp.tercero_id left join cuentas_bancarias cb on cb.id=rp.cuenta_bancaria_id left join terminales_pos tp on tp.id=rp.terminal_pos_id where rp.id=?",(rid,)).fetchone()
   inst=c.execute('select * from institucion_config where id=1').fetchone()
+  responsable=_firma_responsable_recibo(c,r['usuario'] if r and 'usuario' in r.keys() else None)
  finally:c.close()
  if not r:return 'Recibo no encontrado',404
  r=dict(r);r['importe']=float(r.get('importe') or 0);r['cliente']=r.get('cliente') or 'CLIENTE/PACIENTE';r['factura']=r.get('factura') or '-'
@@ -2926,7 +2963,21 @@ def recibo_pdf(rid):
  comp=[['Comprobante','Concepto','Entidad / Cuenta','Referencia','Importe'],[r['factura'],'Cobro de factura',entidad,r['referencia'] or '',f"{float(r['importe'] or 0):,.0f}"],['','','','TOTAL COBRADO',f"{float(r['importe'] or 0):,.0f}"]]
  t=Table(comp,colWidths=[34*mm,46*mm,45*mm,31*mm,30*mm],rowHeights=[8*mm,18*mm,9*mm]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTNAME',(-2,-1),(-1,-1),'Helvetica-Bold'),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t,Spacer(1,2*mm),Paragraph('<b>Son:</b> '+monto_letras(r['importe']),st['Normal'])]
  _kude_footer(story,inst,None,None,False)
- story += [Spacer(1,10),_doc_qr_block('RECIBO',str(r['numero']),('Motivo: '+str(r.get('motivo_anulacion') or '')) if str(r.get('estado') or 'VIGENTE')=='ANULADO' else '',str(r.get('estado') or 'VIGENTE'))];doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
+ story += [Spacer(1,10),_doc_qr_block('RECIBO',str(r['numero']),('Motivo: '+str(r.get('motivo_anulacion') or '')) if str(r.get('estado') or 'VIGENTE')=='ANULADO' else '',str(r.get('estado') or 'VIGENTE'))]
+ # Firma automática del responsable de Caja, si el usuario está vinculado a un funcionario con firma.
+ from reportlab.platypus import Image as RLImage
+ firma_flow=[]
+ if responsable and responsable.get('firma_imagen'):
+  fp=os.path.join(DATA_DIR,'rrhh','firmas',os.path.basename(str(responsable.get('firma_imagen'))))
+  if os.path.isfile(fp):
+   try:
+    im=RLImage(fp,width=38*mm,height=16*mm);im.hAlign='CENTER';firma_flow.append(im)
+   except Exception:pass
+ nombre_resp=(responsable.get('nombre') if responsable else None) or str(r.get('usuario') or '')
+ cargo_resp=(responsable.get('cargo') if responsable else None) or 'Responsable de Caja'
+ firma_flow += [Paragraph('____________________________________',st['Normal']),Paragraph('<b>Recibí conforme</b>',st['Normal']),Paragraph(str(nombre_resp),st['Normal']),Paragraph(str(cargo_resp),st['Normal'])]
+ ft=Table([[firma_flow]],colWidths=[80*mm]);ft.hAlign='CENTER';ft.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'BOTTOM'),('TOPPADDING',(0,0),(-1,-1),10)]));story += [Spacer(1,8),ft]
+ doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
 
 
 # ===== V13.10.49: anulación trazable de cobros/recibos =====
@@ -8046,7 +8097,7 @@ def _imp_num(v):
 
 _IMP_ALIASES={
  'ruc':'ruc','ruc_ci':'ruc','rucci':'ruc','ci_ruc':'ruc','documento_tercero':'ruc','cliente_ruc':'ruc','proveedor_ruc':'ruc','nro_ruc':'ruc',
- 'codigo_cliente':'tercero_codigo','cod_cliente':'tercero_codigo','id_cliente':'tercero_codigo','cliente_codigo':'tercero_codigo','codigo_proveedor':'tercero_codigo','cod_proveedor':'tercero_codigo','id_proveedor':'tercero_codigo','proveedor_codigo':'tercero_codigo','codigo_tercero':'tercero_codigo','cod_tercero':'tercero_codigo','tercero_codigo':'tercero_codigo',
+ 'codigo_cliente':'tercero_codigo','cod_cliente':'tercero_codigo','id_cliente':'tercero_codigo','cliente_codigo':'tercero_codigo','codigo_proveedor':'tercero_codigo','cod_proveedor':'tercero_codigo','id_proveedor':'tercero_codigo','proveedor_codigo':'tercero_codigo','codigo_tercero':'tercero_codigo','cod_tercero':'tercero_codigo','tercero_codigo':'tercero_codigo','codigo_interno':'tercero_codigo','cod_interno':'tercero_codigo','codigo_gasparini':'tercero_codigo','cod_gasparini':'tercero_codigo','id_gasparini':'tercero_codigo',
  'razon_social':'tercero','razon_social_nombre':'tercero','cliente':'tercero','proveedor':'tercero','nombre':'tercero','denominacion':'tercero','tercero':'tercero',
  'documento':'documento','factura':'documento','numero':'documento','nro':'documento','n_factura':'documento','no_factura':'documento','n_fact':'documento','nro_factura':'documento','numero_factura':'documento','factura_nro':'documento',
  'nro_documento':'documento','numero_documento':'documento','documento_nro':'documento','nro_comprobante':'documento','numero_comprobante':'documento',
@@ -8571,16 +8622,17 @@ def _imp_rows(file, tipo=None):
     return out
 
 def _tercero_import(c,ruc,nombre,tipo,codigo_registro=None):
-    ruc=_imp_norm(ruc);nombre=_imp_norm(nombre) or ruc or 'SIN NOMBRE';codigo_registro=_imp_norm(codigo_registro).upper()
+    ruc=_imp_norm(ruc);nombre=_imp_norm(nombre) or ruc or 'SIN NOMBRE';codigo_registro=str(codigo_registro or '').strip();tipo=str(tipo or 'CLIENTE').upper()
     if codigo_registro:
-        row=c.execute("select * from terceros where upper(trim(coalesce(codigo_registro,'')))=upper(trim(?)) order by id limit 1",(codigo_registro,)).fetchone()
+        row=c.execute("select * from terceros where upper(trim(coalesce(codigo_registro,'')))=upper(trim(?)) and upper(coalesce(tipo,''))=? order by id limit 1",(codigo_registro,tipo)).fetchone()
         if row:return row['id']
-    row=c.execute("select * from terceros where trim(coalesce(ruc,''))=trim(?) order by id limit 1",(ruc,)).fetchone() if ruc else None
-    if not row: row=c.execute("select * from terceros where lower(trim(nombre))=lower(trim(?)) order by id limit 1",(nombre,)).fetchone()
+    row=c.execute("select * from terceros where trim(coalesce(ruc,''))=trim(?) and upper(coalesce(tipo,'')) in (?, 'AMBOS') order by id limit 1",(ruc,tipo)).fetchone() if ruc else None
+    if not row: row=c.execute("select * from terceros where lower(trim(nombre))=lower(trim(?)) and upper(coalesce(tipo,'')) in (?, 'AMBOS') order by id limit 1",(nombre,tipo)).fetchone()
     if row:
-        if codigo_registro and (row['codigo_registro'] or '').strip().upper()!=codigo_registro:
-            dup=c.execute("select id from terceros where upper(trim(coalesce(codigo_registro,'')))=upper(trim(?)) and id<>? limit 1",(codigo_registro,row['id'])).fetchone()
-            if not dup:c.execute('update terceros set codigo_registro=? where id=?',(codigo_registro,row['id']))
+        if codigo_registro and (row['codigo_registro'] or '').strip().upper()!=codigo_registro.upper():
+            dup=c.execute("select id from terceros where upper(trim(coalesce(codigo_registro,'')))=upper(trim(?)) and upper(coalesce(tipo,''))=? and id<>? limit 1",(codigo_registro,tipo,row['id'])).fetchone()
+            if dup:raise ValueError('Código interno Gasparini duplicado en '+tipo+': '+codigo_registro)
+            c.execute('update terceros set codigo_registro=? where id=?',(codigo_registro,row['id']))
         return row['id']
     codigo=_codigo_tercero_nuevo(c,tipo,codigo_registro)
     cur=c.execute('insert into terceros(tipo,codigo_registro,ruc,nombre,moneda) values(?,?,?,?,?)',(tipo,codigo,ruc,nombre,'PYG'));return cur.lastrowid
