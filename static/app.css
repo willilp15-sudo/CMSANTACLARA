@@ -192,3 +192,71 @@ html{background:var(--sc-bg)}body{background:var(--sc-bg)!important;color:var(--
   .erp-menu .erp-exit{font-size:0!important;width:30px!important;padding:6px!important;text-align:center!important}
   .erp-menu .erp-exit::after{content:'⏻';font-size:15px!important}
 }
+
+
+/* V13.10.52 - IMPRESION LIMPIA DE DOCUMENTOS
+   Imprime exclusivamente el comprobante, nunca la interfaz del ERP. */
+@media print {
+  @page { size: A4; margin: 7mm; }
+  html, body {
+    background:#fff!important;
+    background-image:none!important;
+    margin:0!important;
+    padding:0!important;
+    width:auto!important;
+    min-width:0!important;
+    height:auto!important;
+    color:#000!important;
+  }
+  .erp-menu, .no-print, .actions, .toolbar, .page-nav,
+  .theme-toggle, .erp-exit, .sidebar, .topbar, .menu-toggle,
+  .sidebar-overlay, body>header, nav {
+    display:none!important;
+  }
+  main.erp-workspace {
+    margin:0!important;
+    padding:0!important;
+    width:100%!important;
+    max-width:none!important;
+    min-height:0!important;
+    background:#fff!important;
+    background-image:none!important;
+  }
+  /* En páginas de documento, todo hermano ajeno al documento desaparece. */
+  main.erp-workspace:has(.print-document) > *:not(.print-document):not(script):not(style) {
+    display:none!important;
+  }
+  .print-document {
+    display:block!important;
+    position:static!important;
+    width:100%!important;
+    max-width:none!important;
+    margin:0!important;
+    padding:0!important;
+    box-shadow:none!important;
+    background:#fff!important;
+    color:#000!important;
+    border-color:#222!important;
+    break-inside:auto;
+  }
+  .print-document table { break-inside:auto; }
+  .print-document tr, .print-document .receipt-head,
+  .print-document .receipt-info, .print-document .receipt-validation,
+  .print-document .receipt-sign { break-inside:avoid; page-break-inside:avoid; }
+  .receipt-sheet.print-document {
+    font-size:11px!important;
+    line-height:1.25!important;
+    border:1px solid #222!important;
+  }
+  .receipt-sheet.print-document .receipt-head { padding:8px!important; }
+  .receipt-sheet.print-document .receipt-logo { max-height:68px!important; }
+  .receipt-sheet.print-document .receipt-info { padding:7px 9px!important; }
+  .receipt-sheet.print-document .receipt-table th,
+  .receipt-sheet.print-document .receipt-table td { padding:5px 7px!important; }
+  .receipt-sheet.print-document .receipt-words { padding:6px 8px!important; }
+  .receipt-sheet.print-document h4 { margin:5px 0!important; padding:5px!important; }
+  .receipt-sheet.print-document .receipt-validation { padding:7px!important; margin-top:4px!important; }
+  .receipt-sheet.print-document .receipt-validation img { width:82px!important; height:82px!important; }
+  .receipt-sheet.print-document .receipt-sign { margin-top:22px!important; padding-bottom:4px!important; }
+  .invoice.print-document { border:0!important; padding:0!important; }
+}

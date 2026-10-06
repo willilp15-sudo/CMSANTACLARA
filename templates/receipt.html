@@ -1,5 +1,5 @@
 {% extends 'base.html' %}{% block title %}Recibo de Dinero{% endblock %}{% block content %}
-<div class="receipt-sheet" id="recibo">
+<div class="receipt-sheet print-document" id="recibo">
   {% if (r.estado or 'VIGENTE') == 'ANULADO' %}<div style="border:3px solid #b42318;color:#b42318;text-align:center;font-size:28px;font-weight:800;padding:8px;margin-bottom:12px">RECIBO ANULADO</div>{% endif %}
   <div class="receipt-head"><img src="{{logo_url}}" class="receipt-logo"><div class="receipt-company"><b>{{inst.nombre or 'CENTRO MÉDICO SANTA CLARA'}}</b><span>R.U.C.: {{inst.ruc or 'Configurar en datos institucionales'}}</span><span>Timbrado: {{inst.timbrado or 'Configurar'}}</span></div><div class="receipt-title"><b>RECIBO DE<br>DINERO</b><strong>{{r.numero}}</strong></div></div>
   <div class="receipt-info"><div><b>Fecha de Emisión:</b> {{r.fecha}}<br><b>Moneda:</b> {{r.moneda}} &nbsp; <b>Tipo de Cambio:</b> {{r.tipo_cambio or ''}}</div><div><b>R.U.C./C.I.:</b> {{r.ruc or ''}}<br><b>Razón Social:</b> {{r.cliente}}<br><b>Factura:</b> {{r.factura}}</div></div>
