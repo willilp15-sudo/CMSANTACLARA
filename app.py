@@ -145,7 +145,7 @@ def _doc_validation_table(c):
   tipo TEXT NOT NULL, referencia TEXT, detalle TEXT, estado TEXT DEFAULT 'VALIDO',
   emitido_por TEXT, emitido_en TEXT NOT NULL)""")
 
-def _doc_qr_block(tipo, referencia='', detalle=''):
+def _doc_qr_block(tipo, referencia='', detalle='', estado='VALIDO'):
  """Registra el documento interno y devuelve un bloque QR para ReportLab.
  No se usa para KuDE/DE SIFEN, que conservan exclusivamente su QR fiscal.
  """
@@ -159,7 +159,7 @@ def _doc_qr_block(tipo, referencia='', detalle=''):
  codigo='SC-'+datetime.datetime.now().strftime('%Y%m%d')+'-'+secrets.token_hex(4).upper()
  c=db();_doc_validation_table(c)
  c.execute('insert into documentos_validacion(codigo,token,tipo,referencia,detalle,estado,emitido_por,emitido_en) values(?,?,?,?,?,?,?,?)',
-           (codigo,token,str(tipo or 'DOCUMENTO'),str(referencia or ''),str(detalle or ''),'VALIDO',session.get('user') or 'SISTEMA',now()))
+           (codigo,token,str(tipo or 'DOCUMENTO'),str(referencia or ''),str(detalle or ''),str(estado or 'VALIDO'),session.get('user') or 'SISTEMA',now()))
  c.commit();c.close()
  url=request.url_root.rstrip('/')+'/validar-documento/'+token
  q=QrCodeWidget(url); b=q.getBounds(); w=b[2]-b[0]; hq=b[3]-b[1]
@@ -2891,14 +2891,82 @@ def recibo_pdf(rid):
  r=dict(r);r['importe']=float(r.get('importe') or 0);r['cliente']=r.get('cliente') or 'CLIENTE/PACIENTE';r['factura']=r.get('factura') or '-'
  bio=io.BytesIO();doc=SimpleDocTemplate(bio,pagesize=A4,leftMargin=10*mm,rightMargin=10*mm,topMargin=8*mm,bottomMargin=8*mm);st=getSampleStyleSheet();story=[]
  _kude_header(story,inst,'RECIBO DE DINERO',r['numero'],'Comprobante de Recibo')
+ if str(r.get('estado') or 'VIGENTE')=='ANULADO': story += [Paragraph('<font color="#b42318"><b>RECIBO ANULADO</b></font>',st['Title']),Paragraph('<b>Motivo:</b> '+str(r.get('motivo_anulacion') or '-')+' | <b>Anulado por:</b> '+str(r.get('anulado_por') or '-')+' | '+str(r.get('anulado_en') or ''),st['Normal']),Spacer(1,2*mm)]
  datos=[[Paragraph('<b>Nombre o Razón Social:</b> '+str(r['cliente']),st['Normal']),Paragraph('<b>RUC/Documento:</b> '+str(r['ruc'] or '-'),st['Normal'])],[Paragraph('<b>Fecha y hora:</b> '+str(r['fecha']),st['Normal']),Paragraph('<b>Moneda:</b> '+str(r['moneda']),st['Normal'])],[Paragraph('<b>Factura relacionada:</b> '+str(r['factura']),st['Normal']),Paragraph('<b>Medio de cobro:</b> '+str(r['medio']),st['Normal'])]]
  t=Table(datos,colWidths=[95*mm,91*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),1,colors.black),('INNERGRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story += [t,Spacer(1,2*mm)]
  entidad=' '.join(x for x in [r['banco'] or '',r['cuenta_alias'] or r['numero_cuenta'] or '',r['terminal_pos'] or ''] if x)
  comp=[['Comprobante','Concepto','Entidad / Cuenta','Referencia','Importe'],[r['factura'],'Cobro de factura',entidad,r['referencia'] or '',f"{float(r['importe'] or 0):,.0f}"],['','','','TOTAL COBRADO',f"{float(r['importe'] or 0):,.0f}"]]
  t=Table(comp,colWidths=[34*mm,46*mm,45*mm,31*mm,30*mm],rowHeights=[8*mm,18*mm,9*mm]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9eef3')),('GRID',(0,0),(-1,-1),.45,colors.black),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTNAME',(-2,-1),(-1,-1),'Helvetica-Bold'),('ALIGN',(-1,1),(-1,-1),'RIGHT'),('FONTSIZE',(0,0),(-1,-1),7.5),('VALIGN',(0,0),(-1,-1),'TOP')]));story += [t,Spacer(1,2*mm),Paragraph('<b>Son:</b> '+monto_letras(r['importe']),st['Normal'])]
  _kude_footer(story,inst,None,None,False)
- story += [Spacer(1,10),_doc_qr_block('RECIBO',str(r['numero']))];doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
+ story += [Spacer(1,10),_doc_qr_block('RECIBO',str(r['numero']),('Motivo: '+str(r.get('motivo_anulacion') or '')) if str(r.get('estado') or 'VIGENTE')=='ANULADO' else '',str(r.get('estado') or 'VIGENTE'))];doc.build(story);bio.seek(0);return send_file(bio,mimetype='application/pdf',as_attachment=False,download_name=str(r['numero'])+'.pdf')
 
+
+# ===== V13.10.49: anulación trazable de cobros/recibos =====
+c=db()
+_rp_cols=[r['name'] for r in c.execute('pragma table_info(recibos_pago)').fetchall()]
+for _col,_def in [('estado',"TEXT DEFAULT 'VIGENTE'"),('anulado_en','TEXT'),('anulado_por','TEXT'),('motivo_anulacion','TEXT'),('asiento_anulacion_id','INTEGER')]:
+ if _col not in _rp_cols:c.execute(f'alter table recibos_pago add column {_col} {_def}')
+c.execute("update recibos_pago set estado='VIGENTE' where estado is null or trim(estado)=''")
+c.commit();c.close()
+
+def _recalcular_cxc_y_cuotas_por_recibos(c,cxc_id):
+ """Reconstruye saldo/Cuotas usando solo recibos vigentes; evita depender de una asignación histórica inexistente."""
+ x=c.execute('select * from cxc where id=?',(cxc_id,)).fetchone()
+ if not x:return
+ activos=c.execute("select importe from recibos_pago where cxc_id=? and coalesce(estado,'VIGENTE')<>'ANULADO' order by id",(cxc_id,)).fetchall()
+ cobrado=sum(float(r['importe'] or 0) for r in activos)
+ total=float(x['importe'] or 0); saldo=max(0,total-cobrado)
+ c.execute("update cxc set saldo=?,estado=? where id=?",(saldo,'PAGADO' if saldo<=0.0001 else 'PENDIENTE',cxc_id))
+ cuotas=c.execute('select * from venta_cuotas where venta_id=? order by fecha_vencimiento,numero,id',(x['venta_id'],)).fetchall()
+ if cuotas:
+  c.execute("update venta_cuotas set pagado=0,estado='PENDIENTE' where venta_id=?",(x['venta_id'],))
+  por_aplicar=cobrado
+  for q in cuotas:
+   if por_aplicar<=0:break
+   importe=float(q['importe'] or 0); aplica=min(importe,por_aplicar)
+   c.execute("update venta_cuotas set pagado=?,estado=? where id=?",(aplica,'PAGADA' if aplica>=importe-0.0001 else 'PARCIAL',q['id']))
+   por_aplicar-=aplica
+
+@app.post('/recibos/<int:rid>/anular')
+def anular_recibo_pago(rid):
+ if not user_has('FINANZAS','ANULAR'):
+  flash('No tiene permiso para anular cobros.');return redirect('/recibos')
+ motivo=(request.form.get('motivo') or '').strip()
+ if len(motivo)<5:
+  flash('Debe indicar un motivo de anulación válido.');return redirect('/recibos/'+str(rid))
+ c=db()
+ try:
+  r=c.execute('select * from recibos_pago where id=?',(rid,)).fetchone()
+  if not r:raise ValueError('Recibo no encontrado.')
+  if str(r['estado'] or 'VIGENTE').upper()=='ANULADO':raise ValueError('Este recibo ya fue anulado.')
+  # Efectivo: la reversión física debe registrarse contra una caja actualmente abierta.
+  apertura=None
+  if str(r['medio'] or '').strip().lower()=='efectivo':
+   apertura=caja_abierta(c)
+   if not apertura:raise ValueError('Para anular un cobro en efectivo debe abrir su caja. La reversión se registrará como egreso.')
+  # Reversión financiera: nunca borra el movimiento original.
+  c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id,terminal_pos_id) values(?,?,?,?,?,?,?,?,?,?,?,?)',
+            (datetime.date.today().isoformat(),'EGRESO',r['medio'],r['moneda'],float(r['tipo_cambio'] or 1),float(r['importe'] or 0),float(r['importe_pyg'] or 0),'ANULACIÓN '+str(r['numero'])+' - '+motivo,'RECIBO_ANULADO',rid,r['cuenta_bancaria_id'],r['terminal_pos_id']))
+  if apertura:
+   fid=c.execute("select id from formas_cobro where lower(nombre)='efectivo' limit 1").fetchone()
+   c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'EGRESO',?,?,?,?,?,?)",
+             (apertura['id'],now(),fid['id'] if fid else None,'Anulación recibo '+str(r['numero']),float(r['importe_pyg'] or 0),'RECIBO_ANULADO',rid,session.get('user')))
+  # Reversión contable exacta del asiento del recibo: Debe/Haber invertidos.
+  orig=c.execute("select * from asientos where origen_tipo='COBRO_VENTA' and origen_id=? order by id desc limit 1",(rid,)).fetchone()
+  aid_rev=None
+  if orig:
+   det=c.execute('select * from asiento_det where asiento_id=? order by id',(orig['id'],)).fetchall()
+   lineas=[(d['cuenta'],float(d['haber_pyg'] or 0),float(d['debe_pyg'] or 0),float(d['importe_moneda'] or 0),'Reversión: '+str(d['detalle'] or '')) for d in det]
+   aid_rev=asiento(c,datetime.date.today().isoformat(),'ANULACIÓN '+str(r['numero']),'ANULACION_COBRO',rid,r['moneda'],float(r['tipo_cambio'] or 1),lineas)
+  c.execute("update recibos_pago set estado='ANULADO',anulado_en=?,anulado_por=?,motivo_anulacion=?,asiento_anulacion_id=? where id=?",(now(),session.get('user'),motivo,aid_rev,rid))
+  _recalcular_cxc_y_cuotas_por_recibos(c,r['cxc_id'])
+  # Todo QR documental ya emitido para este recibo pasa a mostrar ANULADO.
+  _doc_validation_table(c)
+  c.execute("update documentos_validacion set estado='ANULADO',detalle=case when trim(coalesce(detalle,''))='' then ? else detalle||' | '||? end where upper(tipo)='RECIBO' and referencia=?",('Motivo: '+motivo,'Motivo: '+motivo,str(r['numero'])))
+  c.commit()
+ except Exception as e:
+  c.rollback();c.close();flash(str(e));return redirect('/recibos/'+str(rid))
+ c.close();audit('ANULAR_RECIBO',f'{rid} - {motivo}');flash('Cobro anulado y movimientos revertidos correctamente.');return redirect('/recibos/'+str(rid))
 
 # ===== V13.4.7: recibos históricos, cuentas receptoras y PDF de informes =====
 @app.route('/bancos/cuentas',methods=['GET','POST'])
