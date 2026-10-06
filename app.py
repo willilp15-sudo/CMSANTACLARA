@@ -138,35 +138,60 @@ def pdf_logo(width=120,height=82):
   im=Image(ruta,width=width,height=height); im.hAlign='LEFT'; return im
  return None
 
-# ===== V13.10.44: QR de validación para documentos internos =====
+# ===== V13.10.50: QR de validación estable para documentos internos =====
 def _doc_validation_table(c):
  c.execute("""CREATE TABLE IF NOT EXISTS documentos_validacion(
   id INTEGER PRIMARY KEY, codigo TEXT UNIQUE NOT NULL, token TEXT UNIQUE NOT NULL,
   tipo TEXT NOT NULL, referencia TEXT, detalle TEXT, estado TEXT DEFAULT 'VALIDO',
   emitido_por TEXT, emitido_en TEXT NOT NULL)""")
 
-def _doc_qr_block(tipo, referencia='', detalle='', estado='VALIDO'):
- """Registra el documento interno y devuelve un bloque QR para ReportLab.
- No se usa para KuDE/DE SIFEN, que conservan exclusivamente su QR fiscal.
+def _doc_validation_record(tipo, referencia='', detalle='', estado='VALIDO'):
+ """Obtiene o crea una validación estable por tipo+referencia.
+ Reimpresiones reutilizan el mismo token. SIFEN/KuDE no usa este mecanismo.
  """
+ tipo=str(tipo or 'DOCUMENTO').strip(); referencia=str(referencia or '').strip()
+ detalle=str(detalle or '').strip(); estado=str(estado or 'VALIDO').strip().upper()
+ c=db();_doc_validation_table(c)
+ r=None
+ if referencia:
+  r=c.execute('select * from documentos_validacion where tipo=? and referencia=? order by id desc limit 1',(tipo,referencia)).fetchone()
+ if r:
+  c.execute('update documentos_validacion set detalle=?,estado=? where id=?',(detalle,estado,r['id']));c.commit()
+  r=c.execute('select * from documentos_validacion where id=?',(r['id'],)).fetchone();c.close();return dict(r)
+ token=secrets.token_urlsafe(20)
+ codigo='SC-'+datetime.datetime.now().strftime('%Y%m%d')+'-'+secrets.token_hex(4).upper()
+ cur=c.execute('insert into documentos_validacion(codigo,token,tipo,referencia,detalle,estado,emitido_por,emitido_en) values(?,?,?,?,?,?,?,?)',
+           (codigo,token,tipo,referencia,detalle,estado,session.get('user') or 'SISTEMA',now()))
+ c.commit();r=c.execute('select * from documentos_validacion where id=?',(cur.lastrowid,)).fetchone();c.close();return dict(r)
+
+def _doc_qr_block(tipo, referencia='', detalle='', estado='VALIDO'):
+ """Devuelve QR ReportLab para documentos internos. No modifica QR fiscal SIFEN."""
  from reportlab.graphics.barcode.qr import QrCodeWidget
  from reportlab.graphics.shapes import Drawing
  from reportlab.platypus import Table,TableStyle,Paragraph
  from reportlab.lib import colors
  from reportlab.lib.styles import getSampleStyleSheet
  from reportlab.lib.units import mm
- token=secrets.token_urlsafe(20)
- codigo='SC-'+datetime.datetime.now().strftime('%Y%m%d')+'-'+secrets.token_hex(4).upper()
- c=db();_doc_validation_table(c)
- c.execute('insert into documentos_validacion(codigo,token,tipo,referencia,detalle,estado,emitido_por,emitido_en) values(?,?,?,?,?,?,?,?)',
-           (codigo,token,str(tipo or 'DOCUMENTO'),str(referencia or ''),str(detalle or ''),str(estado or 'VALIDO'),session.get('user') or 'SISTEMA',now()))
- c.commit();c.close()
- url=request.url_root.rstrip('/')+'/validar-documento/'+token
+ r=_doc_validation_record(tipo,referencia,detalle,estado)
+ url=request.url_root.rstrip('/')+'/validar-documento/'+r['token']
  q=QrCodeWidget(url); b=q.getBounds(); w=b[2]-b[0]; hq=b[3]-b[1]
  d=Drawing(24*mm,24*mm,transform=[24*mm/w,0,0,24*mm/hq,0,0]);d.add(q)
- st=getSampleStyleSheet(); txt=Paragraph('<b>VALIDACIÓN DIGITAL</b><br/>Escanee para verificar este documento.<br/><font size="7">Código: '+codigo+'</font>',st['Normal'])
+ st=getSampleStyleSheet(); txt=Paragraph('<b>VALIDACIÓN DIGITAL</b><br/>Escanee para verificar este documento.<br/><font size="7">Código: '+r['codigo']+'</font>',st['Normal'])
  t=Table([[d,txt]],colWidths=[28*mm,120*mm]);t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.5,colors.grey),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
  return t
+
+@app.get('/documento-qr/<token>.svg')
+def documento_qr_svg(token):
+ from reportlab.graphics.barcode.qr import QrCodeWidget
+ from reportlab.graphics.shapes import Drawing
+ from reportlab.graphics import renderSVG
+ c=db();_doc_validation_table(c);r=c.execute('select token from documentos_validacion where token=?',(token,)).fetchone();c.close()
+ if not r:return ('QR no encontrado',404)
+ url=request.url_root.rstrip('/')+'/validar-documento/'+token
+ q=QrCodeWidget(url);b=q.getBounds();w=b[2]-b[0];h=b[3]-b[1];size=180
+ d=Drawing(size,size,transform=[size/w,0,0,size/h,0,0]);d.add(q)
+ data=renderSVG.drawToString(d)
+ return Response(data,mimetype='image/svg+xml',headers={'Cache-Control':'public, max-age=3600'})
 
 @app.get('/validar-documento/<token>')
 def validar_documento_publico(token):
@@ -185,7 +210,7 @@ def branding_logo():
 def identidad_visual_global():
  return {'logo_url':'/branding/logo'}
 def monto_letras(n):
- n=int(round(float(n or 0))); u=['','UNO','DOS','TRES','CUATRO','CINCO','SEIS','SIETE','OCHO','NUEVE','DIEZ','ONCE','DOCE','TRECE','CATORCE','QUINCE','DIECISEIS','DIECISIETE','DIECIOCHO','DIECINUEVE','VEINTE','VEINTIUNO','VEINTIDOS','VEINTITRES','VEINTICUATRO','VEINTICINCO','VEINTISEIS','VEINTISIETE','VEINTIOCHO','VEINTINUEVE']; d=['','','TREINTA','CUARENTA','CINCUENTA','SESENTA','SETENTA','OCHENTA','NOVENTA']; ce=['','CIENTO','DOSCIENTOS','TRESCIENTOS','CUATROCIENTOS','QUINIENTOS','SEISCIENTOS','SETECIENTOS','OCHOCIENTOS','NOVECIENTOS']
+ n=int(round(float(n or 0))); u=['','UNO','DOS','TRES','CUATRO','CINCO','SEIS','SIETE','OCHO','NUEVE','DIEZ','ONCE','DOCE','TRECE','CATORCE','QUINCE','DIECISEIS','DIECISIETE','DIECIOCHO','DIECINUEVE','VEINTE','VEINTIUNO','VEINTIDOS','VEINTITRES','VEINTICUATRO','VEINTICINCO','VEINTISEIS','VEINTISIETE','VEINTIOCHO','VEINTINUEVE']; d=['','','','TREINTA','CUARENTA','CINCUENTA','SESENTA','SETENTA','OCHENTA','NOVENTA']; ce=['','CIENTO','DOSCIENTOS','TRESCIENTOS','CUATROCIENTOS','QUINIENTOS','SEISCIENTOS','SETECIENTOS','OCHOCIENTOS','NOVECIENTOS']
  def sub(x):
   if x==0:return ''
   if x==100:return 'CIEN'
@@ -969,7 +994,10 @@ def recibo_pago(rid):
  if not r:return 'Recibo no encontrado',404
  rd=dict(r); rd['importe_num']=float(rd.get('importe') or 0); rd['cliente']=rd.get('cliente') or 'CLIENTE/PACIENTE'; rd['factura']=rd.get('factura') or '-'
  empresa=_kude_empresa(inst)
- return render_template('receipt.html',r=rd,inst=empresa,monto_letras=monto_letras(rd['importe_num']))
+ estado_doc='ANULADO' if str(rd.get('estado') or 'VIGENTE').upper()=='ANULADO' else 'VALIDO'
+ detalle_doc=('Motivo: '+str(rd.get('motivo_anulacion') or '')) if estado_doc=='ANULADO' else ''
+ dv=_doc_validation_record('RECIBO',str(rd.get('numero') or rid),detalle_doc,estado_doc)
+ return render_template('receipt.html',r=rd,inst=empresa,monto_letras=monto_letras(rd['importe_num']),doc_validation=dv)
 
 def cancelar(tipo,i):
  c=db();tab='cxc' if tipo=='COBRO' else 'cxp';r=c.execute(f'select * from {tab} where id=?',(i,)).fetchone()
