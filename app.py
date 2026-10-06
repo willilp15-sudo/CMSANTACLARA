@@ -319,7 +319,7 @@ def tc_fecha(c,fecha,moneda,tc_form):
 
 @app.before_request
 def auth():
- if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw') and 'user' not in session:return redirect('/login')
+ if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw','validar_documento_publico','documento_qr_svg') and 'user' not in session:return redirect('/login')
 @app.route('/login',methods=['GET','POST'])
 def login():
  if request.method=='POST':
@@ -1882,7 +1882,7 @@ ROUTE_MODULE.update({'editar_admision':'ADMISION','eliminar_admision':'ADMISION'
 @app.before_request
 def modular_guard():
  # Rutas públicas / autenticación.
- publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw'}
+ publicos={None,'login','logout','static','branding_logo','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw','validar_documento_publico','documento_qr_svg'}
  if request.endpoint in publicos:return
  if not session.get('user'):return redirect('/login')
  if request.endpoint=='cambiar_mi_clave':return
