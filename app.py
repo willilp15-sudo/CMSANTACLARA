@@ -2872,6 +2872,13 @@ c.commit();c.close()
 # El arranque de Flask debe quedar al FINAL del archivo para registrar todas las rutas.
 
 # ===== V13.1 OPERATIVA: CRUD, BUSQUEDA Y CREACION DIRECTA =====
+@app.get('/maestros')
+def centro_maestros():
+    # V13.11.0: un único punto de acceso a maestros existentes. No duplica datos ni tablas.
+    if not any(user_has(m,'VER') for m in ('PACIENTES','COMPRAS','STOCK','CONFIG_SANATORIO','FINANZAS','RRHH')):
+        return ('Acceso no autorizado',403)
+    return render_template('master_center.html')
+
 def _safe_delete_master(table, rid, dependencies):
     c=db()
     for tab,col in dependencies:
@@ -6522,7 +6529,7 @@ def retenciones_fiscales():
 def retencion_anular(rid):
  c=db();c.execute("update retenciones_fiscales set estado='ANULADA' where id=?",(rid,));c.commit();c.close();audit('RETENCION_ANULAR',str(rid));return redirect(request.referrer or '/contabilidad/retenciones')
 
-def _norm_header(x):return ''.join(ch for ch in unicodedata.normalize('NFKD',str(x or '')).lower() if ch.isalnum() or ch==' ').strip()
+def _norm_header_retenciones(x):return ''.join(ch for ch in unicodedata.normalize('NFKD',str(x or '')).lower() if ch.isalnum() or ch==' ').strip()
 def _leer_retenciones_marangatu(f):
  ext=os.path.splitext((f.filename or '').lower())[1];data=[]
  if ext in ('.xlsx','.xlsm'):
@@ -6539,7 +6546,7 @@ def _leer_retenciones_marangatu(f):
  if not data:raise ValueError('Archivo vacío.')
  aliases={'fecha':['fecha','fecha retencion','fecha de retencion'],'tipo':['tipo','tipo retencion'],'impuesto':['impuesto','tributo'],'ruc':['ruc','ruc agente','ruc retenedor'],'nombre':['razon social','nombre','agente','agente retencion'],'numero':['numero retencion','nro retencion','retencion','numero'],'comprobante':['comprobante','documento','factura'],'base':['base imponible','base'],'porcentaje':['porcentaje','tasa'],'importe':['importe retenido','monto retenido','importe','monto']};header_idx=None;mapping={}
  for i,row in enumerate(data[:25]):
-  hs=[_norm_header(x) for x in row];mp={}
+  hs=[_norm_header_retenciones(x) for x in row];mp={}
   for key,vals in aliases.items():
    for j,hv in enumerate(hs):
     if hv in vals or any(v in hv for v in vals if len(v)>5):mp[key]=j;break

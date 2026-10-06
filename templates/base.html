@@ -35,11 +35,7 @@
   </div></details>{% endif %}
 
   {% set m_maestros = has_perm('PACIENTES','VER') or has_perm('COMPRAS','VER') or has_perm('STOCK','VER') or has_perm('CONFIG_SANATORIO','VER') or has_perm('FINANZAS','VER') or has_perm('RRHH','VER') %}
-  {% if m_maestros %}<details><summary>▦ Maestros ▾</summary><div class="erp-submenu erp-mega">
-    <div class="erp-group"><b>Personas</b>{% if has_perm('PACIENTES','VER') %}<a href="/clientes">Pacientes / Clientes</a>{% endif %}{% if has_perm('COMPRAS','VER') %}<a href="/proveedores">Proveedores</a>{% endif %}{% if has_perm('RRHH','VER') %}<a href="/rrhh/funcionarios">Funcionarios / Legajos</a>{% endif %}</div>
-    <div class="erp-group"><b>Productos y existencias</b>{% if has_perm('STOCK','VER') %}<a href="/productos">Productos · Servicios · Precios</a><a href="/farmacia/depositos">Depósitos</a><a href="/farmacia/inventario-depositos">Inventario por depósito</a>{% endif %}</div>
-    <div class="erp-group"><b>Administrativos</b>{% if has_perm('FINANZAS','VER') %}<a href="/bancos/cuentas">Cuentas bancarias</a><a href="/tipos-cambio">Monedas / Tipo de cambio</a>{% endif %}{% if has_perm('CONFIG_SANATORIO','VER') %}<a href="/seguros/tarifarios">Seguros y tarifarios</a><a href="/config-medicos-usuarios">Médicos / Usuarios</a><a href="/config-sanatorio">Configuración sanatorial</a>{% endif %}</div>
-  </div></details>{% endif %}
+  {% if m_maestros %}<a class="erp-home" href="/maestros">▦ Maestros</a>{% endif %}
 
   {% if has_perm('INFORMES','VER') or has_perm('CONTABILIDAD','VER') or has_perm('FINANZAS','VER') %}<details><summary>▥ Informes ▾</summary><div class="erp-submenu">{% if has_perm('INFORMES','VER') %}<a href="/informes">Centro de Informes</a><a href="/informes-consultas">Consultas por especialidad</a>{% endif %}{% if has_perm('CONTABILIDAD','VER') %}<a href="/libros">Libros IVA</a><a href="/contabilidad/comparativo">Comparativo contable</a>{% endif %}</div></details>{% endif %}
 
