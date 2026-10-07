@@ -341,7 +341,12 @@ def audit(a,d=''):
  c=db();c.execute('insert into auditoria(fecha,usuario,accion,detalle) values(?,?,?,?)',(now(),session.get('user','sistema'),a,d));c.commit();c.close()
 def asiento(c,fecha,concepto,origen_tipo,origen_id,moneda,tc,lineas):
  num=f'ASI-{datetime.datetime.now():%Y%m%d%H%M%S%f}';cur=c.execute('insert into asientos(fecha,numero,concepto,origen_tipo,origen_id,moneda,tipo_cambio) values(?,?,?,?,?,?,?)',(fecha,num,concepto,origen_tipo,origen_id,moneda,tc));aid=cur.lastrowid
- for cuenta,debe,haber,imp,det in lineas:c.execute('insert into asiento_det(asiento_id,cuenta,debe_pyg,haber_pyg,importe_moneda,moneda,tipo_cambio,detalle) values(?,?,?,?,?,?,?,?)',(aid,cuenta,debe,haber,imp,moneda,tc,det))
+ # V13.11.2: cada línea contable conserva centro de costo. Si el proceso no lo informa, se asigna por origen operativo.
+ try:_init_centros_costos_v13112(c); ccid=_centro_por_origen(c,origen_tipo,origen_id)
+ except Exception:ccid=None
+ for linea in lineas:
+  cuenta,debe,haber,imp,det=linea[:5]; linea_cc=(linea[5] if len(linea)>5 else ccid)
+  c.execute('insert into asiento_det(asiento_id,cuenta,debe_pyg,haber_pyg,importe_moneda,moneda,tipo_cambio,detalle,centro_costo_id) values(?,?,?,?,?,?,?,?,?)',(aid,cuenta,debe,haber,imp,moneda,tc,det,linea_cc))
  return aid
 def tc_fecha(c,fecha,moneda,tc_form):
  if moneda=='PYG':return 1.0
@@ -549,11 +554,11 @@ def productos():
  rows=c.execute('select * from productos order by nombre').fetchall();cuentas=c.execute("select codigo,nombre,tipo from plan_cuentas where coalesce(activa,1)=1 and imputable=1 order by codigo").fetchall();c.close();return render_template('products.html',rows=rows,cuentas=cuentas)
 @app.route('/compras',methods=['GET','POST'])
 def compras():
- c=db()
+ c=db();_init_centros_costos_v13112(c)
  if request.method=='POST':
   try:
    import json
-   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));sid=int(request.form['proveedor_id'])
+   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));sid=int(request.form['proveedor_id']);centro_costo_id=int(request.form.get('centro_costo_id') or 0) or None
    items=json.loads(request.form.get('items_json') or '[]')
    if not items: raise ValueError('Agregue al menos un ítem a la compra.')
    detalle=[];total=grav=iva=exento=g10=i10=g5=i5=0.0
@@ -578,7 +583,7 @@ def compras():
    elif condicion=='CUOTAS':
     if entrega>total: raise ValueError('La entrega inicial no puede superar el total de la compra.')
    else: raise ValueError('Condición de pago no válida.')
-   cur=c.execute('insert into compras(fecha,proveedor_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_pago,fecha_vencimiento,entrega_inicial,medio_pago_inicial,referencia_pago,timbrado,timbrado_vencimiento) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,sid,request.form['numero'],mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,venc,entrega,medio,ref,timbrado,timbrado_venc));cid=cur.lastrowid
+   cur=c.execute('insert into compras(fecha,proveedor_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_pago,fecha_vencimiento,entrega_inicial,medio_pago_inicial,referencia_pago,timbrado,timbrado_vencimiento,centro_costo_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,sid,request.form['numero'],mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,venc,entrega,medio,ref,timbrado,timbrado_venc,centro_costo_id));cid=cur.lastrowid
    for pid,qty,cost,base,iva_pct in detalle:
     c.execute('insert into compra_items(compra_id,producto_id,cantidad,costo,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?)',(cid,pid,qty,cost,base,base*tc,iva_pct))
     costo_unit_pyg=(base/qty*tc if qty else 0)
@@ -605,14 +610,14 @@ def compras():
    if exento>0: lineas.append(('1.1.03',exento*tc,0,exento,'Inventario exento'))
    if entrega>0: lineas.append(('1.1.01',0,entrega*tc,entrega,'Pago/entrega inicial'))
    if saldo>0: lineas.append(('2.1.01',0,saldo*tc,saldo,'Proveedor'))
-   asiento(c,fecha,'Compra '+request.form['numero'],'COMPRA',cid,mon,tc,lineas);c.commit();audit('COMPRA',str(cid));flash('Compra registrada correctamente con '+str(len(detalle))+' ítem(s).')
+   asiento(c,fecha,'Compra '+request.form['numero'],'COMPRA',cid,mon,tc,[tuple(list(x)+[centro_costo_id]) for x in lineas]);c.commit();audit('COMPRA',str(cid));flash('Compra registrada correctamente con '+str(len(detalle))+' ítem(s).')
   except Exception as e:c.rollback();flash(str(e))
   return redirect('/compras')
  q=(request.args.get('q') or '').strip(); buscado=bool(q); rows=[]
  if buscado:
   like='%'+q+'%'; qnorm=q.upper().strip(); qid=qnorm[4:] if qnorm.startswith('CMP-') else qnorm
   rows=c.execute("select x.*,t.nombre tercero,t.ruc tercero_ruc from compras x join terceros t on t.id=x.proveedor_id where cast(x.id as text)=? or ('CMP-' || printf('%06d',x.id)) like ? or x.numero like ? or coalesce(t.ruc,'') like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(qid,like,like,like,like,like,like)).fetchall()
- ters=c.execute("select * from terceros where tipo in ('PROVEEDOR','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('transaction.html',kind='Compra',rows=rows,ters=ters,prods=prods,mons=mons,buscado=buscado,q=q)
+ centros=c.execute("select id,codigo,nombre from centros_costos where activo=1 order by codigo").fetchall();ters=c.execute("select * from terceros where tipo in ('PROVEEDOR','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();c.close();return render_template('transaction.html',kind='Compra',rows=rows,ters=ters,prods=prods,mons=mons,centros=centros,buscado=buscado,q=q)
 
 
 
@@ -851,11 +856,11 @@ def _producto_controla_stock(p):
 
 @app.route('/ventas/carga',methods=['GET','POST'])
 def ventas():
- c=db()
+ c=db();_init_centros_costos_v13112(c)
  if request.method=='POST':
   success_vid=None
   try:
-   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'))
+   fecha=request.form['fecha'];mon=request.form['moneda'];tc=tc_fecha(c,fecha,mon,request.form.get('tipo_cambio'));centro_costo_id=int(request.form.get('centro_costo_id') or 0) or None
    condicion=(request.form.get('condicion_venta') or 'CONTADO').upper();medio=(request.form.get('forma_cobro') or '').strip();ref=(request.form.get('referencia_cobro') or '').strip();cuenta_id=int(request.form.get('cuenta_bancaria_id') or 0) or None;pos_id=int(request.form.get('terminal_pos_id') or 0) or None
    if condicion not in ('CONTADO','CREDITO','CUOTAS'):raise ValueError('Condición de venta inválida')
    entrega=max(0,float(request.form.get('entrega_inicial_venta') or 0));venc=request.form.get('fecha_vencimiento_venta') or None
@@ -908,7 +913,7 @@ def ventas():
     suma=round(sum(float(x.get('importe') or 0) for x in cuotas_venta),2)
     if abs(suma-saldo_fin)>0.01:raise ValueError(f'La suma de cuotas ({suma:,.2f}) debe ser igual al saldo financiado ({saldo_fin:,.2f})')
    cur=c.execute('insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,referencia_cobro,entrega_inicial,fecha_vencimiento) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,tid,numero_factura,mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,medio or None,ref or None,entrega,venc));vid=cur.lastrowid
-   ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'RECEPCION',vid))
+   ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=?,centro_costo_id=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'RECEPCION',centro_costo_id,vid))
    c.execute('update ventas set cuenta_bancaria_id=?,terminal_pos_id=? where id=?',(cuenta_id,pos_id,vid))
    for p,pid,qty,price,line_total,base,line_iva,iva_pct,cost_line in detalle:
     c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct) values(?,?,?,?,?,?,?,?)',(vid,pid,qty,price,line_total,line_total*tc,cost_line,iva_pct))
@@ -951,7 +956,7 @@ def ventas():
  if buscado:
   like='%'+q+'%'
   rows=c.execute("select x.*,t.nombre tercero from ventas x join terceros t on t.id=x.cliente_id where x.numero like ? or t.nombre like ? or coalesce(x.estado,'') like ? or x.fecha like ? order by x.id desc limit 200",(like,like,like,like)).fetchall()
- ters=c.execute("select * from terceros where tipo in ('CLIENTE','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];proximo_numero=_proximo_numero_factura_preview(c) if puntos else 'Configure un punto DNIT';c.close();return render_template('transaction.html',kind='Venta',rows=rows,ters=ters,prods=prods,mons=mons,cuentas=cuentas,poses=poses,puntos=puntos,buscado=buscado,q=q,proximo_numero=proximo_numero)
+ ters=c.execute("select * from terceros where tipo in ('CLIENTE','AMBOS')").fetchall();prods=c.execute("select id,codigo,coalesce(codigo_barras,'') codigo_barras,nombre,coalesce(iva_pct,0) iva_pct,coalesce(precio_pyg,0) precio_pyg,coalesce(costo_pyg,0) costo_pyg,coalesce(stock,0) stock from productos where coalesce(activo,1)=1 order by nombre").fetchall();mons=c.execute('select * from monedas').fetchall();cuentas=c.execute('select * from cuentas_bancarias where activo=1 order by banco,alias').fetchall();poses=c.execute('select * from terminales_pos where activo=1 order by nombre').fetchall();centros=c.execute("select id,codigo,nombre from centros_costos where activo=1 order by codigo").fetchall();puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])];proximo_numero=_proximo_numero_factura_preview(c) if puntos else 'Configure un punto DNIT';c.close();return render_template('transaction.html',kind='Venta',rows=rows,ters=ters,prods=prods,mons=mons,cuentas=cuentas,poses=poses,puntos=puntos,centros=centros,buscado=buscado,q=q,proximo_numero=proximo_numero)
 
 @app.route('/ventas/recepcion-caja',methods=['GET','POST'])
 def recepcion_caja_unificada():
@@ -1072,7 +1077,7 @@ init_v13917_pagos_proveedores()
 
 @app.route('/compras/cuentas-proveedores')
 def cuentas_pendientes_proveedores():
- c=db();q=(request.args.get('q') or '').strip();estado=request.args.get('estado','PENDIENTE')
+ c=db();_init_centros_costos_v13112(c);q=(request.args.get('q') or '').strip();estado=request.args.get('estado','PENDIENTE')
  sql="""select x.*,t.nombre proveedor,t.ruc,c.numero factura,c.fecha fecha_compra,c.fecha_vencimiento
  from cxp x join terceros t on t.id=x.tercero_id left join compras c on c.id=x.compra_id where 1=1"""
  par=[]
@@ -1578,7 +1583,7 @@ def alta(aid):
   if a['estado']!='ABIERTA':
    c.close();flash('La cuenta ya fue cerrada o procesada.');return redirect(f'/cuenta-paciente/{aid}')
   items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall()
-  puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])]
+  centros=c.execute("select id,codigo,nombre from centros_costos where activo=1 order by codigo").fetchall();puntos=[p for p in c.execute("select * from sifen_puntos_expedicion order by predeterminado desc,establecimiento,punto_expedicion").fetchall() if _flag_activo(p['activo']) and _flag_activo(p['autorizado_dnit']) and _flag_activo(p['factura_electronica'])]
   terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall()
   c.close();return render_template('insurance_coverage_close.html',a=a,items=items,puntos=puntos,terceros=terceros)
  if a['estado']!='ABIERTA':
@@ -3103,7 +3108,7 @@ def informe_pdf(tipo):
  buf=io.BytesIO();doc=SimpleDocTemplate(buf,pagesize=landscape(A4),rightMargin=10*mm,leftMargin=10*mm,topMargin=10*mm,bottomMargin=10*mm);styles=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('CENTRO MÉDICO SANTA CLARA',styles['Title']),Paragraph(titulo,styles['Heading2']),Paragraph(f'Período: {desde} al {hasta} · Generado: {now().replace("T"," ")}',styles['Normal']),Spacer(1,5*mm)]
  data=[headers]+[[_report_value(v,headers[i]) for i,v in enumerate(r)] for r in rows];tbl=Table(data,repeatRows=1);tbl.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),0.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)]));story.append(tbl);story.append(Spacer(1,4*mm));story.append(Paragraph(f'Total de registros: {len(rows)}',styles['Normal']));
  for h,v in _report_totals(headers,rows): story.append(Paragraph(f'<b>{h}:</b> Gs. {_money_local(v,"PYG")}',styles['Normal']))
- story += [Spacer(1,10),_doc_qr_block('INFORME '+str(tipo).upper(),f'{desde} a {hasta}')];doc.build(story);buf.seek(0);return send_file(buf,mimetype='application/pdf',as_attachment=True,download_name=f'{tipo}_{desde}_{hasta}.pdf')
+ story += [Spacer(1,10),_doc_qr_block('INFORME '+str(tipo).upper(),f'{desde} a {hasta}')];doc.build(story);buf.seek(0);return send_file(buf,mimetype='application/pdf',as_attachment=(request.args.get('imprimir')!='1'),download_name=f'{tipo}_{desde}_{hasta}.pdf')
 
 # ===== V13.9.2: búsqueda bajo demanda de productos =====
 @app.get('/api/productos/buscar')
@@ -4417,7 +4422,7 @@ def caja_central_facturar(aid):
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
   rem_actual=c.execute("select id from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
   c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=?,origen_admision_id=?,origen_remision_id=?,factura_anterior_id=? where id=?',(a['paciente_id'],receptor_id,aid,rem_actual['id'] if rem_actual else None,rem_actual['venta_id'] if rem_actual and 'venta_id' in rem_actual.keys() else None,vid))
-  ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,str(a['tipo'] or 'OTROS'),vid))
+  ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,str(a['tipo'] or 'OTROS'),vid)); c.execute('update ventas set centro_costo_id=? where id=?',(_centro_por_origen(c,str(a['tipo'] or 'OTROS')),vid))
   for x in items:
    pid=x['referencia_id'] if str(x['tipo'] or '').upper()=='PRODUCTO' else None
    c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,pid,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),float(x['costo_pyg'] or 0),float(x['iva_pct'] or 0),x['descripcion']))
@@ -4454,7 +4459,7 @@ def caja_central_consultorio_facturar(pid):
   base,iva=desglosar_iva_incluido(total,10)
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,base,iva,0,total,total,base,iva,0,0,0,'CONTADO',medio,total)).lastrowid
   c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(x['paciente_id'],receptor_id,vid))
-  ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'CONSULTORIO',vid))
+  ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,'CONSULTORIO',vid)); c.execute('update ventas set centro_costo_id=? where id=?',(_centro_por_origen(c,'CONSULTORIO'),vid))
   c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,1,total,total,total,0,10,x['descripcion']))
   c.execute("update caja_pendientes_consultorio set estado='FACTURADO',venta_id=?,procesado_en=? where id=?",(vid,now(),pid));c.execute('update consultas set facturada=1,venta_id=? where id=?',(vid,x['consulta_id']))
   c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,receptor_id,'PYG',1,total,0,0,'PAGADO'))
@@ -6065,12 +6070,12 @@ def rrhh_inicio():
 def rrhh_funcionarios():
     if request.method=='POST' and not _rrhh_perm('CREAR'): return ('Acceso no autorizado',403)
     if not _rrhh_perm(): return ('Acceso no autorizado',403)
-    c=db()
+    c=db();_init_centros_costos_v13112(c)
     if request.method=='POST':
         f=request.form
         cur=c.execute('''insert into empleados(nombre,documento,ruc,fecha_nacimiento,telefono,email,direccion,cargo,departamento,fecha_ingreso,tipo_contrato,salario_base,ips_numero,ips_activo,turno,estado,observacion,creado_en,actualizado_en)
         values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),'ACTIVO',f.get('observacion'),now(),now()))
-        eid=cur.lastrowid;c.commit();c.close()
+        eid=cur.lastrowid;c.execute('update empleados set centro_costo_id=? where id=?',(int(f.get('centro_costo_id') or 0) or None,eid));c.commit();c.close()
         firma=request.files.get('firma')
         if firma and firma.filename:_rrhh_guardar_firma(eid,firma)
         audit('RRHH_FUNCIONARIO_CREAR',f.get('nombre',''));flash('Funcionario registrado.')
@@ -6081,20 +6086,20 @@ def rrhh_funcionarios():
         return redirect('/rrhh/funcionarios')
     q=(request.args.get('q') or '').strip();params=[];sql='select * from empleados'
     if q: sql+=' where nombre like ? or documento like ? or cargo like ? or departamento like ?';params=['%'+q+'%']*4
-    sql+=' order by estado desc,nombre';rows=c.execute(sql,params).fetchall();modelos=c.execute("select id,nombre from rrhh_modelos_contrato where activo=1 order by nombre").fetchall();c.close();return render_template('rrhh_employees.html',rows=rows,q=q,modelos=modelos)
+    sql+=' order by estado desc,nombre';rows=c.execute(sql,params).fetchall();modelos=c.execute("select id,nombre from rrhh_modelos_contrato where activo=1 order by nombre").fetchall();centros=c.execute("select id,codigo,nombre from centros_costos where activo=1 order by codigo").fetchall();c.close();return render_template('rrhh_employees.html',rows=rows,q=q,modelos=modelos,centros=centros)
 
 @app.route('/rrhh/funcionarios/<int:i>/editar',methods=['GET','POST'])
 def rrhh_funcionario_editar(i):
     if not _rrhh_perm('EDITAR'): return ('Acceso no autorizado',403)
-    c=db();e=c.execute('select * from empleados where id=?',(i,)).fetchone()
+    c=db();_init_centros_costos_v13112(c);e=c.execute('select * from empleados where id=?',(i,)).fetchone()
     if not e:c.close();return ('Funcionario no encontrado',404)
     if request.method=='POST':
-        f=request.form;c.execute('''update empleados set nombre=?,documento=?,ruc=?,fecha_nacimiento=?,telefono=?,email=?,direccion=?,cargo=?,departamento=?,fecha_ingreso=?,fecha_salida=?,tipo_contrato=?,salario_base=?,ips_numero=?,ips_activo=?,turno=?,estado=?,observacion=?,actualizado_en=? where id=?''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('fecha_salida'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),f.get('estado','ACTIVO'),f.get('observacion'),now(),i));c.commit()
+        f=request.form;c.execute('''update empleados set nombre=?,documento=?,ruc=?,fecha_nacimiento=?,telefono=?,email=?,direccion=?,cargo=?,departamento=?,fecha_ingreso=?,fecha_salida=?,tipo_contrato=?,salario_base=?,ips_numero=?,ips_activo=?,turno=?,estado=?,observacion=?,actualizado_en=? where id=?''',(f.get('nombre','').strip(),f.get('documento'),f.get('ruc'),f.get('fecha_nacimiento'),f.get('telefono'),f.get('email'),f.get('direccion'),f.get('cargo'),f.get('departamento'),f.get('fecha_ingreso'),f.get('fecha_salida'),f.get('tipo_contrato'),float(f.get('salario_base') or 0),f.get('ips_numero'),1 if f.get('ips_activo') else 0,f.get('turno'),f.get('estado','ACTIVO'),f.get('observacion'),now(),i));c.execute('update empleados set centro_costo_id=? where id=?',(int(f.get('centro_costo_id') or 0) or None,i));c.commit()
         firma=request.files.get('firma')
         c.close()
         if firma and firma.filename:_rrhh_guardar_firma(i,firma)
         audit('RRHH_FUNCIONARIO_EDITAR',str(i));flash('Ficha actualizada.');return redirect('/rrhh/funcionarios')
-    c.close();return render_template('rrhh_employee_edit.html',e=e)
+    centros=c.execute("select id,codigo,nombre from centros_costos where activo=1 order by codigo").fetchall();c.close();return render_template('rrhh_employee_edit.html',e=e,centros=centros)
 
 def _rrhh_reemplazar_docx(doc, valores):
     def reemplazar_parrafo(parrafo):
@@ -6179,7 +6184,7 @@ def rrhh_descargar_contrato(i):
 def rrhh_anular_contrato(i):
     if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
     c=db();r=c.execute('select numero,estado from rrhh_contratos where id=?',(i,)).fetchone()
-    if r and r['estado']!='ANULADO':c.execute("update rrhh_contratos set estado='ANULADO',anulado_por=?,anulado_en=? where id=?",(session.get('user'),now(),i));c.commit();audit('RRHH_CONTRATO_ANULAR',r['numero']);flash('Contrato anulado administrativamente. Su número no será reutilizado.')
+    if r and r['estado']!='ANULADO':c.execute("update rrhh_contratos set estado='ANULADO',anulado_por=?,anulado_en=? where id=?",(session.get('user'),now(),i));c.execute('update empleados set centro_costo_id=? where id=?',(int(f.get('centro_costo_id') or 0) or None,i));c.commit();audit('RRHH_CONTRATO_ANULAR',r['numero']);flash('Contrato anulado administrativamente. Su número no será reutilizado.')
     c.close();return redirect('/rrhh/contratos')
 
 # ===== V13.10.43: Santa Clara Asistencia movil / PWA =====
@@ -6277,18 +6282,17 @@ def rrhh_asistencia():
 def rrhh_novedades():
     if request.method=='POST' and not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
     if not _rrhh_perm():return ('Acceso no autorizado',403)
-    c=db();periodo=_rrhh_periodo(request.values.get('periodo'))
+    c=db();_init_centros_costos_v13112(c);periodo=_rrhh_periodo(request.values.get('periodo'))
     if request.method=='POST':
         f=request.form;tipo=f.get('tipo','OTRO');estado='APROBADO' if tipo in ('ANTICIPO','DESCUENTO','BONIFICACION','PRESTAMO','HORA_EXTRA') else 'PENDIENTE';monto=float(f.get('monto') or 0);fecha=f.get('fecha') or datetime.date.today().isoformat();medio=f.get('medio_pago') or 'EFECTIVO';cuenta_id=int(f.get('cuenta_bancaria_id') or 0) or None
-        cur=c.execute('insert into rrhh_novedades(empleado_id,fecha,periodo,tipo,descripcion,monto,cantidad,desde,hasta,estado,creado_por,creado_en,medio_pago,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(f['empleado_id'],fecha,periodo,tipo,f.get('descripcion'),monto,float(f.get('cantidad') or 0),f.get('desde'),f.get('hasta'),estado,session.get('user'),now(),medio,cuenta_id));nid=cur.lastrowid
+        cur=c.execute('insert into rrhh_novedades(empleado_id,fecha,periodo,tipo,descripcion,monto,cantidad,desde,hasta,estado,creado_por,creado_en,medio_pago,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(f['empleado_id'],fecha,periodo,tipo,f.get('descripcion'),monto,float(f.get('cantidad') or 0),f.get('desde'),f.get('hasta'),estado,session.get('user'),now(),medio,cuenta_id));nid=cur.lastrowid; empcc=c.execute('select centro_costo_id from empleados where id=?',(f['empleado_id'],)).fetchone(); ccid=int(f.get('centro_costo_id') or 0) or (empcc['centro_costo_id'] if empcc else None); c.execute('update rrhh_novedades set centro_costo_id=? where id=?',(ccid,nid))
         if tipo in ('ANTICIPO','PRESTAMO') and monto>0:
-         cta_fin,_=_cuenta_financiera(c,medio,cuenta_id);cfg=c.execute('select * from tesoreria_config where id=1').fetchone();cta_ant=cfg['cuenta_anticipo_personal'];asi=asiento(c,fecha,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,'PYG',1,[(cta_ant,monto,0,monto,'Anticipo al funcionario'),(cta_fin,0,monto,monto,'Salida de fondos')]);mov=c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,'EGRESO',medio,'PYG',1,monto,monto,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,cuenta_id)).lastrowid;c.execute('update rrhh_novedades set asiento_id=?,movimiento_financiero_id=? where id=?',(asi,mov,nid))
+         cta_fin,_=_cuenta_financiera(c,medio,cuenta_id);cfg=c.execute('select * from tesoreria_config where id=1').fetchone();cta_ant=cfg['cuenta_anticipo_personal'];asi=asiento(c,fecha,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,'PYG',1,[(cta_ant,monto,0,monto,'Anticipo al funcionario',ccid),(cta_fin,0,monto,monto,'Salida de fondos',ccid)]);mov=c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,'EGRESO',medio,'PYG',1,monto,monto,'Anticipo/Préstamo al personal','ANTICIPO_PERSONAL',nid,cuenta_id)).lastrowid;c.execute('update rrhh_novedades set asiento_id=?,movimiento_financiero_id=? where id=?',(asi,mov,nid))
         c.commit();flash('Novedad registrada y, cuando corresponde, integrada con Tesorería y Contabilidad.');c.close();return redirect('/rrhh/novedades?periodo='+periodo)
     emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall()
     bancos=c.execute("select * from cuentas_bancarias where activo=1 order by banco,alias").fetchall()
     rows=c.execute('''select n.*,e.nombre from rrhh_novedades n join empleados e on e.id=n.empleado_id where n.periodo=? order by n.fecha desc,n.id desc''',(periodo,)).fetchall()
-    c.close()
-    return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo,bancos=bancos)
+    centros=c.execute("select id,codigo,nombre from centros_costos where activo=1 order by codigo").fetchall();c.close();return render_template('rrhh_events.html',emps=emps,rows=rows,periodo=periodo,bancos=bancos,centros=centros)
 
 @app.route('/rrhh/liquidaciones')
 def rrhh_liquidaciones():
@@ -6301,8 +6305,9 @@ def rrhh_liquidar():
     eid=int(request.form['empleado_id']);periodo=_rrhh_periodo(request.form.get('periodo'));c=db();e=c.execute('select * from empleados where id=?',(eid,)).fetchone();cfg=c.execute('select * from rrhh_config where id=1').fetchone()
     if not e:c.close();return ('Funcionario no encontrado',404)
     nov=c.execute("select tipo,coalesce(sum(monto),0) monto,coalesce(sum(cantidad),0) cantidad from rrhh_novedades where empleado_id=? and periodo=? and estado in ('APROBADO','PENDIENTE') group by tipo",(eid,periodo)).fetchall();d={r['tipo']:(r['monto'],r['cantidad']) for r in nov};base=float(e['salario_base'] or 0);bon=d.get('BONIFICACION',(0,0))[0];he=d.get('HORA_EXTRA',(0,0))[0];otros=d.get('OTRO_HABER',(0,0))[0];anticipos=d.get('ANTICIPO',(0,0))[0];prest=d.get('PRESTAMO',(0,0))[0];desc=d.get('DESCUENTO',(0,0))[0];ipsbase=base+bon+he+otros if e['ips_activo'] else 0;ipso=round(ipsbase*float(cfg['ips_obrero_pct'] or 0)/100);ipsp=round(ipsbase*float(cfg['ips_patronal_pct'] or 0)/100);hab=base+bon+he+otros;neto=hab-ipso-anticipos-prest-desc;costo=hab+ipsp
+    empcc=e['centro_costo_id'] if 'centro_costo_id' in e.keys() else None
     c.execute('''insert into rrhh_liquidaciones(empleado_id,periodo,fecha,salario_base,haberes,horas_extra,bonificaciones,otros_haberes,ips_base,ips_obrero,ips_patronal,anticipos,prestamos,otros_descuentos,neto,costo_empresa,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    on conflict(empleado_id,periodo) do update set salario_base=excluded.salario_base,haberes=excluded.haberes,horas_extra=excluded.horas_extra,bonificaciones=excluded.bonificaciones,otros_haberes=excluded.otros_haberes,ips_base=excluded.ips_base,ips_obrero=excluded.ips_obrero,ips_patronal=excluded.ips_patronal,anticipos=excluded.anticipos,prestamos=excluded.prestamos,otros_descuentos=excluded.otros_descuentos,neto=excluded.neto,costo_empresa=excluded.costo_empresa''',(eid,periodo,datetime.date.today().isoformat(),base,hab,he,bon,otros,ipsbase,ipso,ipsp,anticipos,prest,desc,neto,costo,'BORRADOR',session.get('user'),now()));c.commit();c.close();flash('Liquidación calculada.');return redirect('/rrhh/liquidaciones?periodo='+periodo)
+    on conflict(empleado_id,periodo) do update set salario_base=excluded.salario_base,haberes=excluded.haberes,horas_extra=excluded.horas_extra,bonificaciones=excluded.bonificaciones,otros_haberes=excluded.otros_haberes,ips_base=excluded.ips_base,ips_obrero=excluded.ips_obrero,ips_patronal=excluded.ips_patronal,anticipos=excluded.anticipos,prestamos=excluded.prestamos,otros_descuentos=excluded.otros_descuentos,neto=excluded.neto,costo_empresa=excluded.costo_empresa''',(eid,periodo,datetime.date.today().isoformat(),base,hab,he,bon,otros,ipsbase,ipso,ipsp,anticipos,prest,desc,neto,costo,'BORRADOR',session.get('user'),now()));lid=c.execute('select id from rrhh_liquidaciones where empleado_id=? and periodo=?',(eid,periodo)).fetchone(); c.execute('update rrhh_liquidaciones set centro_costo_id=? where id=?',(empcc,lid['id']));c.commit();c.close();flash('Liquidación calculada.');return redirect('/rrhh/liquidaciones?periodo='+periodo)
 
 @app.route('/rrhh/liquidaciones/<int:i>')
 def rrhh_liquidacion_detalle(i):
@@ -9384,15 +9389,70 @@ def contabilidad_asientos():
     sql+=' group by a.id order by a.fecha desc,a.id desc limit 300'; rows=c.execute(sql,pars).fetchall(); c.close()
     return render_template('accounting_entries.html',rows=rows,q=q)
 
+def _init_centros_costos_v13112(c):
+    c.execute("CREATE TABLE IF NOT EXISTS centros_costos(id INTEGER PRIMARY KEY,codigo TEXT UNIQUE NOT NULL,nombre TEXT NOT NULL,activo INTEGER DEFAULT 1,creado_en TEXT)")
+    cols={r['name'] for r in c.execute('pragma table_info(centros_costos)').fetchall()}
+    for col,defn in [('tipo',"TEXT DEFAULT 'OPERATIVO'"),('padre_id','INTEGER'),('descripcion','TEXT'),('responsable','TEXT')]:
+        if col not in cols:c.execute(f'alter table centros_costos add column {col} {defn}')
+    dcols={r['name'] for r in c.execute('pragma table_info(asiento_det)').fetchall()}
+    if 'centro_costo_id' not in dcols:c.execute('alter table asiento_det add column centro_costo_id INTEGER')
+    # V13.11.3: el centro de costo acompaña al documento operativo y no sólo al asiento.
+    for tabla in ('compras','ventas','empleados','rrhh_novedades','rrhh_liquidaciones','stock_mov'):
+        try:
+            tcols={r['name'] for r in c.execute(f'pragma table_info({tabla})').fetchall()}
+            if 'centro_costo_id' not in tcols:c.execute(f'alter table {tabla} add column centro_costo_id INTEGER')
+        except Exception: pass
+    defaults=[('01','ADMINISTRACIÓN','ADMINISTRATIVO'),('02','RECEPCIÓN','ADMINISTRATIVO'),('03','CONSULTORIOS','ASISTENCIAL'),('04','URGENCIAS','ASISTENCIAL'),('05','INTERNACIÓN','ASISTENCIAL'),('06','QUIRÓFANO','ASISTENCIAL'),('07','FARMACIA','OPERATIVO'),('08','LABORATORIO','ASISTENCIAL'),('09','DIAGNÓSTICO / RAYOS X','ASISTENCIAL'),('10','AMBULANCIA','ASISTENCIAL'),('11','MANTENIMIENTO','APOYO'),('12','RR.HH.','ADMINISTRATIVO')]
+    for cod,nom,tipo in defaults:
+        c.execute('insert or ignore into centros_costos(codigo,nombre,tipo,activo,creado_en) values(?,?,?,1,?)',(cod,nom,tipo,now()))
+    c.commit()
+
+def _centro_por_origen(c,origen_tipo,origen_id=None):
+    o=(origen_tipo or '').upper(); codigo='01'
+    # Si el documento ya fue imputado manualmente, esa decisión prevalece.
+    if origen_id:
+        tabla=None
+        if o in ('VENTA','FACTURA'): tabla='ventas'
+        elif o=='COMPRA': tabla='compras'
+        elif o in ('ANTICIPO_PERSONAL','RRHH','NOMINA'): tabla='rrhh_novedades' if o=='ANTICIPO_PERSONAL' else None
+        if tabla:
+            try:
+                r=c.execute(f'select centro_costo_id'+(',origen_area' if tabla=='ventas' else '')+f' from {tabla} where id=?',(origen_id,)).fetchone()
+                if r and r['centro_costo_id']: return r['centro_costo_id']
+                if r and tabla=='ventas' and r['origen_area']: o=str(r['origen_area']).upper()
+            except Exception: pass
+    if 'URGEN' in o:codigo='04'
+    elif 'INTERNA' in o:codigo='05'
+    elif 'QUIRO' in o or 'CIRUG' in o:codigo='06'
+    elif 'FARMA' in o or 'STOCK' in o:codigo='07'
+    elif 'LAB' in o:codigo='08'
+    elif 'CONSULT' in o:codigo='03'
+    elif 'AMBUL' in o:codigo='10'
+    elif 'RRHH' in o or 'NOMINA' in o or 'ANTICIPO' in o:codigo='12'
+    elif 'RECEP' in o:codigo='02'
+    r=c.execute('select id from centros_costos where codigo=? and activo=1',(codigo,)).fetchone()
+    return r['id'] if r else None
+
 @app.route('/contabilidad/centros-costos',methods=['GET','POST'])
 def centros_costos():
-    c=db();c.execute("CREATE TABLE IF NOT EXISTS centros_costos(id INTEGER PRIMARY KEY,codigo TEXT UNIQUE NOT NULL,nombre TEXT NOT NULL,activo INTEGER DEFAULT 1,creado_en TEXT)")
+    c=db();_init_centros_costos_v13112(c)
     if request.method=='POST':
-        codigo=(request.form.get('codigo') or '').strip().upper();nombre=(request.form.get('nombre') or '').strip()
+        op=request.form.get('op','guardar'); rid=request.form.get('id')
+        if op=='estado' and rid:
+            c.execute('update centros_costos set activo=case when activo=1 then 0 else 1 end where id=?',(int(rid),));c.commit();c.close();audit('CENTRO_COSTO_ESTADO',rid);return redirect('/contabilidad/centros-costos')
+        codigo=(request.form.get('codigo') or '').strip().upper();nombre=(request.form.get('nombre') or '').strip();tipo=(request.form.get('tipo') or 'OPERATIVO').strip().upper();desc=(request.form.get('descripcion') or '').strip();resp=(request.form.get('responsable') or '').strip();padre=request.form.get('padre_id') or None
         if codigo and nombre:
-            c.execute("insert into centros_costos(codigo,nombre,activo,creado_en) values(?,?,1,?) on conflict(codigo) do update set nombre=excluded.nombre,activo=1",(codigo,nombre,now()));c.commit();audit('CENTRO_COSTO',codigo)
+            if rid:c.execute('update centros_costos set codigo=?,nombre=?,tipo=?,padre_id=?,descripcion=?,responsable=? where id=?',(codigo,nombre,tipo,padre,desc,resp,int(rid)))
+            else:c.execute('insert into centros_costos(codigo,nombre,tipo,padre_id,descripcion,responsable,activo,creado_en) values(?,?,?,?,?,?,1,?)',(codigo,nombre,tipo,padre,desc,resp,now()))
+            c.commit();audit('CENTRO_COSTO',codigo)
         c.close();return redirect('/contabilidad/centros-costos')
-    rows=c.execute('select * from centros_costos order by codigo').fetchall();c.close();return render_template('accounting_cost_centers.html',rows=rows)
+    rows=c.execute('select cc.*,p.codigo padre_codigo,p.nombre padre_nombre from centros_costos cc left join centros_costos p on p.id=cc.padre_id order by cc.codigo').fetchall();c.close();return render_template('accounting_cost_centers.html',rows=rows)
+
+@app.get('/contabilidad/centros-costos/informe')
+def centros_costos_informe():
+    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat();c=db();_init_centros_costos_v13112(c)
+    rows=c.execute("""select cc.codigo,cc.nombre,cc.tipo,coalesce(sum(case when a.id is not null then d.debe_pyg else 0 end),0) debe,coalesce(sum(case when a.id is not null then d.haber_pyg else 0 end),0) haber,coalesce(sum(case when a.id is not null then d.haber_pyg-d.debe_pyg else 0 end),0) resultado from centros_costos cc left join asiento_det d on d.centro_costo_id=cc.id left join asientos a on a.id=d.asiento_id and a.estado='CONFIRMADO' and a.fecha between ? and ? where cc.activo=1 group by cc.id order by cc.codigo""",(desde,hasta)).fetchall();c.close()
+    return render_template('cost_center_report.html',rows=rows,desde=desde,hasta=hasta)
 
 @app.get('/contabilidad/cierre/<tipo>')
 def contabilidad_cierre(tipo):
@@ -9598,3 +9658,28 @@ def reinicio_base_operativa():
         except Exception:n=0
         conteos.append({'tabla':t,'registros':n,'preservada':t in pres or t.startswith('sifen_')})
     c.close();return render_template('database_reset.html',conteos=conteos)
+
+
+# ===== V13.11.3: PDF/IMPRESIÓN IDÉNTICOS PARA CENTROS DE COSTO =====
+@app.get('/contabilidad/centros-costos/informe/pdf')
+def centros_costos_informe_pdf():
+    desde=request.args.get('desde') or datetime.date.today().replace(day=1).isoformat();hasta=request.args.get('hasta') or datetime.date.today().isoformat()
+    c=db();_init_centros_costos_v13112(c)
+    rows=c.execute("""select cc.codigo,cc.nombre,cc.tipo,coalesce(sum(case when a.id is not null then d.debe_pyg else 0 end),0) debe,coalesce(sum(case when a.id is not null then d.haber_pyg else 0 end),0) haber,coalesce(sum(case when a.id is not null then d.haber_pyg-d.debe_pyg else 0 end),0) resultado from centros_costos cc left join asiento_det d on d.centro_costo_id=cc.id left join asientos a on a.id=d.asiento_id and a.estado='CONFIRMADO' and a.fecha between ? and ? where cc.activo=1 group by cc.id order by cc.codigo""",(desde,hasta)).fetchall();c.close()
+    from reportlab.lib.pagesizes import A4,landscape
+    from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    out=io.BytesIO();doc=SimpleDocTemplate(out,pagesize=landscape(A4),rightMargin=24,leftMargin=24,topMargin=24,bottomMargin=24);st=getSampleStyleSheet();story=[]
+    try:
+        lg=pdf_logo()
+        if lg:story.append(lg)
+    except Exception:pass
+    story += [Paragraph('Centro Médico Santa Clara',st['Title']),Paragraph('Informe por Centro de Costo',st['Heading2']),Paragraph(f'Periodo: {desde} al {hasta}',st['Normal']),Spacer(1,10)]
+    data=[['Código','Centro de costo','Tipo','Debe Gs.','Haber Gs.','Resultado Gs.']]
+    for r in rows:data.append([r['codigo'],r['nombre'],r['tipo'],_money_local(r['debe']),_money_local(r['haber']),_money_local(r['resultado'])])
+    t=Table(data,colWidths=[55,210,90,110,110,110],repeatRows=1);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.35,colors.grey),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('ALIGN',(3,1),(-1,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
+    story.append(t);doc.build(story);out.seek(0)
+    # inline=1 abre exactamente este mismo PDF para imprimir; sin inline lo descarga.
+    inline=request.args.get('inline')=='1'
+    return send_file(out,as_attachment=not inline,download_name=f'centros_costos_{desde}_{hasta}.pdf',mimetype='application/pdf')
