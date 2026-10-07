@@ -530,6 +530,12 @@ def init_v13991_maestros_sifen():
   c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.9.91-maestros-sifen',?)",(now(),))
   c.commit()
  finally:c.close()
+def _costo_promedio_entrada(c,pid,qty,costo_unit_pyg):
+    p=c.execute('select stock,costo_pyg from productos where id=?',(pid,)).fetchone()
+    if not p:return float(costo_unit_pyg or 0)
+    stock_ant=float(p['stock'] or 0); costo_ant=float(p['costo_pyg'] or 0); qty=float(qty or 0); nuevo=stock_ant+qty
+    return (((stock_ant*costo_ant)+(qty*float(costo_unit_pyg or 0)))/nuevo) if nuevo>0 else float(costo_unit_pyg or 0)
+
 @app.route('/productos',methods=['GET','POST'])
 def productos():
  c=db()
@@ -576,7 +582,9 @@ def compras():
    for pid,qty,cost,base,iva_pct in detalle:
     c.execute('insert into compra_items(compra_id,producto_id,cantidad,costo,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?)',(cid,pid,qty,cost,base,base*tc,iva_pct))
     costo_unit_pyg=(base/qty*tc if qty else 0)
-    c.execute('update productos set stock=stock+?,costo_pyg=? where id=?',(qty,costo_unit_pyg,pid))
+    # V13.11.1: costo promedio ponderado. No sustituir el costo histórico por la última compra.
+    costo_prom=_costo_promedio_entrada(c,pid,qty,costo_unit_pyg)
+    c.execute('update productos set stock=stock+?,costo_pyg=? where id=?',(qty,costo_prom,pid))
     c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',qty,costo_unit_pyg,'COMPRA',cid))
    saldo=max(0,total-entrega)
    if saldo>0:c.execute('insert into cxp(compra_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(cid,sid,mon,tc,saldo,saldo,saldo*tc))
@@ -656,7 +664,7 @@ def _aplicar_compra_desde_form(c, compra_id, form):
     c.execute('''update compras set fecha=?,proveedor_id=?,numero=?,moneda=?,tipo_cambio=?,gravado=?,iva=?,exento=?,total=?,total_pyg=?,gravado_10=?,iva_10=?,gravado_5=?,iva_5=?,exento_iva=?,condicion_pago=?,fecha_vencimiento=?,entrega_inicial=?,medio_pago_inicial=?,referencia_pago=?,timbrado=?,timbrado_vencimiento=?,estado='CONFIRMADA' where id=?''',(fecha,sid,form['numero'],mon,tc,grav,iva,exento,total,totg,g10,i10,g5,i5,exento,condicion,venc,entrega,medio,ref,timbrado,timbrado_venc,compra_id))
     for pid,qty,cost,base,iva_pct in detalle:
         c.execute('insert into compra_items(compra_id,producto_id,cantidad,costo,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?)',(compra_id,pid,qty,cost,base,base*tc,iva_pct))
-        costo_unit_pyg=(base/qty*tc if qty else 0);c.execute('update productos set stock=stock+?,costo_pyg=? where id=?',(qty,costo_unit_pyg,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',qty,costo_unit_pyg,'COMPRA',compra_id))
+        costo_unit_pyg=(base/qty*tc if qty else 0);costo_prom=_costo_promedio_entrada(c,pid,qty,costo_unit_pyg);c.execute('update productos set stock=stock+?,costo_pyg=? where id=?',(qty,costo_prom,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',qty,costo_unit_pyg,'COMPRA',compra_id))
     saldo=max(0,total-entrega)
     if saldo>0:c.execute('insert into cxp(compra_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(compra_id,sid,mon,tc,saldo,saldo,saldo*tc))
     if condicion=='CREDITO':
@@ -1517,7 +1525,8 @@ def cuenta_paciente(aid):
    tar=_precio_seguro(c,a['aseguradora_id'],'PRODUCTO',ref,fecha) if a['aseguradora_id'] else None;price=(tar['precio']/tc if tar and (tar['moneda'] or 'PYG')=='PYG' else (tar['precio'] if tar else x['precio_pyg']/tc));desc=x['nombre'];c.execute('update productos set stock=stock-? where id=?',(qty,ref));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,ref,'SALIDA',-qty,x['costo_pyg'],'PACIENTE',aid))
   else:
    x=c.execute('select * from servicios where id=?',(ref,)).fetchone();tar=_precio_seguro(c,a['aseguradora_id'],'SERVICIO',ref,fecha) if a['aseguradora_id'] else None;price=(tar['precio']/tc if tar and (tar['moneda'] or 'PYG')=='PYG' else (tar['precio'] if tar else x['precio_pyg']/tc));desc=x['nombre']
-  iva_pct=float(x['iva_pct'] or 0);total=qty*price;cargo_id=c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,tipo,ref,desc,qty,price,mon,tc,total,total*tc,iva_pct)).lastrowid
+  iva_pct=float(x['iva_pct'] or 0);total=qty*price;costo_cargo_pyg=(qty*float(x['costo_pyg'] or 0)) if tipo=='PRODUCTO' else 0
+  cargo_id=c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct,costo_pyg) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(fecha,aid,tipo,ref,desc,qty,price,mon,tc,total,total*tc,iva_pct,costo_cargo_pyg)).lastrowid
   if a['aseguradora_id'] and tipo=='SERVICIO':_registrar_visacion(c,a['aseguradora_id'],a['paciente_id'],'CARGO_SERVICIO',cargo_id,request.form.get('medico_id') or a['medico_id'])
   c.commit();return redirect(f'/cuenta-paciente/{aid}')
  cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();visaciones=c.execute("select v.*,m.nombre medico from seguro_visaciones v left join medicos m on m.id=v.medico_id where (v.origen_tipo=? and v.origen_id=?) or (v.origen_tipo='CARGO_SERVICIO' and v.origen_id in (select id from cargos_paciente where admision_id=?)) order by v.id desc",(a['tipo'],aid,aid)).fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,meds=meds,terceros=terceros,visaciones=visaciones,total=total)
@@ -2106,7 +2115,7 @@ def farmacia_entregar(item_id):
  if qty<=0 or qty>pend or qty>i['stock']:c.close();flash('Cantidad de entrega inválida o stock insuficiente.');return redirect('/farmacia-solicitudes')
  a=c.execute('select moneda,tipo_cambio from admisiones where id=?',(i['admision_id'],)).fetchone();tc=float(a['tipo_cambio'] or 1);price=i['precio_pyg']/tc;total=qty*price
  c.execute('update productos set stock=stock-? where id=?',(qty,i['producto_id']));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(now()[:10],i['producto_id'],'SALIDA',-qty,i['costo_pyg'],'FARMACIA_PACIENTE',i['admision_id']))
- c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct) values(?,?,?,?,?,?,?,?,?,?,?,?)',(now()[:10],i['admision_id'],'PRODUCTO',i['producto_id'],i['nombre'],qty,price,a['moneda'],tc,total,total*tc,float(i['iva_pct'] or 0)))
+ c.execute('insert into cargos_paciente(fecha,admision_id,tipo,referencia_id,descripcion,cantidad,precio,moneda,tipo_cambio,total,total_pyg,iva_pct,costo_pyg) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',(now()[:10],i['admision_id'],'PRODUCTO',i['producto_id'],i['nombre'],qty,price,a['moneda'],tc,total,total*tc,float(i['iva_pct'] or 0),qty*float(i['costo_pyg'] or 0)))
  newent=i['cantidad_entregada']+qty;estado='ENTREGADA' if newent>=i['cantidad_autorizada'] else 'PARCIAL';c.execute('update solicitud_farmacia_items set cantidad_entregada=?,estado=? where id=?',(newent,estado,item_id));c.execute('update solicitudes_farmacia set estado=? where id=?',(estado,i['solicitud_id']));audit_change(c,'ENTREGAR','FARMACIA',item_id,despues={'cantidad':qty,'admision':i['admision_id']});c.commit();c.close();return redirect('/farmacia-solicitudes')
 
 
@@ -4406,13 +4415,19 @@ def caja_central_facturar(aid):
   total=sum(float(x['total_pyg'] or 0) for x in items)
   if medio=='Efectivo' and not caja_abierta(c):raise ValueError('Debe abrir la caja antes de facturar una cuenta en efectivo.')
   vid=c.execute("insert into ventas(fecha,cliente_id,numero,moneda,tipo_cambio,gravado,iva,exento,total,total_pyg,gravado_10,iva_10,gravado_5,iva_5,exento_iva,condicion_venta,forma_cobro,entrega_inicial) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(fecha,receptor_id,numero,'PYG',1,total,0,0,total,total,total,0,0,0,0,'CONTADO',medio,total)).lastrowid
-  c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=? where id=?',(a['paciente_id'],receptor_id,vid))
+  rem_actual=c.execute("select id from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
+  c.execute('update ventas set paciente_id=?,facturado_a_tercero_id=?,origen_admision_id=?,origen_remision_id=?,factura_anterior_id=? where id=?',(a['paciente_id'],receptor_id,aid,rem_actual['id'] if rem_actual else None,rem_actual['venta_id'] if rem_actual and 'venta_id' in rem_actual.keys() else None,vid))
   ap_fact=caja_abierta(c);c.execute('update ventas set sifen_punto_id=?,establecimiento=?,punto_expedicion=?,caja_id=?,origen_area=? where id=?',(punto_factura['id'],punto_factura['establecimiento'],punto_factura['punto_expedicion'],ap_fact['caja_id'] if ap_fact else None,str(a['tipo'] or 'OTROS'),vid))
-  for x in items:c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,None,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),0,0,x['descripcion']))
-  c.execute('update cargos_paciente set facturado=1 where admision_id=? and coalesce(facturado,0)=0',(aid,));c.execute("update remisiones_internas set estado='FACTURADA' where admision_id=? and estado='PENDIENTE'",(aid,));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,receptor_id,'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
+  for x in items:
+   pid=x['referencia_id'] if str(x['tipo'] or '').upper()=='PRODUCTO' else None
+   c.execute('insert into venta_items(venta_id,producto_id,cantidad,precio,total,total_pyg,costo_pyg,iva_pct,descripcion) values(?,?,?,?,?,?,?,?,?)',(vid,pid,float(x['cantidad'] or 1),float(x['precio'] or 0),float(x['total_pyg'] or 0),float(x['total_pyg'] or 0),float(x['costo_pyg'] or 0),float(x['iva_pct'] or 0),x['descripcion']))
+  c.execute('update cargos_paciente set facturado=1,factura_venta_id=? where admision_id=? and coalesce(facturado,0)=0',(vid,aid));c.execute("update remisiones_internas set estado='FACTURADA',venta_id=? where admision_id=? and estado='PENDIENTE'",(vid,aid));c.execute('insert into cxc(venta_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg,estado) values(?,?,?,?,?,?,?,?)',(vid,receptor_id,'PYG',1,total,0,0,'PAGADO'));c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id) values(?,?,?,?,?,?,?,?,?,?)',(fecha,'INGRESO',medio,'PYG',1,total,total,'Cobro cuenta completa '+a['paciente'],'VENTA',vid))
   if medio=='Efectivo':
    ap=caja_abierta(c);fid=c.execute("select id from formas_cobro where nombre='Efectivo'").fetchone();c.execute("insert into movimientos_caja(apertura_id,fecha,tipo,forma_cobro_id,concepto,importe_pyg,origen_tipo,origen_id,usuario) values(?,?,'INGRESO',?,?,?,?,?,?)",(ap['id'],now(),fid['id'] if fid else None,'Cobro cuenta completa '+a['paciente'],total,'VENTA',vid,session.get('user')))
-  asiento(c,fecha,'Factura caja cuenta '+numero,'VENTA',vid,'PYG',1,[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,total,total,'Servicios')]);_generar_cdc_test_venta(c,vid,fecha,numero);c.commit();audit('FACTURAR_CUENTA_CAJA',f'{aid}:{vid}');flash('Cuenta completa facturada correctamente. Factura '+numero);return redirect(f'/ventas/{vid}/factura')
+  costo_clinico=sum(float(x['costo_pyg'] or 0) for x in items)
+  lineas_cont=[('1.1.01',total,0,total,'Cobro'),('4.1.02',0,total,total,'Servicios')]
+  if costo_clinico>0: lineas_cont += [('5.1.01',costo_clinico,0,0,'Costo de medicamentos/insumos consumidos'),('1.1.03',0,costo_clinico,0,'Salida contable de inventario clínico')]
+  asiento(c,fecha,'Factura caja cuenta '+numero,'VENTA',vid,'PYG',1,lineas_cont);_generar_cdc_test_venta(c,vid,fecha,numero);c.commit();audit('FACTURAR_CUENTA_CAJA',f'{aid}:{vid}');flash('Cuenta completa facturada correctamente. Factura '+numero);return redirect(f'/ventas/{vid}/factura')
  except Exception as e:c.rollback();flash('No se pudo facturar la cuenta: '+str(e));return redirect(f'/ventas/caja-central/{aid}')
  finally:c.close()
 
@@ -6819,9 +6834,45 @@ def _reintegrar_stock_nce(c,nid,fecha=None):
     c.execute('update notas_credito_ventas set stock_ajustado=1 where id=?',(nid,))
     return movs
 
+# ===== V13.11.1: trazabilidad clínica, refacturación y costeo =====
+def init_v13111_trazabilidad_costeo():
+    c=db()
+    try:
+        for tabla,col,defn in [
+            ('cargos_paciente','costo_pyg','REAL NOT NULL DEFAULT 0'),
+            ('cargos_paciente','factura_venta_id','INTEGER'),
+            ('ventas','origen_admision_id','INTEGER'),
+            ('ventas','origen_remision_id','INTEGER'),
+            ('ventas','factura_anterior_id','INTEGER'),
+            ('remisiones_internas','venta_id','INTEGER')]:
+            cols={r['name'] for r in c.execute(f'pragma table_info({tabla})').fetchall()}
+            if col not in cols:c.execute(f'alter table {tabla} add column {col} {defn}')
+        c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.11.1-trazabilidad-refacturacion-costeo',?)",(now(),))
+        c.commit()
+    finally:c.close()
+init_v13111_trazabilidad_costeo()
+
+def _liberar_origen_clinico_factura(c,venta_id):
+    v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
+    if not v or 'origen_admision_id' not in v.keys() or not v['origen_admision_id']: return 0
+    aid=int(v['origen_admision_id'])
+    # Libera únicamente los cargos vinculados a esta factura. El consumo/stock clínico NO se revierte.
+    n=c.execute('update cargos_paciente set facturado=0,factura_venta_id=NULL where admision_id=? and factura_venta_id=?',(aid,venta_id)).rowcount
+    rid=v['origen_remision_id'] if 'origen_remision_id' in v.keys() else None
+    if rid:
+        c.execute("update remisiones_internas set estado='PENDIENTE' where id=?",(rid,))
+    else:
+        c.execute("update remisiones_internas set estado='PENDIENTE' where admision_id=? and estado='FACTURADA'",(aid,))
+    return n
+
 def _reintegrar_stock_anulacion(c,venta_id,fecha=None):
     v=c.execute('select * from ventas where id=?',(venta_id,)).fetchone()
     if not v or int(v['stock_revertido_anulacion'] or 0): return 0
+    # En internación/urgencia el stock ya salió al administrar/entregar el producto.
+    # Cancelar/refacturar el documento fiscal no constituye una devolución física.
+    if 'origen_admision_id' in v.keys() and v['origen_admision_id']:
+        c.execute('update ventas set stock_revertido_anulacion=1 where id=?',(venta_id,))
+        return 0
     filas=c.execute('select * from venta_items where venta_id=?',(venta_id,)).fetchall();movs=0
     for it in filas:
         if not it['producto_id']: continue
@@ -6989,13 +7040,14 @@ def anular_factura_venta(venta_id):
         c.execute("update ventas set estado='ANULADA',estado_sifen='CANCELADO',motivo_anulacion=?,fecha_anulacion=?,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,now(),parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
         c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','CANCELADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · 0600 {parsed["mensaje"]}'))
         movs=_reintegrar_stock_anulacion(c,venta_id) if devolver_stock else 0
-        flash('SIFEN registró correctamente la cancelación (0600). La factura fue marcada CANCELADA.'+(' Stock de productos reintegrado.' if devolver_stock and movs else ''))
+        _liberar_origen_clinico_factura(c,venta_id)
+        flash('SIFEN registró correctamente la cancelación (0600). La factura fue marcada CANCELADA y la remisión clínica quedó disponible para refacturar.'+(' Stock de productos reintegrado.' if devolver_stock and movs else ''))
        else:
         c.execute("update ventas set estado=case when upper(coalesce(estado,''))='ANULADA' then 'EMITIDA' else estado end,estado_sifen='APROBADO',motivo_anulacion=?,fecha_anulacion=NULL,sifen_codigo_error=?,sifen_mensaje_error=?,respuesta_sifen=?,sifen_http_status=?,sifen_fecha_respuesta=?,sifen_ultimo_intento=?,sifen_intentos=coalesce(sifen_intentos,0)+1 where id=?",(motivo,parsed['codigo'],parsed['mensaje'],raw[:50000],status,parsed['fecha_proceso'] or now(),now(),venta_id))
         c.execute("insert into sifen_eventos(fecha,tipo,estado,detalle) values(?,?,?,?)",(now(),'CANCELACION','RECHAZADO',f'Factura {v["numero"]} · CDC {v["cdc"]} · Evento {event_id} · HTTP {status} · {parsed["codigo"]} {parsed["mensaje"]}'))
         flash('SIFEN NO canceló la factura: '+str(parsed['codigo'])+' · '+str(parsed['mensaje'])+'. La factura permanece APROBADA.')
       else:
-       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id)); movs=_reintegrar_stock_anulacion(c,venta_id) if devolver_stock else 0; flash('Factura interna anulada. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.'+(' Stock de productos reintegrado.' if devolver_stock and movs else ''))
+       c.execute("update ventas set estado='ANULADA',motivo_anulacion=?,fecha_anulacion=? where id=?",(motivo,now(),venta_id)); movs=_reintegrar_stock_anulacion(c,venta_id) if devolver_stock else 0; _liberar_origen_clinico_factura(c,venta_id); flash('Factura interna anulada. La remisión clínica, si corresponde, quedó disponible para refacturar. Si el número/CDC fue generado y no se utilizará, revise la inutilización correspondiente en SIFEN.'+(' Stock de productos reintegrado.' if devolver_stock and movs else ''))
       c.commit()
     except Exception as e:
       c.rollback(); flash('Cancelación no realizada: '+str(e))
@@ -9028,7 +9080,8 @@ def _importar_transacciones_detalladas(tipo,file,afectar_stock=False):
       item_id=cur_item.lastrowid
       if src.get('_raw_source_json'):
        c.execute('insert into compra_importacion_fuente(compra_id,item_id,archivo,compra_id_fuente,item_id_fuente,cuenta_clasificacion_fuente,usuario_fuente,raw_json,creado_en) values(?,?,?,?,?,?,?,?,?)',(xid,item_id,file.filename,_imp_norm(src.get('compra_id_fuente')),_imp_norm(src.get('item_id_fuente')),_imp_norm(src.get('cuenta_clasificacion_fuente')),_imp_norm(src.get('usuario_fuente')),src.get('_raw_source_json'),now()))
-      if afectar_stock and _producto_controla_stock(p):c.execute('update productos set stock=stock+? where id=?',(q,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',q,(base/q*tc if q else 0),'COMPRA',xid))
+      if afectar_stock and _producto_controla_stock(p):
+       costo_ent=(base/q*tc if q else 0); costo_prom=_costo_promedio_entrada(c,pid,q,costo_ent); c.execute('update productos set stock=stock+?,costo_pyg=? where id=?',(q,costo_prom,pid));c.execute('insert into stock_mov(fecha,producto_id,tipo,cantidad,costo_pyg,origen_tipo,origen_id) values(?,?,?,?,?,?,?)',(fecha,pid,'ENTRADA',q,costo_ent,'COMPRA',xid))
      if saldo>0:c.execute('insert into cxp(compra_id,tercero_id,moneda,tipo_cambio_origen,importe,saldo,importe_pyg) values(?,?,?,?,?,?,?)',(xid,terid,mon,tc,total,saldo,total*tc))
      asiento(c,fecha,'Compra importada '+doc,'COMPRA',xid,mon,tc,[('1.1.03',grav*tc+exento*tc,0,grav+exento,'Compra importada'),('1.1.04',iva*tc,0,iva,'IVA crédito'),('2.1.01',0,saldo*tc,saldo,'Proveedor'),('1.1.01',0,entrega*tc,entrega,'Pagado')])
     else:
