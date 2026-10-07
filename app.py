@@ -6297,13 +6297,16 @@ def rrhh_novedades():
 @app.route('/rrhh/liquidaciones')
 def rrhh_liquidaciones():
     if not _rrhh_perm():return ('Acceso no autorizado',403)
-    c=db();periodo=_rrhh_periodo(request.args.get('periodo'));rows=c.execute('''select l.*,e.nombre,e.documento from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();c.close();return render_template('rrhh_payroll.html',rows=rows,emps=emps,periodo=periodo)
+    c=db();periodo=_rrhh_periodo(request.args.get('periodo'));rows=c.execute('''select l.*,e.nombre,e.documento,coalesce(cb.banco||' · '||coalesce(cb.alias,cb.numero_cuenta,''),l.medio_pago) fuente_pago from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id left join cuentas_bancarias cb on cb.id=l.cuenta_bancaria_id where l.periodo=? order by e.nombre''',(periodo,)).fetchall();emps=c.execute("select id,nombre from empleados where estado='ACTIVO' order by nombre").fetchall();c.close();return render_template('rrhh_payroll.html',rows=rows,emps=emps,periodo=periodo)
 
 @app.post('/rrhh/liquidar')
 def rrhh_liquidar():
     if not _rrhh_perm('CREAR'):return ('Acceso no autorizado',403)
     eid=int(request.form['empleado_id']);periodo=_rrhh_periodo(request.form.get('periodo'));c=db();e=c.execute('select * from empleados where id=?',(eid,)).fetchone();cfg=c.execute('select * from rrhh_config where id=1').fetchone()
     if not e:c.close();return ('Funcionario no encontrado',404)
+    existente=c.execute('select id,estado from rrhh_liquidaciones where empleado_id=? and periodo=?',(eid,periodo)).fetchone()
+    if existente and existente['estado'] not in ('BORRADOR',):
+        c.close();flash('La liquidación ya está '+str(existente['estado'])+'. No puede recalcularse; anule/revierta el proceso según corresponda.');return redirect('/rrhh/liquidaciones?periodo='+periodo)
     nov=c.execute("select tipo,coalesce(sum(monto),0) monto,coalesce(sum(cantidad),0) cantidad from rrhh_novedades where empleado_id=? and periodo=? and estado in ('APROBADO','PENDIENTE') group by tipo",(eid,periodo)).fetchall();d={r['tipo']:(r['monto'],r['cantidad']) for r in nov};base=float(e['salario_base'] or 0);bon=d.get('BONIFICACION',(0,0))[0];he=d.get('HORA_EXTRA',(0,0))[0];otros=d.get('OTRO_HABER',(0,0))[0];anticipos=d.get('ANTICIPO',(0,0))[0];prest=d.get('PRESTAMO',(0,0))[0];desc=d.get('DESCUENTO',(0,0))[0];ipsbase=base+bon+he+otros if e['ips_activo'] else 0;ipso=round(ipsbase*float(cfg['ips_obrero_pct'] or 0)/100);ipsp=round(ipsbase*float(cfg['ips_patronal_pct'] or 0)/100);hab=base+bon+he+otros;neto=hab-ipso-anticipos-prest-desc;costo=hab+ipsp
     empcc=e['centro_costo_id'] if 'centro_costo_id' in e.keys() else None
     c.execute('''insert into rrhh_liquidaciones(empleado_id,periodo,fecha,salario_base,haberes,horas_extra,bonificaciones,otros_haberes,ips_base,ips_obrero,ips_patronal,anticipos,prestamos,otros_descuentos,neto,costo_empresa,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -6328,6 +6331,94 @@ def rrhh_liquidacion_pdf(i):
     out=io.BytesIO();doc=SimpleDocTemplate(out,pagesize=A4);st=getSampleStyleSheet();story=([pdf_logo()] if pdf_logo() else [])+[Paragraph('Recibo de Liquidación de Salario',st['Title']),Paragraph(f"Funcionario: {l['nombre']} · CI: {l['documento'] or '-'} · Periodo: {l['periodo']}",st['Normal']),Spacer(1,12)]
     data=[['Concepto','Haberes Gs.','Descuentos Gs.'],['Salario base',_money_local(l['salario_base']),''],['Bonificaciones',_money_local(l['bonificaciones']),''],['Horas extra',_money_local(l['horas_extra']),''],['Otros haberes',_money_local(l['otros_haberes']),''],['IPS obrero','',_money_local(l['ips_obrero'])],['Anticipos','',_money_local(l['anticipos'])],['Préstamos','',_money_local(l['prestamos'])],['Otros descuentos','',_money_local(l['otros_descuentos'])],['NETO A COBRAR',_money_local(l['neto']),'']]
     t=Table(data,colWidths=[230,120,120]);t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.lightgrey),('GRID',(0,0),(-1,-1),.4,colors.grey),('ALIGN',(1,1),(-1,-1),'RIGHT'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold')]));story += [t,Spacer(1,24),_doc_qr_block('LIQUIDACION DE SALARIO',str(i),str(l['nombre'])),Spacer(1,20),Paragraph('Firma del funcionario: ______________________________',st['Normal'])];doc.build(story);out.seek(0);return send_file(out,as_attachment=True,download_name=f"liquidacion_{l['periodo']}_{i}.pdf",mimetype='application/pdf')
+
+
+# ===== V13.11.4: aprobación, anulación y pago individual de nómina =====
+def init_v13114_nomina_pagos():
+    c=db()
+    cols={r['name'] for r in c.execute('pragma table_info(rrhh_liquidaciones)').fetchall()}
+    for col,defn in [
+        ('aprobado_por','TEXT'),('aprobado_en','TEXT'),('motivo_anulacion','TEXT'),('anulado_por','TEXT'),('anulado_en','TEXT'),
+        ('medio_pago','TEXT'),('cuenta_bancaria_id','INTEGER'),('movimiento_financiero_id','INTEGER'),('asiento_pago_id','INTEGER'),
+        ('pago_anulado_por','TEXT'),('pago_anulado_en','TEXT'),('motivo_anulacion_pago','TEXT')]:
+        if col not in cols:c.execute(f'alter table rrhh_liquidaciones add column {col} {defn}')
+    c.execute('''CREATE TABLE IF NOT EXISTS rrhh_pagos_nomina(
+      id INTEGER PRIMARY KEY,liquidacion_id INTEGER NOT NULL,fecha TEXT NOT NULL,importe REAL NOT NULL,
+      medio TEXT NOT NULL,cuenta_bancaria_id INTEGER,cuenta_financiera TEXT,asiento_id INTEGER,movimiento_financiero_id INTEGER,
+      estado TEXT DEFAULT 'PAGADO',creado_por TEXT,creado_en TEXT,anulado_por TEXT,anulado_en TEXT,motivo_anulacion TEXT)''')
+    c.execute("insert or ignore into schema_migrations(version,aplicado_en) values('13.11.4-nomina-pagos',?)",(now(),));c.commit();c.close()
+init_v13114_nomina_pagos()
+
+def _rrhh_cuenta_ips(c):
+    c.execute("insert or ignore into plan_cuentas(codigo,nombre,tipo) values('2.1.06','IPS a Pagar','PASIVO')")
+    return '2.1.06'
+
+@app.post('/rrhh/liquidaciones/<int:i>/aprobar')
+def rrhh_liquidacion_aprobar(i):
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    c=db();l=c.execute('select * from rrhh_liquidaciones where id=?',(i,)).fetchone()
+    if not l:c.close();return ('Liquidación no encontrada',404)
+    if l['estado']!='BORRADOR':c.close();flash('Solo una liquidación BORRADOR puede aprobarse.');return redirect('/rrhh/liquidaciones?periodo='+str(l['periodo']))
+    cfg=c.execute('select * from rrhh_config where id=1').fetchone();cc=l['centro_costo_id'] if 'centro_costo_id' in l.keys() else None
+    cta_ips=_rrhh_cuenta_ips(c);cta_su=cfg['cuenta_sueldos'] or '5.4.01';cta_ca=cfg['cuenta_cargas'] or '5.4.02';cta_ob=cfg['cuenta_obligaciones'] or '2.1.04'
+    total_desc=float(l['anticipos'] or 0)+float(l['prestamos'] or 0)+float(l['otros_descuentos'] or 0)
+    lines=[(cta_su,float(l['haberes'] or 0),0,float(l['haberes'] or 0),'Haberes del periodo',cc),(cta_ca,float(l['ips_patronal'] or 0),0,float(l['ips_patronal'] or 0),'IPS patronal',cc),(cta_ob,0,float(l['neto'] or 0),float(l['neto'] or 0),'Salarios netos a pagar',cc),(cta_ips,0,float(l['ips_obrero'] or 0)+float(l['ips_patronal'] or 0),float(l['ips_obrero'] or 0)+float(l['ips_patronal'] or 0),'IPS a pagar',cc)]
+    if total_desc>0:
+        cfg_t=c.execute('select * from tesoreria_config where id=1').fetchone();cta_ant=(cfg_t['cuenta_anticipo_personal'] if cfg_t else '1.1.05');lines.append((cta_ant,0,total_desc,total_desc,'Anticipos, préstamos y otros descuentos aplicados',cc))
+    aid=asiento(c,l['fecha'],'Liquidación de salarios '+str(l['periodo']),'NOMINA',i,'PYG',1,lines)
+    c.execute("update rrhh_liquidaciones set estado='APROBADA',asiento_id=?,aprobado_por=?,aprobado_en=? where id=?",(aid,session.get('user'),now(),i));audit_change(c,'APROBAR','RRHH_NOMINA',i,snapshot(l),{'estado':'APROBADA','asiento_id':aid},'Aprobación de liquidación');c.commit();c.close();flash('Liquidación aprobada y contabilizada.');return redirect('/rrhh/liquidaciones?periodo='+str(l['periodo']))
+
+@app.post('/rrhh/liquidaciones/<int:i>/anular')
+def rrhh_liquidacion_anular(i):
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    motivo=(request.form.get('motivo') or '').strip()
+    if len(motivo)<5:flash('Indique un motivo de anulación de al menos 5 caracteres.');return redirect(request.referrer or '/rrhh/liquidaciones')
+    c=db();l=c.execute('select * from rrhh_liquidaciones where id=?',(i,)).fetchone()
+    if not l:c.close();return ('Liquidación no encontrada',404)
+    if l['estado']=='PAGADA':c.close();flash('Primero debe anular el pago de esta liquidación.');return redirect('/rrhh/liquidaciones?periodo='+str(l['periodo']))
+    if l['estado']=='ANULADA':c.close();flash('La liquidación ya está anulada.');return redirect('/rrhh/liquidaciones?periodo='+str(l['periodo']))
+    if l['estado']=='APROBADA':reverse_asientos(c,'NOMINA',i,datetime.date.today().isoformat(),motivo)
+    c.execute("update rrhh_liquidaciones set estado='ANULADA',motivo_anulacion=?,anulado_por=?,anulado_en=? where id=?",(motivo,session.get('user'),now(),i));audit_change(c,'ANULAR','RRHH_NOMINA',i,snapshot(l),{'estado':'ANULADA'},motivo);c.commit();c.close();flash('Liquidación anulada con trazabilidad.');return redirect('/rrhh/liquidaciones?periodo='+str(l['periodo']))
+
+@app.get('/rrhh/pagos-nomina')
+def rrhh_pagos_nomina():
+    if not _rrhh_perm():return ('Acceso no autorizado',403)
+    c=db();periodo=_rrhh_periodo(request.args.get('periodo'));rows=c.execute('''select l.*,e.nombre,e.documento,cc.codigo cc_codigo,cc.nombre cc_nombre from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id left join centros_costos cc on cc.id=l.centro_costo_id where l.periodo=? and l.estado in ('APROBADA','PAGADA') order by e.nombre''',(periodo,)).fetchall();bancos=c.execute("select * from cuentas_bancarias where activo=1 order by banco,alias").fetchall();c.close();return render_template('rrhh_payroll_payments.html',rows=rows,bancos=bancos,periodo=periodo)
+
+@app.post('/rrhh/pagos-nomina/pagar')
+def rrhh_pagos_nomina_pagar():
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    ids=[int(x) for x in request.form.getlist('liquidacion_id') if str(x).isdigit()];periodo=_rrhh_periodo(request.form.get('periodo'));fecha=request.form.get('fecha') or datetime.date.today().isoformat()
+    if not ids:flash('Seleccione al menos un funcionario para pagar.');return redirect('/rrhh/pagos-nomina?periodo='+periodo)
+    c=db();ok=0;errores=[]
+    try:
+      for lid in ids:
+        l=c.execute("select l.*,e.nombre from rrhh_liquidaciones l join empleados e on e.id=l.empleado_id where l.id=?",(lid,)).fetchone()
+        if not l or l['estado']!='APROBADA':errores.append('Liquidación '+str(lid)+' no está disponible para pago');continue
+        medio=(request.form.get(f'medio_{lid}') or 'BANCO').upper();cuenta_id=int(request.form.get(f'cuenta_{lid}') or 0) or None
+        try:cta_fin,_=_cuenta_financiera(c,medio,cuenta_id)
+        except Exception as ex:errores.append(str(l['nombre'])+': '+str(ex));continue
+        cfg=c.execute('select * from rrhh_config where id=1').fetchone();cta_ob=cfg['cuenta_obligaciones'] or '2.1.04';cc=l['centro_costo_id'] if 'centro_costo_id' in l.keys() else None;neto=float(l['neto'] or 0)
+        aid=asiento(c,fecha,'Pago de salario '+str(l['periodo'])+' - '+str(l['nombre']),'PAGO_NOMINA',lid,'PYG',1,[(cta_ob,neto,0,neto,'Cancelación salario a pagar',cc),(cta_fin,0,neto,neto,'Salida de fondos',cc)])
+        mov=c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(fecha,'EGRESO',medio,'PYG',1,neto,neto,'Pago salario '+str(l['periodo'])+' - '+str(l['nombre']),'PAGO_NOMINA',lid,cuenta_id)).lastrowid
+        c.execute("insert into rrhh_pagos_nomina(liquidacion_id,fecha,importe,medio,cuenta_bancaria_id,cuenta_financiera,asiento_id,movimiento_financiero_id,estado,creado_por,creado_en) values(?,?,?,?,?,?,?,?,?,?,?)",(lid,fecha,neto,medio,cuenta_id,cta_fin,aid,mov,'PAGADO',session.get('user'),now()))
+        c.execute("update rrhh_liquidaciones set estado='PAGADA',pagado_en=?,medio_pago=?,cuenta_bancaria_id=?,movimiento_financiero_id=?,asiento_pago_id=? where id=?",(now(),medio,cuenta_id,mov,aid,lid));ok+=1
+      c.commit()
+    except Exception as ex:c.rollback();c.close();flash('No se pudo procesar el pago: '+str(ex));return redirect('/rrhh/pagos-nomina?periodo='+periodo)
+    c.close();flash(f'{ok} pago(s) de nómina generado(s).'+((' Observaciones: '+' | '.join(errores)) if errores else ''));return redirect('/rrhh/pagos-nomina?periodo='+periodo)
+
+@app.post('/rrhh/pagos-nomina/<int:i>/anular')
+def rrhh_pago_nomina_anular(i):
+    if not _rrhh_perm('ADMINISTRAR'):return ('Acceso no autorizado',403)
+    motivo=(request.form.get('motivo') or '').strip()
+    if len(motivo)<5:flash('Indique un motivo de anulación de al menos 5 caracteres.');return redirect(request.referrer or '/rrhh/pagos-nomina')
+    c=db();l=c.execute('select * from rrhh_liquidaciones where id=?',(i,)).fetchone();p=c.execute("select * from rrhh_pagos_nomina where liquidacion_id=? and estado='PAGADO' order by id desc limit 1",(i,)).fetchone()
+    if not l or not p:c.close();flash('No existe un pago vigente para anular.');return redirect(request.referrer or '/rrhh/pagos-nomina')
+    reverse_asientos(c,'PAGO_NOMINA',i,datetime.date.today().isoformat(),motivo)
+    # El movimiento financiero original se conserva y se compensa con un movimiento inverso para auditoría.
+    c.execute('insert into caja_banco(fecha,tipo,medio,moneda,tipo_cambio,importe,importe_pyg,concepto,origen_tipo,origen_id,cuenta_bancaria_id) values(?,?,?,?,?,?,?,?,?,?,?)',(datetime.date.today().isoformat(),'INGRESO',p['medio'],'PYG',1,p['importe'],p['importe'],'Reversión pago nómina: '+motivo,'REV_PAGO_NOMINA',i,p['cuenta_bancaria_id']))
+    c.execute("update rrhh_pagos_nomina set estado='ANULADO',anulado_por=?,anulado_en=?,motivo_anulacion=? where id=?",(session.get('user'),now(),motivo,p['id']))
+    c.execute("update rrhh_liquidaciones set estado='APROBADA',pagado_en=null,medio_pago=null,cuenta_bancaria_id=null,movimiento_financiero_id=null,asiento_pago_id=null,pago_anulado_por=?,pago_anulado_en=?,motivo_anulacion_pago=? where id=?",(session.get('user'),now(),motivo,i));audit_change(c,'ANULAR_PAGO','RRHH_NOMINA',i,{'estado':'PAGADA'},{'estado':'APROBADA'},motivo);c.commit();periodo=l['periodo'];c.close();flash('Pago anulado y contramovimiento financiero generado. La liquidación vuelve a quedar pendiente de pago.');return redirect('/rrhh/pagos-nomina?periodo='+str(periodo))
 
 @app.route('/rrhh/configuracion',methods=['GET','POST'])
 def rrhh_configuracion():
