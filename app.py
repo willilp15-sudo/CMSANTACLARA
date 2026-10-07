@@ -1213,13 +1213,46 @@ def libro_ventas():
 def contabilidad_comparativo():
  anio,mes,desde,hasta=_periodo_libro_args();tipo=(request.args.get('tipo') or 'COMPRAS').upper()
  if tipo not in ('COMPRAS','VENTAS'): tipo='COMPRAS'
- c=db(); docs=_libro_consolidado(c,'COMPRA' if tipo=='COMPRAS' else 'VENTA',desde,hasta)
+ c=db(); docs_raw=_libro_consolidado(c,'COMPRA' if tipo=='COMPRAS' else 'VENTA',desde,hasta)
  origen='COMPRA' if tipo=='COMPRAS' else 'VENTA'
- diario=c.execute('''select a.fecha,a.numero,a.concepto,a.origen_id,sum(coalesce(d.debe_pyg,0)) debe,sum(coalesce(d.haber_pyg,0)) haber
+ diario_raw=c.execute('''select a.id,a.fecha,a.numero,a.concepto,a.origen_id,sum(coalesce(d.debe_pyg,0)) debe,sum(coalesce(d.haber_pyg,0)) haber
   from asientos a join asiento_det d on d.asiento_id=a.id where a.fecha between ? and ? and a.estado='CONFIRMADO' and a.origen_tipo=?
-  group by a.id,a.fecha,a.numero,a.concepto,a.origen_id order by a.fecha,a.id''',(desde,hasta,origen)).fetchall(); c.close()
+  group by a.id,a.fecha,a.numero,a.concepto,a.origen_id order by a.fecha,a.id''',(desde,hasta,origen)).fetchall()
+ # V13.13.3: conciliacion cruzada Documento / Libro IVA / Diario.
+ # No compara por posicion: usa el ID de origen del asiento y valida integridad fiscal/balance.
+ diario_por_origen={}
+ for a in diario_raw:
+  diario_por_origen.setdefault(a['origen_id'],[]).append(a)
+ docs=[]; ids_documentos=set(); conciliados=0; diferencias=0; sin_asiento=0; sin_iva=0
+ for r in docs_raw:
+  d=dict(r); oid=d.get('id'); ids_documentos.add(oid)
+  total=float(d.get('total_pyg') or 0); tc=float(d.get('tipo_cambio') or 1)
+  fiscal_mon=(float(d.get('gravado_5') or 0)+float(d.get('iva_5') or 0)+float(d.get('gravado_10') or 0)+float(d.get('iva_10') or 0)+float(d.get('exento_iva') or 0))
+  fiscal_pyg=fiscal_mon*tc
+  iva_ok=abs(total-fiscal_pyg)<=max(2.0,abs(total)*0.00001)
+  asientos=diario_por_origen.get(oid,[])
+  asiento_ok=bool(asientos) and all(abs(float(a['debe'] or 0)-float(a['haber'] or 0))<=1 for a in asientos)
+  motivos=[]
+  if not iva_ok: motivos.append('DIFERENCIA IVA / TOTAL')
+  if not asientos: motivos.append('FALTA EN DIARIO')
+  elif not asiento_ok: motivos.append('ASIENTO DESBALANCEADO')
+  if not iva_ok: sin_iva+=1
+  if not asientos: sin_asiento+=1
+  d['conciliado']=iva_ok and asiento_ok; d['motivo']=' · '.join(motivos) if motivos else 'CONCILIADO'
+  if d['conciliado']: conciliados+=1
+  else: diferencias+=1
+  docs.append(d)
+ diario=[]
+ for r in diario_raw:
+  a=dict(r); a['conciliado']=a.get('origen_id') in ids_documentos and abs(float(a.get('debe') or 0)-float(a.get('haber') or 0))<=1
+  if a.get('origen_id') not in ids_documentos: a['motivo']='SIN DOCUMENTO DE ORIGEN'
+  elif not a['conciliado']: a['motivo']='ASIENTO DESBALANCEADO'
+  else: a['motivo']='CONCILIADO'
+  diario.append(a)
+ c.close()
  total_docs=sum(float(r['total_pyg'] or 0) for r in docs); total_debe=sum(float(r['debe'] or 0) for r in diario); total_haber=sum(float(r['haber'] or 0) for r in diario)
- return render_template('accounting_comparative.html',tipo=tipo,docs=docs,diario=diario,anio=anio,mes=mes,desde=desde,hasta=hasta,total_docs=total_docs,total_debe=total_debe,total_haber=total_haber)
+ resumen={'conciliados':conciliados,'diferencias':diferencias,'sin_asiento':sin_asiento,'sin_iva':sin_iva}
+ return render_template('accounting_comparative.html',tipo=tipo,docs=docs,diario=diario,anio=anio,mes=mes,desde=desde,hasta=hasta,total_docs=total_docs,total_debe=total_debe,total_haber=total_haber,resumen=resumen)
 @app.get('/api/tc')
 def api_tc():
  c=db();r=c.execute('select tipo from tipos_cambio where fecha=? and moneda=?',(request.args.get('fecha'),request.args.get('moneda'))).fetchone();c.close();return jsonify({'tipo':r['tipo'] if r else None})
@@ -9802,6 +9835,21 @@ def contabilidad_control_integral():
     return render_template('accounting_control_center.html',datos=datos,desde=desde,hasta=hasta)
 
 ROUTE_MODULE.update({'contabilidad_control_integral':'CONTABILIDAD'})
+
+# ===== V13.13.0: MAPEO Y NAVEGACION POR PROCESOS =====
+@app.get('/operacion-clinica')
+def operacion_clinica_integral():
+    return render_template('operacion_clinica.html')
+
+@app.get('/administracion-integral')
+def administracion_integral():
+    return render_template('administracion_integral.html')
+
+@app.get('/mapa-sistema')
+def mapa_sistema_integral():
+    return render_template('system_map.html')
+
+ROUTE_MODULE.update({'operacion_clinica_integral':'ADMISION','administracion_integral':'CONFIG_SANATORIO'})
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
