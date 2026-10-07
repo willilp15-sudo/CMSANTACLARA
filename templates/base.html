@@ -1,56 +1,64 @@
 <!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Santa Clara ERP</title><link rel="stylesheet" href="{{url_for('static',filename='app.css')}}"></head><body>
-<div class="erp-menu">
-  <div class="erp-brand"><img src="{{logo_url}}"><span>Santa Clara ERP</span><small>Centro Médico</small></div>
-  <a class="erp-home" href="/">⌂ Inicio</a>
+<div class="erp-menu erp-menu-simple">
+  <div class="erp-brand"><img src="{{logo_url}}"><span>Santa Clara ERP</span><small>Gestión Integral</small></div>
+  <nav class="erp-main-nav erp-nav-hierarchical" aria-label="Procesos principales">
+    <a class="erp-home-link" href="/">⌂ Inicio</a>
 
-  {% set m_ventas = has_perm('VENTAS','VER') or has_perm('FACTURACION','VER') or has_perm('CAJA','VER') or has_perm('RECEPCION','VER') or has_perm('PACIENTES','VER') or has_perm('FINANZAS','VER') %}
-  {% if m_ventas %}<details><summary>🧾 Ventas ▾</summary><div class="erp-submenu erp-mega">
-    {% if has_perm('RECEPCION','VER') or has_perm('CAJA','VER') or has_perm('FACTURACION','VER') %}<div class="erp-group"><b>Recepción y cobro</b>
-      {% if has_perm('RECEPCION','VER') %}<a href="/ventas/recepcion-caja">Recepción · Caja · Cobros</a>{% endif %}
-      {% if has_perm('CAJA','VER') or has_perm('FACTURACION','VER') %}<a href="/ventas/caja-central">Localizar / Facturar cuenta</a>{% endif %}
-      {% if has_perm('VENTAS','CREAR') or has_perm('FACTURACION','FACTURAR') %}<a href="/ventas/carga">Nueva venta / Facturación</a>{% endif %}
-      {% if has_perm('CAJA','VER') %}<a href="/ventas/cajas">Arqueo y cierre de caja</a>{% endif %}
-    </div>{% endif %}
-    {% if has_perm('PACIENTES','VER') or has_perm('VENTAS','VER') %}<div class="erp-group"><b>Clientes y documentos</b>
-      {% if has_perm('PACIENTES','VER') %}<a href="/clientes">Pacientes / Clientes</a>{% endif %}
-      {% if has_perm('VENTAS','VER') %}<a href="/ventas">Ventas realizadas</a><a href="/recibos">Recibos</a>{% endif %}
-      {% if has_perm('FACTURACION','VER') %}<a href="/notas-credito">Notas de Crédito / Débito</a>{% endif %}
-    </div>{% endif %}
-    {% if has_perm('FACTURACION','VER') %}<div class="erp-group"><b>Seguros</b><a href="/seguros/facturar">Facturación a seguros</a><a href="/seguros/visaciones">Visaciones / Autorizaciones</a></div>{% endif %}
-  </div></details>{% endif %}
+    {% if has_perm('AGENDA','VER') or has_perm('CONSULTORIO','VER') or has_perm('ADMISION','VER') or has_perm('ENFERMERIA','VER') or has_perm('LABORATORIO','VER') %}
+    <details class="erp-main-group"><summary>🩺 Atención</summary><div class="erp-mega">
+      <section><b>Pacientes</b><a href="/clientes">Registro de pacientes</a><a href="/agendamiento">Agenda y turnos</a><a href="/mis-pacientes">Historial / Mis pacientes</a></section>
+      <section><b>Atención médica</b><a href="/consultas">Consultorios</a><a href="/operacion-clinica">Centro de atención</a><a href="/laboratorio">Laboratorio</a></section>
+      <section><b>Internación</b><a href="/admisiones">Admisiones</a><a href="/internacion/panel">Habitaciones y camas</a><a href="/enfermeria">Enfermería y consumos</a></section>
+    </div></details>{% endif %}
 
-  {% set m_atencion = has_perm('AGENDA','VER') or has_perm('CONSULTORIO','VER') or has_perm('HISTORIA','VER') or has_perm('ADMISION','VER') or has_perm('ENFERMERIA','VER') or has_perm('LABORATORIO','VER') %}
-  {% if m_atencion %}<details><summary>🩺 Atención ▾</summary><div class="erp-submenu erp-mega">
-    {% if has_perm('AGENDA','VER') or has_perm('CONSULTORIO','VER') or has_perm('HISTORIA','VER') %}<div class="erp-group"><b>Consulta externa</b>
-      {% if has_perm('AGENDA','VER') %}<a href="/agendamiento">Agenda y Turnos</a>{% endif %}
-      {% if has_perm('CONSULTORIO','VER') %}<a href="/mis-pacientes">Consultorio / Mis pacientes</a>{% endif %}
-      {% if has_perm('HISTORIA','VER') or has_perm('CONSULTORIO','VER') %}<a href="/consultas">Historia Clínica</a>{% endif %}
-      {% if has_perm('CONSULTORIO','VER') and has_perm('FINANZAS','VER') %}<a href="/consultorio/cierre">Cierre / Liquidaciones médicas</a>{% endif %}
-    </div>{% endif %}
-    {% if has_perm('ADMISION','VER') or has_perm('ENFERMERIA','VER') %}<div class="erp-group"><b>Ingreso y hospitalización</b>
-      {% if has_perm('ADMISION','VER') %}<a href="/ingreso-pacientes">Ingreso de Pacientes</a><a href="/internacion/panel">Salas y Camas</a>{% endif %}
-      {% if has_perm('ENFERMERIA','VER') %}<a href="/enfermeria">Enfermería</a>{% endif %}
-    </div>{% endif %}
-    {% if has_perm('LABORATORIO','VER') %}<div class="erp-group"><b>Servicios</b><a href="/laboratorio">Laboratorio · Órdenes</a>{% if has_perm('FINANZAS','VER') or has_perm('INFORMES','VER') %}<a href="/laboratorio/liquidaciones">Liquidaciones de Laboratorio</a>{% endif %}</div>{% endif %}
-  </div></details>{% endif %}
+    {% if has_perm('VENTAS','VER') or has_perm('RECEPCION','VER') or has_perm('CAJA','VER') or has_perm('FACTURACION','VER') %}
+    <details class="erp-main-group"><summary>🧾 Ventas</summary><div class="erp-mega">
+      <section><b>Operaciones</b><a href="/ventas">Ventas y facturación</a><a href="/ventas/caja-central">Pendientes / Caja central</a><a href="/ventas/carga">Carga de ventas</a></section>
+      <section><b>Cobranzas</b><a href="/ventas/cobros-clientes">Cuentas por cobrar / Cobros</a><a href="/recibos">Recibos</a><a href="/ventas/cajas">Cajas de venta</a></section>
+      <section><b>Seguros</b><a href="/seguros/visaciones">Visaciones</a><a href="/seguros/facturar">Facturación a seguros</a><a href="/seguros/tarifarios">Tarifarios</a></section>
+      <section><b>SIFEN</b><a href="/sifen/monitor">Monitor SIFEN</a><a href="/notas-credito">NC / ND</a></section>
+    </div></details>{% endif %}
 
-  {% set m_maestros = has_perm('PACIENTES','VER') or has_perm('COMPRAS','VER') or has_perm('STOCK','VER') or has_perm('CONFIG_SANATORIO','VER') or has_perm('FINANZAS','VER') or has_perm('RRHH','VER') %}
-  {% if m_maestros %}<a class="erp-home" href="/maestros">▦ Maestros</a>{% endif %}
+    {% if has_perm('COMPRAS','VER') %}<details class="erp-main-group"><summary>🛒 Compras</summary><div class="erp-mega">
+      <section><b>Operaciones</b><a href="/compras">Compras</a><a href="/proveedores">Proveedores</a></section>
+      <section><b>Obligaciones</b><a href="/compras/cuentas-proveedores">Cuentas por pagar</a><a href="/compras/pagos-proveedores">Pagos a proveedores</a></section>
+    </div></details>{% endif %}
 
-  {% if has_perm('INFORMES','VER') or has_perm('CONTABILIDAD','VER') or has_perm('FINANZAS','VER') %}<details><summary>▥ Informes ▾</summary><div class="erp-submenu">{% if has_perm('INFORMES','VER') %}<a href="/informes">Centro de Informes</a><a href="/informes-consultas">Consultas por especialidad</a>{% endif %}{% if has_perm('CONTABILIDAD','VER') %}<a href="/libros">Libros IVA</a><a href="/contabilidad/comparativo">Comparativo contable</a>{% endif %}</div></details>{% endif %}
+    {% if has_perm('FARMACIA','VER') or has_perm('STOCK','VER') %}<details class="erp-main-group"><summary>💊 Stock</summary><div class="erp-mega">
+      <section><b>Productos</b><a href="/productos">Productos y servicios</a><a href="/farmacia/inventario-depositos">Existencias por depósito</a></section>
+      <section><b>Inventario</b><a href="/farmacia/depositos">Depósitos</a><a href="/farmacia/transferencias">Transferencias</a></section>
+      <section><b>Farmacia</b><a href="/farmacia-solicitudes">Solicitudes / Entregas / Estornos</a></section>
+    </div></details>{% endif %}
 
-  {% if has_perm('UMT','VER') %}<details><summary>🩸 UMT ▾</summary><div class="erp-submenu"><a href="/umt">Stock de Hemocomponentes</a><a href="/umt/movimientos">Movimientos / Trazabilidad</a>{% if has_perm('UMT','ADMINISTRAR') %}<a href="/umt/componentes">Maestro de Hemocomponentes</a>{% endif %}</div></details>{% endif %}
-  {% if has_perm('LIMPIEZA','VER') %}<details><summary>🧹 Limpieza ▾</summary><div class="erp-submenu"><a href="/limpieza">Stock Interno</a><a href="/limpieza/movimientos">Movimientos</a></div></details>{% endif %}
-  {% if has_perm('FARMACIA','VER') or has_perm('STOCK','VER') %}<details><summary>💊 Farmacia ▾</summary><div class="erp-submenu">{% if has_perm('STOCK','VER') %}<a href="/productos">Productos · Precios · Stock</a><a href="/farmacia/depositos">Depósitos</a><a href="/farmacia/transferencias">Transferencias entre depósitos</a><a href="/farmacia/inventario-depositos">Inventario por depósito</a>{% endif %}{% if has_perm('FARMACIA','VER') %}<a href="/farmacia-solicitudes">Pedidos / Entregas internas</a>{% endif %}</div></details>{% endif %}
-  {% if has_perm('COMPRAS','VER') %}<details><summary>🛒 Compras ▾</summary><div class="erp-submenu"><a href="/compras">Compras</a><a href="/intercambio/transacciones/COMPRA">Importar compras con productos</a><a href="/proveedores">Proveedores</a><a href="/compras/cuentas-proveedores">Cuentas por Pagar</a><a href="/compras/pagos-proveedores">Pagos a Proveedores</a></div></details>{% endif %}
-  {% if has_perm('FINANZAS','VER') %}<details><summary>💰 Tesorería ▾</summary><div class="erp-submenu"><a href="/finanzas">Cuentas Corrientes / Finanzas</a><a href="/tesoreria/programacion-pagos">Programación de Pagos</a><a href="/bancos/cuentas">Cuentas Bancarias</a><a href="/bancos/depositos">Depósitos Bancarios</a><a href="/bancos/transferencias">Transferencias</a><a href="/bancos/libro">Libro de Bancos</a><a href="/bancos/conciliacion">Conciliación Bancaria</a><a href="/bancos/pos">Terminales POS</a><a href="/tipos-cambio">Monedas / Tipo de Cambio</a></div></details>{% endif %}
-  {% if has_perm('CONTABILIDAD','VER') %}<details><summary>📚 Contabilidad ▾</summary><div class="erp-submenu"><a href="/contabilidad/control">✓ Control Integral</a><a href="/contabilidad">Maestro de Contabilidad</a><a href="/contabilidad/informes">Informes Contables</a></div></details>{% endif %}
-  {% if has_perm('RRHH','VER') %}<details><summary>👥 RR.HH. ▾</summary><div class="erp-submenu"><a href="/rrhh">Panel RR.HH.</a><a href="/rrhh/funcionarios">Funcionarios / Legajos</a><a href="/rrhh/asistencia">Asistencia</a><a href="/rrhh/novedades">Novedades / Anticipos</a><a href="/rrhh/liquidaciones">Liquidación de Salarios</a><a href="/rrhh/pagos-nomina">Pagos de Nómina</a><a href="/rrhh/informes">Informes RR.HH.</a><a href="/rrhh/contratos">Contratos</a>{% if has_perm('RRHH','ADMINISTRAR') %}<a href="/rrhh/modelos-contrato">Modelos de Contrato</a>{% endif %}</div></details>{% endif %}
-  {% if has_perm('FACTURACION','VER') or has_perm('USUARIOS','ADMINISTRAR') %}<details><summary>⚡ SIFEN ▾</summary><div class="erp-submenu">{% if has_perm('FACTURACION','VER') %}<a href="/sifen/monitor">Monitor SIFEN</a><a href="/notas-credito">Notas de Crédito / Débito</a>{% endif %}{% if has_perm('USUARIOS','ADMINISTRAR') or has_perm('CONFIG_SANATORIO','EDITAR') %}<a href="/configuracion/sifen">Empresa y Facturación Electrónica</a><a href="/sifen/preparacion">Preparación / Diagnóstico</a>{% endif %}</div></details>{% endif %}
-  {% if has_perm('USUARIOS','VER') or has_perm('USUARIOS','ADMINISTRAR') or has_perm('CONFIG_SANATORIO','VER') %}<details><summary>⚙ Administración ▾</summary><div class="erp-submenu">{% if has_perm('USUARIOS','ADMINISTRAR') %}<a href="/administracion/puesta-en-marcha">Importaciones / Puesta en marcha</a><a href="/administracion/geografia">Ubicaciones geográficas</a>{% endif %}{% if has_perm('CONFIG_SANATORIO','VER') %}<a href="/config-sanatorio">Configuración Sanatorio</a><a href="/seguros/tarifarios">Tarifarios de Seguros</a>{% endif %}{% if has_perm('USUARIOS','VER') or has_perm('USUARIOS','ADMINISTRAR') %}<a href="/admin/usuarios-roles">Usuarios · Roles · Permisos</a>{% endif %}{% if has_perm('USUARIOS','ADMINISTRAR') %}<a href="/auditoria-detallada">Auditoría y Seguridad</a><a href="/seguridad/backups">Backups</a><a href="/administracion/reinicio-base">Reinicio / Base limpia</a>{% endif %}</div></details>{% endif %}
+    {% if has_perm('FINANZAS','VER') %}<details class="erp-main-group"><summary>💰 Tesorería</summary><div class="erp-mega">
+      <section><b>Caja</b><a href="/finanzas">Centro financiero</a><a href="/ventas/cajas">Cajas y cierres</a></section>
+      <section><b>Bancos</b><a href="/bancos/cuentas">Cuentas bancarias</a><a href="/bancos/libro">Movimientos</a><a href="/bancos/transferencias">Transferencias</a><a href="/bancos/conciliacion">Conciliación</a></section>
+      <section><b>Pagos y cobros</b><a href="/ventas/cobros-clientes">Cobranzas</a><a href="/compras/pagos-proveedores">Proveedores</a><a href="/rrhh/pagos-nomina">Nómina</a></section>
+    </div></details>{% endif %}
 
-  <button type="button" class="theme-toggle" id="theme-toggle" title="Cambiar tema visual" aria-label="Cambiar tema visual">◐ Confort</button>
-  <a class="erp-exit" href="/logout" onclick="return confirm('¿Desea salir del sistema?')">⏻ Salir</a>
+    {% if has_perm('RRHH','VER') %}<details class="erp-main-group"><summary>👥 RR.HH.</summary><div class="erp-mega">
+      <section><b>Funcionarios</b><a href="/rrhh/funcionarios">Legajos y contratos</a></section>
+      <section><b>Asistencia</b><a href="/rrhh/asistencia">Marcaciones / Asistencia</a><a href="/rrhh/novedades">Novedades, permisos y descuentos</a></section>
+      <section><b>Nómina</b><a href="/rrhh/liquidaciones">Liquidación</a><a href="/rrhh/pagos-nomina">Pagos de nómina</a><a href="/rrhh/informes">Informes RR.HH.</a></section>
+    </div></details>{% endif %}
+
+    {% if has_perm('CONTABILIDAD','VER') %}<details class="erp-main-group"><summary>📚 Contabilidad</summary><div class="erp-mega">
+      <section><b>Operaciones</b><a href="/contabilidad/control">Control integral</a><a href="/contabilidad">Asientos / Diario</a><a href="/contabilidad/plan">Plan de cuentas</a></section>
+      <section><b>Estados e informes</b><a href="/contabilidad/informes">Estados contables</a><a href="/libros">Libros</a></section>
+      <section><b>Costos</b><a href="/contabilidad/centros-costos">Centros de costo</a><a href="/contabilidad/centros-costos/informe">Resultado por centro</a></section>
+      <section><b>Fiscal</b><a href="/contabilidad/iva-papel-trabajo">IVA</a><a href="/contabilidad/rg90">RG90</a><a href="/sifen/monitor">SIFEN</a></section>
+    </div></details>{% endif %}
+
+    {% if has_perm('INFORMES','VER') %}<a href="/informes">📊 Informes</a>{% endif %}
+
+    {% if has_perm('PACIENTES','VER') or has_perm('STOCK','VER') or has_perm('CONFIG_SANATORIO','VER') %}<details class="erp-main-group"><summary>▦ Maestros</summary><div class="erp-mega"><section><b>Maestros generales</b><a href="/maestros">Centro de maestros</a><a href="/clientes">Pacientes / Clientes</a><a href="/proveedores">Proveedores</a><a href="/productos">Productos / Servicios</a><a href="/tipos-cambio">Tipos de cambio</a></section></div></details>{% endif %}
+
+    {% if has_perm('USUARIOS','VER') or has_perm('CONFIG_SANATORIO','VER') %}<details class="erp-main-group"><summary>⚙ Administración</summary><div class="erp-mega">
+      <section><b>Configuración</b><a href="/administracion-integral">Centro administrativo</a><a href="/config-sanatorio">Empresa / Sanatorio</a><a href="/configuracion/sifen">Configuración SIFEN</a></section>
+      <section><b>Seguridad</b><a href="/admin/usuarios-roles">Usuarios y permisos</a><a href="/auditoria-detallada">Auditoría</a><a href="/seguridad/backups">Backups</a></section>
+    </div></details>{% endif %}
+  </nav>
+  <div class="erp-menu-tools"><a href="/mapa-sistema">⌘ Mapa</a><button type="button" class="theme-toggle" id="theme-toggle" title="Cambiar tema visual">◐ Confort</button><a class="erp-exit" href="/logout" onclick="return confirm('¿Desea salir del sistema?')">⏻ Salir</a></div>
 </div>
 <main class="erp-workspace"><header><div class="header-brand"><img src="{{logo_url}}"><b>{% block title %}Sistema Integrado{% endblock %}</b></div><span>{{session.name}}</span></header>{% if request.path not in ['/', '/login'] %}<div class="page-nav"><button type="button" class="btn secondary back-btn" onclick="volverSeguro()">← Volver</button></div>{% endif %}{% with ms=get_flashed_messages() %}{% for m in ms %}<div class="alert">{{m}}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main><script src="{{url_for('static',filename='app.js')}}"></script><script>function volverSeguro(){if(document.referrer&&document.referrer.indexOf(window.location.host)!==-1){history.back()}else{location.href='/'}}document.addEventListener('click',e=>{document.querySelectorAll('.erp-menu details[open]').forEach(d=>{if(!d.contains(e.target))d.removeAttribute('open')})});</script><style>
 .sc-searchbox{position:relative}.sc-searchbox input[type=search]{width:100%}.sc-results{position:absolute;z-index:1000;left:0;right:0;background:#fff;border:1px solid #bbb;max-height:260px;overflow:auto;box-shadow:0 4px 12px #0002}.sc-result{padding:8px 10px;cursor:pointer;border-bottom:1px solid #eee}.sc-result:hover{background:#f1f5f9}.sc-selected{font-size:12px;margin-top:4px;font-weight:600}
