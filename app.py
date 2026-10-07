@@ -8221,8 +8221,7 @@ def inventario_depositos():
 ROUTE_MODULE.update({'depositos_stock':'STOCK','deposito_estado':'STOCK','deposito_editar':'STOCK','deposito_eliminar':'STOCK','transferencias_deposito':'STOCK','transferencia_deposito_editar':'STOCK','transferencia_deposito_anular':'STOCK','transferencia_deposito_pdf':'STOCK','inventario_depositos':'STOCK'})
 
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0',port=5000,debug=False)
+# V13.12.0: el arranque directo se mantiene al final del archivo para registrar todas las rutas.
 
 # ===== V13.9.58 - Importacion / actualizacion CxC y CxP =====
 def _imp_norm(v):
@@ -9774,3 +9773,35 @@ def centros_costos_informe_pdf():
     # inline=1 abre exactamente este mismo PDF para imprimir; sin inline lo descarga.
     inline=request.args.get('inline')=='1'
     return send_file(out,as_attachment=not inline,download_name=f'centros_costos_{desde}_{hasta}.pdf',mimetype='application/pdf')
+
+
+# ===== V13.12.0: CONTROL INTEGRAL / CONTABILIDAD PARAGUAY =====
+def _v13120_scalar(c, sql, params=(), default=0):
+    try:
+        r=c.execute(sql,params).fetchone()
+        if not r:return default
+        return list(r)[0] if not hasattr(r,'keys') else r[r.keys()[0]]
+    except Exception:
+        return default
+
+@app.get('/contabilidad/control')
+def contabilidad_control_integral():
+    hoy=datetime.date.today(); desde=request.args.get('desde') or hoy.replace(day=1).isoformat(); hasta=request.args.get('hasta') or hoy.isoformat()
+    c=db()
+    datos={
+      'ventas':_v13120_scalar(c,"select coalesce(sum(total_pyg),0) from ventas where fecha between ? and ? and coalesce(estado,'')!='ANULADA'",(desde,hasta),0),
+      'compras':_v13120_scalar(c,"select coalesce(sum(total_pyg),0) from compras where fecha between ? and ? and coalesce(estado,'')!='ANULADA'",(desde,hasta),0),
+      'cxc':_v13120_scalar(c,"select coalesce(sum(saldo),0) from cxc where saldo>0",(),0),
+      'cxp':_v13120_scalar(c,"select coalesce(sum(saldo),0) from cxp where saldo>0",(),0),
+      'sin_contabilizar_compras':_v13120_scalar(c,"select count(*) from compras co where co.fecha between ? and ? and coalesce(co.estado,'')!='ANULADA' and not exists(select 1 from asientos a where a.origen_tipo='COMPRA' and a.origen_id=co.id)",(desde,hasta),0),
+      'sin_contabilizar_ventas':_v13120_scalar(c,"select count(*) from ventas v where v.fecha between ? and ? and coalesce(v.estado,'')!='ANULADA' and not exists(select 1 from asientos a where a.origen_tipo in ('VENTA','FACTURA') and a.origen_id=v.id)",(desde,hasta),0),
+      'asientos_desbalanceados':_v13120_scalar(c,"select count(*) from (select a.id from asientos a join asiento_det d on d.asiento_id=a.id where a.fecha between ? and ? and a.estado='CONFIRMADO' group by a.id having abs(sum(coalesce(d.debe_pyg,0))-sum(coalesce(d.haber_pyg,0)))>0.5)",(desde,hasta),0),
+      'sifen_pendientes':_v13120_scalar(c,"select count(*) from ventas where fecha between ? and ? and coalesce(estado,'')!='ANULADA' and upper(coalesce(estado_sifen,'')) not in ('APROBADO','CANCELADO')",(desde,hasta),0),
+    }
+    c.close()
+    return render_template('accounting_control_center.html',datos=datos,desde=desde,hasta=hasta)
+
+ROUTE_MODULE.update({'contabilidad_control_integral':'CONTABILIDAD'})
+
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=5000,debug=False)

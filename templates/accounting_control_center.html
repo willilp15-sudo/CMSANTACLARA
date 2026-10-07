@@ -1,0 +1,17 @@
+{% extends 'base.html' %}{% block title %}Control Integral Contable{% endblock %}{% block content %}
+<div class="sc-page-head"><div><h2>✓ Control Integral Contable</h2><p class="muted">Una sola pantalla para verificar operación, contabilidad, tesorería, fiscalidad y trazabilidad.</p></div><a class="btn secondary" href="/contabilidad">Maestro contable</a></div>
+<form class="card sc-filterbar" method="get"><label>Desde<input type="date" name="desde" value="{{desde}}"></label><label>Hasta<input type="date" name="hasta" value="{{hasta}}"></label><button>Actualizar control</button></form>
+<div class="sc-kpis">
+ <div class="sc-kpi"><small>Ventas del período</small><b>Gs. {{'{:,.0f}'.format(datos.ventas or 0).replace(',','.')}}</b></div>
+ <div class="sc-kpi"><small>Compras del período</small><b>Gs. {{'{:,.0f}'.format(datos.compras or 0).replace(',','.')}}</b></div>
+ <div class="sc-kpi"><small>Cuentas por cobrar</small><b>Gs. {{'{:,.0f}'.format(datos.cxc or 0).replace(',','.')}}</b></div>
+ <div class="sc-kpi"><small>Cuentas por pagar</small><b>Gs. {{'{:,.0f}'.format(datos.cxp or 0).replace(',','.')}}</b></div>
+</div>
+<div class="sc-control-grid">
+ <section class="card"><h3>Integridad contable</h3><div class="sc-check {{'warn' if datos.sin_contabilizar_ventas else 'ok'}}"><b>Ventas sin contabilizar</b><span>{{datos.sin_contabilizar_ventas}}</span></div><div class="sc-check {{'warn' if datos.sin_contabilizar_compras else 'ok'}}"><b>Compras sin contabilizar</b><span>{{datos.sin_contabilizar_compras}}</span></div><div class="sc-check {{'bad' if datos.asientos_desbalanceados else 'ok'}}"><b>Asientos desbalanceados</b><span>{{datos.asientos_desbalanceados}}</span></div><p><a class="btn" href="/contabilidad/auditoria/sin-contabilizar?periodo={{desde[:7]}}">Revisar pendientes</a> <a class="btn secondary" href="/contabilidad/asientos">Asientos</a></p></section>
+ <section class="card"><h3>Fiscal / DNIT</h3><div class="sc-check {{'warn' if datos.sifen_pendientes else 'ok'}}"><b>SIFEN pendientes/no aprobados</b><span>{{datos.sifen_pendientes}}</span></div><p><a class="btn" href="/sifen/monitor">Monitor SIFEN</a> <a class="btn secondary" href="/contabilidad/rg90">RG90</a></p><p><a class="btn secondary" href="/contabilidad/conciliacion-fiscal">Conciliación fiscal</a> <a class="btn secondary" href="/contabilidad/iva-papel-trabajo">IVA</a></p></section>
+ <section class="card"><h3>Estados e informes</h3><p><a class="btn" href="/contabilidad/informe/diario?buscar=1&desde={{desde}}&hasta={{hasta}}">Libro Diario</a> <a class="btn" href="/contabilidad/informe/mayor?buscar=1&desde={{desde}}&hasta={{hasta}}">Libro Mayor</a></p><p><a class="btn secondary" href="/contabilidad/informe/balance_sumas?buscar=1&desde={{desde}}&hasta={{hasta}}">Balance</a> <a class="btn secondary" href="/contabilidad/informes">Estados financieros</a></p></section>
+ <section class="card"><h3>Costos y tesorería</h3><p><a class="btn" href="/contabilidad/centros-costos/informe?desde={{desde}}&hasta={{hasta}}">Resultado por centro de costo</a></p><p><a class="btn secondary" href="/bancos/conciliacion">Conciliación bancaria</a> <a class="btn secondary" href="/bancos/libro">Libro de bancos</a></p></section>
+</div>
+<div class="alert"><b>Control:</b> esta pantalla ayuda a detectar diferencias internas. La parametrización tributaria y las obligaciones aplicables deben mantenerse de acuerdo con el RUC y las disposiciones vigentes de la DNIT.</div>
+{% endblock %}
