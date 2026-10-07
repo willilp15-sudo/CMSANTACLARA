@@ -281,3 +281,41 @@ html{background:var(--sc-bg)}body{background:var(--sc-bg)!important;color:var(--
 .erp-main-group:nth-last-of-type(-n+2) .erp-mega{left:auto;right:0}.erp-mega section{display:flex;flex-direction:column;gap:3px;padding:7px;border-radius:9px;background:rgba(20,126,160,.035)}.erp-mega section>b{padding:4px 7px 7px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;opacity:.7}.erp-mega a{padding:7px 9px;border-radius:7px;text-decoration:none}.erp-mega a:hover{background:rgba(20,126,160,.11)}
 @media(max-width:1180px){.erp-menu{flex-wrap:wrap}.erp-nav-hierarchical{order:3;width:100%;overflow-x:auto!important}.erp-mega{position:fixed;left:14px!important;right:14px!important;top:104px;min-width:0;max-width:none;grid-template-columns:repeat(3,1fr)}}
 @media(max-width:760px){.erp-nav-hierarchical{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:6px}.erp-nav-hierarchical>a,.erp-main-group>summary{justify-content:center;min-height:40px}.erp-main-group{position:static}.erp-mega{top:92px;grid-template-columns:1fr;max-height:70vh;overflow:auto}.erp-menu-tools{width:100%;justify-content:center}.erp-brand{width:100%;justify-content:center}}
+
+/* V13.13.2 - Correccion visual del menu jerarquico: contraste, compactacion y responsive */
+.erp-menu.erp-menu-simple{overflow:visible!important;gap:6px!important;padding:6px 8px!important;min-height:50px}
+.erp-brand{flex:0 0 auto!important;margin-right:4px!important}.erp-brand img{height:32px!important}.erp-brand span{font-size:13px!important}.erp-brand small{font-size:9px!important}
+.erp-nav-hierarchical{gap:1px!important;overflow:visible!important}
+.erp-nav-hierarchical>a,.erp-main-group>summary{min-height:38px!important;padding:0 7px!important;font-size:13px!important;color:#fff!important;border-radius:7px!important}
+.erp-main-group[open]>summary,.erp-main-group>summary:hover,.erp-nav-hierarchical>a:hover{background:rgba(255,255,255,.13)!important;color:#fff!important}
+.erp-menu-tools{flex:0 0 auto!important;gap:2px!important}.erp-menu-tools>a,.erp-menu-tools button{font-size:12px!important;padding:7px 7px!important;min-height:34px!important;color:#fff!important}
+
+/* El desplegable debe tener contraste propio y no heredar colores claros del tema */
+.erp-main-group>.erp-mega{background:#ffffff!important;color:#18342d!important;border:1px solid #cbded8!important;box-shadow:0 16px 38px rgba(0,0,0,.22)!important;min-width:430px!important;max-width:min(680px,calc(100vw - 24px))!important;grid-template-columns:repeat(2,minmax(190px,1fr))!important;gap:8px!important;padding:10px!important;max-height:calc(100vh - 78px)!important;overflow:auto!important}
+.erp-main-group>.erp-mega section{background:#f5f9f7!important;color:#18342d!important;border:1px solid #e0ebe7!important;padding:7px!important;border-radius:9px!important}
+.erp-main-group>.erp-mega section>b{display:block!important;color:#49645c!important;opacity:1!important;border-bottom:1px solid #dce8e4!important;padding:5px 7px 7px!important;margin-bottom:2px!important;font-size:11px!important;font-weight:800!important}
+.erp-main-group>.erp-mega a{display:block!important;color:#18342d!important;background:transparent!important;opacity:1!important;font-size:13px!important;font-weight:600!important;line-height:1.25!important;padding:8px 9px!important;border-radius:7px!important;text-decoration:none!important}
+.erp-main-group>.erp-mega a:visited{color:#18342d!important}.erp-main-group>.erp-mega a:hover,.erp-main-group>.erp-mega a:focus{color:#0f4f40!important;background:#dfeee9!important;outline:none!important}
+
+/* Tema oscuro: desplegable sigue siendo legible */
+[data-theme="dark"] .erp-main-group>.erp-mega{background:#1f2b28!important;color:#f2f7f5!important;border-color:#425650!important}
+[data-theme="dark"] .erp-main-group>.erp-mega section{background:#283733!important;color:#f2f7f5!important;border-color:#3a4d47!important}
+[data-theme="dark"] .erp-main-group>.erp-mega section>b{color:#b8d4cb!important;border-color:#425650!important}
+[data-theme="dark"] .erp-main-group>.erp-mega a,[data-theme="dark"] .erp-main-group>.erp-mega a:visited{color:#f2f7f5!important}
+[data-theme="dark"] .erp-main-group>.erp-mega a:hover,[data-theme="dark"] .erp-main-group>.erp-mega a:focus{background:#365148!important;color:#fff!important}
+
+@media(max-width:1280px){
+ .erp-brand small{display:none!important}.erp-brand span{font-size:12px!important}
+ .erp-nav-hierarchical>a,.erp-main-group>summary{padding:0 6px!important;font-size:12px!important}
+ .erp-menu-tools .theme-toggle{max-width:38px!important;overflow:hidden!important;white-space:nowrap!important}
+}
+@media(max-width:1100px){
+ .erp-menu.erp-menu-simple{flex-wrap:wrap!important}.erp-brand{order:1}.erp-menu-tools{order:2;margin-left:auto!important}.erp-nav-hierarchical{order:3!important;width:100%!important;flex-basis:100%!important;overflow-x:auto!important;overflow-y:visible!important;padding-bottom:2px}
+ .erp-main-group>.erp-mega{position:fixed!important;left:10px!important;right:10px!important;top:94px!important;min-width:0!important;max-width:none!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;max-height:calc(100vh - 108px)!important}
+}
+@media(max-width:760px){
+ .erp-menu.erp-menu-simple{display:flex!important}.erp-brand{width:auto!important;justify-content:flex-start!important}.erp-brand span{display:inline!important}.erp-menu-tools{width:auto!important;justify-content:flex-end!important}
+ .erp-nav-hierarchical{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;overflow:visible!important;gap:4px!important}
+ .erp-nav-hierarchical>a,.erp-main-group>summary{justify-content:center!important;background:rgba(255,255,255,.06)!important}
+ .erp-main-group>.erp-mega{top:142px!important;grid-template-columns:1fr!important;max-height:calc(100vh - 154px)!important}
+}
