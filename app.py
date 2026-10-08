@@ -2722,9 +2722,34 @@ def cobrar_agenda(gid):
 
 @app.route('/mis-pacientes')
 def mis_pacientes():
- c=db();u=c.execute('select id from usuarios where usuario=?',(session['user'],)).fetchone();m=c.execute('select * from medicos where usuario_id=?',(u['id'],)).fetchone() if u else None
- if not m:c.close();return render_template('doctor_patients_v12.html',medico=None,rows=[])
- hoy=request.args.get('fecha') or datetime.date.today().isoformat();rows=c.execute('''select g.*,p.nombre paciente,p.documento,p.telefono,e.nombre especialidad from agenda g join pacientes p on p.id=g.paciente_id left join especialidades e on e.id=g.especialidad_id where g.medico_id=? and g.fecha=? order by g.hora,g.id''',(m['id'],hoy)).fetchall();c.close();return render_template('doctor_patients_v12.html',medico=m,rows=rows,hoy=hoy)
+    """Consulta médica: no producir HTTP 500 por usuario no vinculado o agenda incompleta."""
+    hoy = request.args.get('fecha') or datetime.date.today().isoformat()
+    try:
+        datetime.date.fromisoformat(hoy)
+    except ValueError:
+        hoy = datetime.date.today().isoformat()
+    usuario = session.get('user')
+    if not usuario:
+        return redirect('/login')
+    c = db()
+    try:
+        u = c.execute('select id from usuarios where usuario=?', (usuario,)).fetchone()
+        m = c.execute('select * from medicos where usuario_id=?', (u['id'],)).fetchone() if u else None
+        if not m:
+            return render_template('doctor_patients_v12.html', medico=None, rows=[], hoy=hoy)
+        rows = c.execute("""select g.*, p.nombre paciente, p.documento, p.telefono,
+                            e.nombre especialidad from agenda g
+                            join pacientes p on p.id=g.paciente_id
+                            left join especialidades e on e.id=g.especialidad_id
+                            where g.medico_id=? and g.fecha=? order by g.hora,g.id""",
+                         (m['id'], hoy)).fetchall()
+        return render_template('doctor_patients_v12.html', medico=m, rows=rows, hoy=hoy)
+    except sqlite3.Error:
+        app.logger.exception('Fallo de base de datos al consultar pacientes')
+        return render_template('doctor_patients_v12.html', medico=None, rows=[], hoy=hoy,
+                               aviso='No fue posible consultar la agenda médica. Verifique las tablas y la vinculación del profesional.'), 503
+    finally:
+        c.close()
 
 @app.post('/llamar-paciente/<int:gid>')
 def llamar_paciente(gid):
@@ -9884,7 +9909,10 @@ ROUTE_MODULE.update({'contabilidad_control_integral':'CONTABILIDAD'})
 # ===== V13.13.0: MAPEO Y NAVEGACION POR PROCESOS =====
 @app.get('/operacion-clinica')
 def operacion_clinica_integral():
-    return render_template('operacion_clinica.html')
+    # V13.14.4: render aislado del layout global, para que el centro clínico
+    # no dependa de variables/permisos del menú principal durante el render.
+    # La autenticación y el control de permisos global siguen vigentes.
+    return render_template('operacion_clinica_autonoma.html')
 
 @app.get('/administracion-integral')
 def administracion_integral():
