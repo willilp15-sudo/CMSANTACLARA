@@ -11,5 +11,3 @@ sifen==0.2.0
 python-docx==1.2.0
 
 PyMuPDF==1.26.4
-
-PyMuPDF==1.26.4
