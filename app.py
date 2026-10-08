@@ -1220,9 +1220,13 @@ def contabilidad_comparativo():
   group by a.id,a.fecha,a.numero,a.concepto,a.origen_id order by a.fecha,a.id''',(desde,hasta,origen)).fetchall()
  # V13.13.3: conciliacion cruzada Documento / Libro IVA / Diario.
  # No compara por posicion: usa el ID de origen del asiento y valida integridad fiscal/balance.
+ _cc_vinculos_init(c)
+ vinculados=c.execute('select v.documento_id,v.asiento_id,a.numero,a.fecha,coalesce(sum(d.debe_pyg),0) debe,coalesce(sum(d.haber_pyg),0) haber from comparativo_asiento_vinculos v join asientos a on a.id=v.asiento_id left join asiento_det d on d.asiento_id=a.id where v.tipo=? and a.estado="CONFIRMADO" group by v.id', (origen,)).fetchall()
+ diario_raw=list(diario_raw)+[dict(id=r['asiento_id'],fecha=r['fecha'],numero=r['numero'],concepto='Asiento asociado',origen_id=r['documento_id'],debe=r['debe'],haber=r['haber']) for r in vinculados]
  diario_por_origen={}
  for a in diario_raw:
   diario_por_origen.setdefault(a['origen_id'],[]).append(a)
+ cuentas_disponibles=c.execute('select codigo,nombre from plan_cuentas order by codigo').fetchall();asientos_disponibles=c.execute("select a.id,a.numero,a.fecha,a.concepto from asientos a where a.estado='CONFIRMADO' and coalesce(a.origen_tipo,'') not in ('VENTA','COMPRA') and not exists(select 1 from comparativo_asiento_vinculos v where v.asiento_id=a.id) order by a.fecha desc,a.id desc limit 300").fetchall()
  docs=[]; ids_documentos=set(); conciliados=0; diferencias=0; sin_asiento=0; sin_iva=0
  for r in docs_raw:
   d=dict(r); oid=d.get('id'); ids_documentos.add(oid)
@@ -1252,7 +1256,48 @@ def contabilidad_comparativo():
  c.close()
  total_docs=sum(float(r['total_pyg'] or 0) for r in docs); total_debe=sum(float(r['debe'] or 0) for r in diario); total_haber=sum(float(r['haber'] or 0) for r in diario)
  resumen={'conciliados':conciliados,'diferencias':diferencias,'sin_asiento':sin_asiento,'sin_iva':sin_iva}
- return render_template('accounting_comparative.html',tipo=tipo,docs=docs,diario=diario,anio=anio,mes=mes,desde=desde,hasta=hasta,total_docs=total_docs,total_debe=total_debe,total_haber=total_haber,resumen=resumen)
+ return render_template('accounting_comparative.html',tipo=tipo,docs=docs,diario=diario,anio=anio,mes=mes,desde=desde,hasta=hasta,total_docs=total_docs,total_debe=total_debe,total_haber=total_haber,resumen=resumen,cuentas_disponibles=cuentas_disponibles,asientos_disponibles=asientos_disponibles)
+# V13.13.4: asociación complementaria, sin alterar los asientos automáticos.
+def _cc_vinculos_init(c):
+ c.execute("CREATE TABLE IF NOT EXISTS comparativo_asiento_vinculos(id INTEGER PRIMARY KEY,tipo TEXT NOT NULL,documento_id INTEGER NOT NULL,asiento_id INTEGER NOT NULL,usuario TEXT,fecha TEXT,modo TEXT,UNIQUE(tipo,documento_id))")
+
+@app.post('/contabilidad/comparativo/asociar')
+def comparativo_asociar():
+ tipo=(request.form.get('tipo') or '').upper();modo=request.form.get('modo');doc_id=request.form.get('documento_id',type=int)
+ anio=request.form.get('anio','');mes=request.form.get('mes','')
+ destino='/contabilidad/comparativo?tipo='+('VENTAS' if tipo=='VENTA' else 'COMPRAS')+'&anio='+str(anio)+'&mes='+str(mes)
+ if tipo not in ('VENTA','COMPRA') or not doc_id or modo not in ('vincular','crear'):
+  flash('Solicitud de asociación inválida.');return redirect(destino)
+ c=db()
+ try:
+  _cc_vinculos_init(c)
+  tabla='ventas' if tipo=='VENTA' else 'compras'
+  doc=c.execute(f"select id,fecha,numero,total_pyg,moneda,tipo_cambio from {tabla} where id=? and coalesce(estado,'CONFIRMADA')<>'ANULADA'",(doc_id,)).fetchone()
+  if not doc:raise ValueError('Documento inexistente o anulado.')
+  if c.execute("select id from asientos where origen_tipo=? and origen_id=? and estado='CONFIRMADO'",(tipo,doc_id)).fetchone():raise ValueError('Este documento ya posee asiento automático. No se modificó.')
+  if c.execute('select id from comparativo_asiento_vinculos where tipo=? and documento_id=?',(tipo,doc_id)).fetchone():raise ValueError('El documento ya tiene un asiento asociado.')
+  importe=float(doc['total_pyg'] or 0)
+  if importe<=0:raise ValueError('El documento no tiene importe positivo para conciliar.')
+  if modo=='vincular':
+   aid=int(request.form.get('asiento_id') or 0)
+   a=c.execute("select a.id,a.fecha,a.origen_tipo,a.origen_id,a.estado,coalesce(sum(d.debe_pyg),0) debe,coalesce(sum(d.haber_pyg),0) haber from asientos a left join asiento_det d on d.asiento_id=a.id where a.id=? group by a.id",(aid,)).fetchone()
+   if not a or a['estado']!='CONFIRMADO':raise ValueError('Seleccione un asiento confirmado.')
+   if a['origen_tipo'] in ('VENTA','COMPRA') and a['origen_id'] is not None:raise ValueError('El asiento pertenece a otro documento operativo.')
+   if c.execute('select id from comparativo_asiento_vinculos where asiento_id=?',(aid,)).fetchone():raise ValueError('El asiento ya está asociado a otro documento.')
+   if abs(float(a['debe'])-float(a['haber']))>1 or abs(float(a['debe'])-importe)>1:raise ValueError('El asiento no está balanceado o su importe no coincide con el documento.')
+  else:
+   debe_cuenta=request.form.get('cuenta_debe','').strip();haber_cuenta=request.form.get('cuenta_haber','').strip()
+   if not debe_cuenta or not haber_cuenta or debe_cuenta==haber_cuenta:raise ValueError('Indique dos cuentas contables diferentes.')
+   for cuenta in (debe_cuenta,haber_cuenta):
+    if not c.execute('select codigo from plan_cuentas where codigo=?',(cuenta,)).fetchone():raise ValueError('Cuenta no encontrada: '+cuenta)
+   aid=asiento(c,doc['fecha'],'Regularización contable de '+tipo+' '+str(doc['numero']),'REGULARIZACION_'+tipo,doc_id,'PYG',1,[(debe_cuenta,importe,0,importe,'Regularización documento'),(haber_cuenta,0,importe,importe,'Regularización documento')])
+  c.execute('insert into comparativo_asiento_vinculos(tipo,documento_id,asiento_id,usuario,fecha,modo) values(?,?,?,?,?,?)',(tipo,doc_id,aid,session.get('user'),now(),modo))
+  c.commit();audit('COMPARATIVO_ASIENTO_'+modo.upper(),f'{tipo} {doc_id} asiento {aid}');flash('Asiento asociado correctamente. El asiento automático original no fue modificado.')
+ except Exception as ex:
+  c.rollback();flash(str(ex))
+ finally:c.close()
+ return redirect(destino)
+
 @app.get('/api/tc')
 def api_tc():
  c=db();r=c.execute('select tipo from tipos_cambio where fecha=? and moneda=?',(request.args.get('fecha'),request.args.get('moneda'))).fetchone();c.close();return jsonify({'tipo':r['tipo'] if r else None})
