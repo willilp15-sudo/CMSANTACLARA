@@ -1,36 +1,15 @@
-{% extends 'base.html' %}
-{% block title %}Centro de Operaciones{% endblock %}
-{% block content %}
-<section class="sc-home">
-  <div class="sc-home-head"><div><h1>Centro de Operaciones</h1><p>Todo el sistema organizado por áreas. Solo se muestran los accesos habilitados para su usuario.</p></div><div class="sc-home-badge">Grupo Santa Clara S.A.</div></div>
-
-  <div class="sc-section-title"><span>⚕</span><div><h2>Atención y operación</h2><small>Procesos diarios del centro médico</small></div></div>
-  <div class="sc-flow-grid">
-    {% if has_perm('VENTAS','VER') or has_perm('RECEPCION','VER') or has_perm('CAJA','VER') or has_perm('FACTURACION','VER') %}<a class="sc-flow-card" href="/ventas/recepcion-caja"><span>🧾</span><b>Recepción y Ventas</b><small>Registrar, cobrar y facturar</small></a>{% endif %}
-    {% if has_perm('AGENDA','VER') %}<a class="sc-flow-card" href="/agendamiento"><span>📅</span><b>Agenda y Consultorios</b><small>Turnos, médicos y pacientes</small></a>{% endif %}
-    {% if has_perm('ADMISION','VER') or has_perm('ENFERMERIA','VER') %}<a class="sc-flow-card" href="/internacion/panel"><span>🏥</span><b>Internación</b><small>Admisiones, salas, consumos y altas</small></a>{% endif %}
-    {% if has_perm('FARMACIA','VER') %}<a class="sc-flow-card" href="/farmacia-solicitudes"><span>💊</span><b>Farmacia</b><small>Pedidos, entregas y movimientos</small></a>{% endif %}
-    {% if has_perm('LABORATORIO','VER') %}<a class="sc-flow-card" href="/laboratorio"><span>🧪</span><b>Laboratorio</b><small>Órdenes, ventas y liquidaciones</small></a>{% endif %}
-  </div>
-
-  <div class="sc-section-title"><span>⌘</span><div><h2>Gestión administrativa</h2><small>Compras, tesorería, contabilidad y personas</small></div></div>
-  <div class="sc-flow-grid">
-    {% if has_perm('COMPRAS','VER') %}<a class="sc-flow-card" href="/compras"><span>🛒</span><b>Compras</b><small>Proveedores, compras y cuentas por pagar</small></a>{% endif %}
-    {% if has_perm('FINANZAS','VER') or has_perm('CAJA','VER') %}<a class="sc-flow-card" href="/finanzas"><span>💰</span><b>Tesorería</b><small>Cajas, bancos, cobros y pagos</small></a>{% endif %}
-    {% if has_perm('CONTABILIDAD','VER') %}<a class="sc-flow-card" href="/contabilidad"><span>📚</span><b>Contabilidad</b><small>Plan de cuentas, diario, mayor y fiscal</small></a>{% endif %}
-    {% if has_perm('RRHH','VER') %}<a class="sc-flow-card" href="/rrhh"><span>👥</span><b>Recursos Humanos</b><small>Legajos, asistencia y liquidaciones</small></a>{% endif %}
-    {% if has_perm('INFORMES','VER') %}<a class="sc-flow-card" href="/informes"><span>📊</span><b>Centro de Informes</b><small>Reportes operativos y administrativos</small></a>{% endif %}
-  </div>
-
-  <div class="sc-section-title"><span>⚙</span><div><h2>Control y configuración</h2><small>Maestros, fiscalización y administración del ERP</small></div></div>
-  <div class="sc-flow-grid">
-    {% if has_perm('PACIENTES','VER') %}<a class="sc-flow-card" href="/clientes"><span>▦</span><b>Maestros</b><small>Pacientes, proveedores, productos y configuraciones maestras</small></a>{% endif %}
-    {% if has_perm('FACTURACION','VER') or has_perm('USUARIOS','ADMINISTRAR') %}<a class="sc-flow-card" href="/sifen/monitor"><span>⚡</span><b>SIFEN</b><small>Documentos electrónicos y estados</small></a>{% endif %}
-    {% if has_perm('USUARIOS','VER') or has_perm('CONFIG_SANATORIO','VER') %}<a class="sc-flow-card" href="/config-sanatorio"><span>⚙</span><b>Administración</b><small>Usuarios, permisos y parámetros del sistema</small></a>{% endif %}
-  </div>
-
-  {% if (has_perm('COMPRAS','VER') or has_perm('FINANZAS','VER')) and cuentas_semana %}
-  <div class="card" style="margin-top:22px"><div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap"><div><h2 style="margin:0 0 4px">⏰ Cuentas a pagar de la semana</h2><div class="muted">Las cuentas vencidas permanecen hasta que su saldo quede cancelado.</div></div><div style="display:flex;gap:8px;flex-wrap:wrap"><span class="badge">Vencidas: {{ resumen_cxp.vencidas }}</span><span class="badge">Esta semana: {{ resumen_cxp.semana }}</span><a class="btn" href="/compras/pagos-proveedores">Registrar pago</a></div></div><div style="overflow:auto;margin-top:12px"><table><thead><tr><th>Estado</th><th>Vencimiento</th><th>Proveedor</th><th>Documento</th><th>Moneda</th><th style="text-align:right">Saldo</th><th></th></tr></thead><tbody>{% for r in cuentas_semana %}<tr><td><b>{{ 'VENCIDA' if r.alerta == 'VENCIDA' else 'VENCE ESTA SEMANA' }}</b></td><td>{{ r.fecha_vencimiento }}</td><td>{{ r.proveedor }}</td><td>{{ r.documento }}</td><td>{{ r.moneda or 'PYG' }}</td><td style="text-align:right">{{ r.saldo|money_local(r.moneda or 'PYG') }}</td><td><a class="btn secondary" href="/compras/pagos-proveedores?proveedor_id={{ r.tercero_id if r.tercero_id is defined else '' }}">Pagar</a></td></tr>{% endfor %}</tbody></table></div></div>
-  {% endif %}
-</section>
-{% endblock %}
+{% extends 'base.html' %}{% block title %}Centro de Operaciones{% endblock %}{% block content %}
+<section class="sc-home sc-home-simple"><div class="sc-home-head"><div><h1>Centro de operaciones</h1><p>Seleccione un módulo para acceder a sus procesos, documentos y controles.</p></div><div class="sc-home-badge">Grupo Santa Clara S.A.</div></div>
+<div class="sc-process-grid">
+{% if has_perm('AGENDA','VER') or has_perm('ADMISION','VER') or has_perm('CONSULTORIO','VER') %}<a class="sc-process-card" href="/operacion-clinica"><span>🩺</span><b>Atender pacientes</b><small>Agenda · consulta · urgencia · internación · alta</small></a>{% endif %}
+{% if has_perm('VENTAS','VER') or has_perm('FACTURACION','VER') or has_perm('CAJA','VER') %}<a class="sc-process-card" href="/ventas"><span>🧾</span><b>Vender y cobrar</b><small>Cuenta · factura · SIFEN · cobro · recibo</small></a>{% endif %}
+{% if has_perm('COMPRAS','VER') %}<a class="sc-process-card" href="/compras"><span>🛒</span><b>Comprar y pagar</b><small>Compra · stock · CxP · pago · contabilidad</small></a>{% endif %}
+{% if has_perm('FARMACIA','VER') or has_perm('STOCK','VER') %}<a class="sc-process-card" href="/farmacia-solicitudes"><span>💊</span><b>Gestionar stock</b><small>Pedido · entrega · consumo · costo · inventario</small></a>{% endif %}
+{% if has_perm('FINANZAS','VER') %}<a class="sc-process-card" href="/finanzas"><span>💰</span><b>Gestionar tesorería</b><small>Cajas · bancos · cobros · pagos · conciliación</small></a>{% endif %}
+{% if has_perm('RRHH','VER') %}<a class="sc-process-card" href="/rrhh"><span>👥</span><b>Gestionar personal</b><small>Legajo · asistencia · nómina · pago</small></a>{% endif %}
+{% if has_perm('CONTABILIDAD','VER') %}<a class="sc-process-card" href="/contabilidad/control"><span>📚</span><b>Control contable</b><small>Asientos · libros · impuestos · cierres · centros de costo</small></a>{% endif %}
+{% if has_perm('INFORMES','VER') %}<a class="sc-process-card" href="/informes"><span>📊</span><b>Analizar e informar</b><small>Un solo centro de informes del ERP</small></a>{% endif %}
+</div>
+<div class="sc-trace"><b>Trazabilidad integral</b><div>Operación → Documento → Stock/Costo → Cobro/Pago → Contabilidad → Centro de costo → Fiscal → Informe</div><a class="btn secondary" href="/mapa-sistema">Ver mapa completo del sistema</a></div>
+{% if (has_perm('COMPRAS','VER') or has_perm('FINANZAS','VER')) and cuentas_semana %}<div class="card"><h2>⏰ Pagos próximos</h2><p class="muted">{{resumen_cxp.vencidas}} vencidas · {{resumen_cxp.semana}} vencen esta semana</p><a class="btn" href="/compras/pagos-proveedores">Gestionar pagos</a></div>{% endif %}
+</section>{% endblock %}
