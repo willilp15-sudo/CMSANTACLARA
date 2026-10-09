@@ -339,7 +339,38 @@ CREATE TABLE IF NOT EXISTS enfermeria(id INTEGER PRIMARY KEY,fecha TEXT,admision
  c.commit();c.close()
 def audit(a,d=''):
  c=db();c.execute('insert into auditoria(fecha,usuario,accion,detalle) values(?,?,?,?)',(now(),session.get('user','sistema'),a,d));c.commit();c.close()
+def _validar_partida_doble(c,lineas):
+ from decimal import Decimal, InvalidOperation
+ if len(lineas)<2: raise ValueError('El asiento requiere al menos dos líneas.')
+ debe=Decimal('0');haber=Decimal('0')
+ for linea in lineas:
+  codigo=str(linea[0]).strip()
+  cuenta=c.execute('select codigo,imputable,activa from plan_cuentas where codigo=?',(codigo,)).fetchone()
+  if not cuenta or not int(cuenta['imputable'] or 0) or not int(cuenta['activa'] or 0): raise ValueError('Cuenta inexistente, inactiva o no imputable: '+codigo)
+  try: d=Decimal(str(linea[1]));h=Decimal(str(linea[2]))
+  except (InvalidOperation,TypeError): raise ValueError('Importe contable inválido.')
+  if not d.is_finite() or not h.is_finite() or d<0 or h<0 or (d>0 and h>0) or (d==0 and h==0): raise ValueError('Cada línea requiere Debe o Haber positivo, nunca ambos.')
+  debe+=d;haber+=h
+ if abs(debe-haber)>Decimal('0.01'): raise ValueError('Asiento descuadrado: Debe '+str(debe)+' / Haber '+str(haber))
+ return True
+
 def asiento(c,fecha,concepto,origen_tipo,origen_id,moneda,tc,lineas):
+ # Validación universal: ningún origen puede registrar un asiento descuadrado.
+ # Se conserva la validación de cuentas activas para movimientos manuales;
+ # las cuentas históricas de integraciones se auditan sin alterar sus códigos.
+ if origen_tipo in ('MANUAL','REV_MANUAL'):
+  _validar_partida_doble(c,lineas)
+ else:
+  from decimal import Decimal, InvalidOperation
+  if len(lineas)<2: raise ValueError('Asiento automático sin contrapartida: '+str(origen_tipo))
+  try:
+   d=sum((Decimal(str(x[1])) for x in lineas),Decimal('0'))
+   h=sum((Decimal(str(x[2])) for x in lineas),Decimal('0'))
+  except (InvalidOperation,TypeError,IndexError):raise ValueError('Importe inválido en asiento '+str(origen_tipo))
+  if not d.is_finite() or not h.is_finite() or d<=0 or h<=0 or abs(d-h)>Decimal('0.01'):
+   raise ValueError('Asiento automático descuadrado ('+str(origen_tipo)+'): Debe '+str(d)+' Haber '+str(h))
+  if any(Decimal(str(x[1]))<0 or Decimal(str(x[2]))<0 or (Decimal(str(x[1]))>0 and Decimal(str(x[2]))>0) for x in lineas):
+   raise ValueError('Línea contable inválida en '+str(origen_tipo))
  num=f'ASI-{datetime.datetime.now():%Y%m%d%H%M%S%f}';cur=c.execute('insert into asientos(fecha,numero,concepto,origen_tipo,origen_id,moneda,tipo_cambio) values(?,?,?,?,?,?,?)',(fecha,num,concepto,origen_tipo,origen_id,moneda,tc));aid=cur.lastrowid
  # V13.11.2: cada línea contable conserva centro de costo. Si el proceso no lo informa, se asigna por origen operativo.
  try:_init_centros_costos_v13112(c); ccid=_centro_por_origen(c,origen_tipo,origen_id)
@@ -9572,6 +9603,55 @@ def ventas_registros():
              or coalesce(v.estado,'') like ? or v.fecha like ? order by v.id desc limit 200""",
           (qid,like,like,like,like,like,like,like)).fetchall()
     c.close(); return render_template('sales_registry.html',q=q,rows=rows,buscado=bool(q))
+
+@app.route('/contabilidad/asientos/nuevo',methods=['GET','POST'])
+def asiento_manual_nuevo():
+ if not _admin_total(): return ('Acceso restringido a administración contable',403)
+ c=db()
+ if request.method=='POST':
+  try:
+   fecha=(request.form.get('fecha') or '').strip();datetime.date.fromisoformat(fecha)
+   concepto=(request.form.get('concepto') or '').strip()
+   if len(concepto)<5: raise ValueError('Indique un concepto de al menos cinco caracteres.')
+   cuentas=request.form.getlist('cuenta');debes=request.form.getlist('debe');haberes=request.form.getlist('haber');detalles=request.form.getlist('detalle')
+   if not (len(cuentas)==len(debes)==len(haberes)==len(detalles)):raise ValueError('Líneas incompletas.')
+   lineas=[]
+   for cod,d,h,detalle in zip(cuentas,debes,haberes,detalles):
+    d=float((d or '0').replace(',','.'));h=float((h or '0').replace(',','.'))
+    lineas.append((cod,d,h,d or h,detalle))
+   _validar_partida_doble(c,lineas)
+   aid=asiento(c,fecha,concepto,'MANUAL',None,'PYG',1,lineas)
+   c.execute('insert into auditoria(fecha,usuario,accion,detalle) values(?,?,?,?)',(now(),session.get('user','sistema'),'ASIENTO_MANUAL_CREADO',str(aid)+' '+concepto))
+   c.commit();flash('Asiento manual registrado y confirmado.');return redirect('/contabilidad/asientos/'+str(aid))
+  except Exception as exc:c.rollback();flash('No se guardó el asiento: '+str(exc))
+ cuentas=c.execute('select codigo,nombre from plan_cuentas where imputable=1 and activa=1 order by codigo').fetchall();c.close()
+ return render_template('accounting_manual_new.html',cuentas=cuentas,fecha=datetime.date.today().isoformat())
+
+@app.get('/contabilidad/asientos/<int:aid>')
+def asiento_contable_detalle(aid):
+ c=db();a=c.execute('select * from asientos where id=?',(aid,)).fetchone()
+ if not a:c.close();return ('Asiento no encontrado',404)
+ detalles=c.execute('select d.*,p.nombre cuenta_nombre from asiento_det d left join plan_cuentas p on p.codigo=d.cuenta where d.asiento_id=? order by d.id',(aid,)).fetchall();c.close()
+ return render_template('accounting_entry_detail.html',a=a,detalles=detalles)
+
+@app.post('/contabilidad/asientos/<int:aid>/revertir')
+def asiento_manual_revertir(aid):
+ if not _admin_total():return ('Acceso restringido',403)
+ motivo=(request.form.get('motivo') or '').strip()
+ if len(motivo)<8:flash('Indique un motivo de al menos ocho caracteres.');return redirect('/contabilidad/asientos/'+str(aid))
+ c=db()
+ try:
+  a=c.execute('select * from asientos where id=?',(aid,)).fetchone()
+  if not a or a['origen_tipo']!='MANUAL' or a['estado']!='CONFIRMADO':raise ValueError('Solo se revierten asientos manuales confirmados.')
+  det=c.execute('select * from asiento_det where asiento_id=?',(aid,)).fetchall()
+  lineas=[(d['cuenta'],d['haber_pyg'],d['debe_pyg'],abs(float(d['importe_moneda'] or 0)),'Reversión de '+a['numero']+' / '+motivo) for d in det]
+  nuevo=asiento(c,datetime.date.today().isoformat(),'Reversión '+a['numero']+' / '+motivo,'REV_MANUAL',aid,a['moneda'],a['tipo_cambio'],lineas)
+  c.execute("update asientos set estado='ANULADO' where id=?",(aid,))
+  c.execute('insert into auditoria(fecha,usuario,accion,detalle) values(?,?,?,?)',(now(),session.get('user','sistema'),'ASIENTO_MANUAL_REVERTIDO',f'{aid} -> {nuevo}: {motivo}'))
+  c.commit();flash('Asiento revertido. Contrapartida: '+str(nuevo))
+ except Exception as exc:c.rollback();flash('No se revirtió: '+str(exc))
+ finally:c.close()
+ return redirect('/contabilidad/asientos/'+str(aid))
 
 @app.get('/contabilidad/asientos')
 def contabilidad_asientos():
