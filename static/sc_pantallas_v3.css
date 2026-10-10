@@ -1,0 +1,26 @@
+/* Santa Clara ERP V3: capa visual, sin cambios de lógica ni formularios */
+:root{--sc3-ink:#17364a;--sc3-teal:#0b9b9b;--sc3-line:#dce9ed;--sc3-surface:#fff;--sc3-soft:#f5fafb}
+.erp-workspace{color:var(--sc3-ink)}
+.erp-workspace :is(.panel,.card,.box,.form-card,.table-wrap){border-radius:14px;box-shadow:0 3px 16px rgba(16,65,85,.06);border-color:var(--sc3-line)}
+.erp-workspace :is(h1,h2,h3){letter-spacing:-.025em;color:var(--sc3-ink)}
+.erp-workspace :is(input:not([type=checkbox]):not([type=radio]),select,textarea){border-radius:9px;min-height:38px;border:1px solid #cddfe5;background-color:#fff;max-width:100%}
+.erp-workspace :is(input,select,textarea):focus-visible{outline:2px solid #0b9b9b;outline-offset:1px}
+.erp-workspace label{font-weight:600;color:#355568}
+.erp-workspace :is(button,.btn,input[type=submit]){border-radius:9px;transition:filter .15s,transform .15s}
+.erp-workspace :is(button,.btn,input[type=submit]):hover{filter:brightness(.97)}
+.erp-workspace table{border-collapse:separate;border-spacing:0;width:100%}
+.erp-workspace table thead th{position:sticky;top:0;background:#ecf7f8;color:#24556b;font-size:.82rem;letter-spacing:.015em;z-index:1}
+.erp-workspace table :is(td,th){padding:10px 12px;border-bottom:1px solid #e7eff1}
+.erp-workspace table tbody tr:hover{background:#f5fbfc}
+.sc3-table-scroll{max-width:100%;overflow-x:auto;border:1px solid #e1ecef;border-radius:12px;margin:12px 0}
+.sc3-table-scroll table{margin:0!important}
+.sc3-form-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:8px 0 14px}
+.sc3-form-head h2{margin:0;font-size:1.02rem}
+.sc3-form-hint{color:#607c89;font-size:.8rem}
+.sc3-required-legend{font-size:.78rem;color:#6d8591;margin:8px 0}
+.sc3-page-tools{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.sc3-table-search{width:min(320px,100%);padding:9px 12px!important}
+.sc3-table-count{font-size:.8rem;color:#5a7885}
+.sc3-empty{padding:20px!important;text-align:center;color:#627e8b}
+@media(max-width:760px){.sc3-page-tools{justify-content:stretch}.sc3-table-search{width:100%}.erp-workspace table{min-width:620px}.erp-workspace :is(.panel,.card){padding:12px}}
+@media(prefers-reduced-motion:reduce){.erp-workspace *{transition:none!important}}
