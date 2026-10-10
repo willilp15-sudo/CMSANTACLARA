@@ -1,0 +1,24 @@
+/* V5: presentación de maestros sin alterar atributos name, action ni eventos */
+.sc-v5-screen{--sc-line:#e2eaf0;--sc-accent:#0a9fa7;--sc-ink:#153647;max-width:1560px;margin:0 auto;padding:12px 10px 34px;color:var(--sc-ink)}
+.sc-v5-screen>h1,.sc-v5-screen>h2{font-size:1.65rem;letter-spacing:-.025em;margin:10px 0 20px}
+.sc-v5-screen .card,.sc-v5-screen .panel{background:#fff;border:1px solid var(--sc-line);border-radius:16px;box-shadow:0 3px 18px rgba(24,73,95,.045);padding:20px;margin-bottom:18px}
+.sc-v5-screen .toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 16px}
+.sc-v5-screen .toolbar input{flex:1 1 230px;min-width:180px}
+.sc-v5-screen form:not(.actions form) label{font-size:.84rem;font-weight:600;color:#315464;line-height:1.5}
+.sc-v5-screen form input:not([type=checkbox]):not([type=radio]):not([type=hidden]),.sc-v5-screen form select,.sc-v5-screen form textarea{width:100%;min-height:40px;border:1px solid #d6e3e9;border-radius:9px;background:#fbfdfe;padding:9px 11px;box-sizing:border-box;font-size:.92rem}
+.sc-v5-screen form :is(input,select,textarea):focus{outline:2px solid #9fe4e4;outline-offset:1px;border-color:#0a9fa7}
+.sc-v5-screen form :is(.grid,.compact-grid){display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px 16px}
+.sc-v5-screen form button,.sc-v5-screen .btn{border-radius:9px;transition:filter .15s ease,transform .15s ease}
+.sc-v5-screen form button:hover,.sc-v5-screen .btn:hover{filter:brightness(.97)}
+.sc-v5-screen .table,.sc-v5-screen .panel:has(table){overflow-x:auto}
+.sc-v5-screen table{width:100%;border-collapse:separate;border-spacing:0;font-size:.88rem}
+.sc-v5-screen table th{background:#eff8fa;color:#275464;text-align:left;padding:12px 10px;white-space:nowrap;border-bottom:1px solid #d9e9ed}
+.sc-v5-screen table td{padding:11px 10px;border-bottom:1px solid #edf2f5;vertical-align:middle}
+.sc-v5-screen table tr:hover td{background:#f8fcfd}
+.sc-v5-screen .sc-v5-intro{background:linear-gradient(110deg,#f0fbfb,#fff);border:1px solid #d6edef;border-radius:14px;padding:16px 19px;margin-bottom:18px}
+.sc-v5-screen .sc-v5-intro strong{display:block;font-size:1.13rem;margin-bottom:4px}
+.sc-v5-screen .sc-v5-intro span{font-size:.87rem;color:#5b7783}
+.sc-v5-screen .sc-v5-formtitle{font-size:1.05rem;font-weight:700;color:#214858;margin:4px 0 12px}
+.sc-v5-screen details{border:1px solid #dce8ed;border-radius:12px;padding:12px;margin:12px 0}
+.sc-v5-screen details summary{cursor:pointer;color:#256271}
+@media(max-width:720px){.sc-v5-screen{padding:8px 4px}.sc-v5-screen .card,.sc-v5-screen .panel{padding:14px}.sc-v5-screen form :is(.grid,.compact-grid){grid-template-columns:1fr}}
