@@ -1,0 +1,20 @@
+/* Santa Clara ERP - Refinamiento visual v1. Cambios exclusivamente de presentación. */
+.wiltech-sc-layout{--sc-primary:#087c99;--sc-ink:#183449;--sc-border:#dbe6eb;--sc-focus:#20a6b8;color:var(--sc-ink)}
+.wiltech-sc-layout .wiltech-topbar{box-shadow:0 3px 18px rgba(14,47,68,.10)}
+.wiltech-sc-layout .erp-main-group>summary,.wiltech-sc-layout .erp-home-link{transition:background-color .16s ease,color .16s ease}
+.wiltech-sc-layout .erp-main-group>summary:focus-visible,.wiltech-sc-layout a:focus-visible,.wiltech-sc-layout button:focus-visible,.wiltech-sc-layout input:focus-visible,.wiltech-sc-layout select:focus-visible,.wiltech-sc-layout textarea:focus-visible{outline:3px solid var(--sc-focus);outline-offset:2px}
+.wiltech-sc-layout .erp-mega{border:1px solid var(--sc-border);box-shadow:0 16px 35px rgba(18,45,60,.14);border-radius:12px}
+.wiltech-sc-layout .erp-mega a{border-radius:7px;transition:background-color .14s ease}
+.wiltech-sc-layout .erp-mega a:hover{background:rgba(8,124,153,.09)}
+.wiltech-sc-layout .card,.wiltech-sc-layout .panel{border-radius:12px;border-color:var(--sc-border);box-shadow:0 2px 12px rgba(23,58,76,.045)}
+.wiltech-sc-layout input:not([type=checkbox]):not([type=radio]),.wiltech-sc-layout select,.wiltech-sc-layout textarea{max-width:100%;border-color:#cbdce4}
+.wiltech-sc-layout input:disabled,.wiltech-sc-layout select:disabled,.wiltech-sc-layout button:disabled{opacity:.65;cursor:not-allowed}
+.wiltech-sc-layout .table,.wiltech-sc-layout .table-responsive{max-width:100%;overflow-x:auto}
+.wiltech-sc-layout table{max-width:100%}
+.wiltech-sc-layout table tbody tr:hover{background:rgba(9,125,151,.045)}
+.wiltech-sc-layout th{font-weight:700}
+.wiltech-sc-layout .btn,.wiltech-sc-layout button{transition:filter .15s ease,transform .15s ease}
+.wiltech-sc-layout .btn:hover,.wiltech-sc-layout button:hover{filter:brightness(.96)}
+@media(max-width:760px){.wiltech-sc-layout .erp-workspace{max-width:100%}.wiltech-sc-layout .card,.wiltech-sc-layout .panel{padding:12px}.wiltech-sc-layout .toolbar{flex-wrap:wrap}.wiltech-sc-layout .toolbar input{min-width:0;width:100%}.wiltech-sc-layout .erp-mega{max-height:70vh;overflow-y:auto}}
+@media(prefers-reduced-motion:reduce){.wiltech-sc-layout *{scroll-behavior:auto!important;transition:none!important}}
+@media print{.wiltech-sc-layout .card,.wiltech-sc-layout .panel{box-shadow:none}}

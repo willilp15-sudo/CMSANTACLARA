@@ -89,4 +89,6 @@ document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('.sc-
  function apply(t){document.documentElement.dataset.theme=t;localStorage.setItem('sc-theme',t);const b=document.getElementById('theme-toggle');if(b)b.textContent=labels[t]||labels.comfort}
  document.addEventListener('DOMContentLoaded',()=>{let t=localStorage.getItem('sc-theme')||'comfort';apply(t);const b=document.getElementById('theme-toggle');if(b)b.onclick=()=>{let c=document.documentElement.dataset.theme||'comfort';apply(themes[(themes.indexOf(c)+1)%themes.length])}});
 })();
-</script></body></html>
+</script><link rel="stylesheet" href="{{ url_for('static', filename='sc_refinamiento_v1.css') }}">
+<script defer src="{{ url_for('static', filename='sc_refinamiento_v1.js') }}"></script>
+</body></html>
