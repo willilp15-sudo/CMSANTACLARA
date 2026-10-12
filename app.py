@@ -4559,12 +4559,12 @@ def caja_central_facturacion():
  q=(request.args.get('q') or '').strip();c=db();cuentas=[];consultas=[]
  if q:
   like='%'+q+'%';digits=''.join(ch for ch in q if ch.isdigit())
-  sql="""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where (p.nombre like ? or coalesce(p.documento,'') like ? or coalesce(r.numero,'') like ? or cast(a.id as text)=?) and exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100"""
+  sql="""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where (p.nombre like ? or coalesce(p.documento,'') like ? or coalesce(r.numero,'') like ? or cast(a.id as text)=?) and not exists(select 1 from remisiones_internas rx where rx.admision_id=a.id and rx.estado='ANULADA') and exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100"""
   cuentas=c.execute(sql,(like,like,like,digits or q)).fetchall()
-  consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' and (p.nombre like ? or coalesce(p.documento,'') like ? or cast(k.consulta_id as text)=?) order by k.id desc limit 100""",(like,like,digits or q)).fetchall()
+  consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' and coalesce(co.estado,'') not in ('ANULADA','CANCELADA') and (p.nombre like ? or coalesce(p.documento,'') like ? or cast(k.consulta_id as text)=?) order by k.id desc limit 100""",(like,like,digits or q)).fetchall()
  else:
-  cuentas=c.execute("""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100""").fetchall()
-  consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' order by k.id desc limit 100""").fetchall()
+  cuentas=c.execute("""select distinct a.id admision_id,a.fecha,a.tipo,a.estado,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,coalesce((select sum(cp.total_pyg) from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0),0) saldo_pyg,coalesce(r.numero,'REM-'||a.id) remision from admisiones a join pacientes p on p.id=a.paciente_id left join remisiones_internas r on r.admision_id=a.id and r.estado='PENDIENTE' where not exists(select 1 from remisiones_internas rx where rx.admision_id=a.id and rx.estado='ANULADA') and exists(select 1 from cargos_paciente cp where cp.admision_id=a.id and coalesce(cp.facturado,0)=0) order by a.id desc limit 100""").fetchall()
+  consultas=c.execute("""select k.id pendiente_id,k.consulta_id,k.fecha,k.descripcion,k.importe_pyg,p.id paciente_id,p.nombre paciente,p.documento,p.telefono,p.tercero_id,m.nombre medico from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id left join consultas co on co.id=k.consulta_id left join medicos m on m.id=co.medico_id where k.estado='PENDIENTE' and coalesce(co.estado,'') not in ('ANULADA','CANCELADA') order by k.id desc limit 100""").fetchall()
  c.close();return render_template('cash_account_locator.html',q=q,cuentas=cuentas,consultas=consultas)
 
 @app.get('/ventas/caja-central/<int:aid>')
@@ -4572,6 +4572,8 @@ def caja_central_detalle(aid):
  c=db();a=c.execute('select a.*,p.nombre paciente,p.documento,p.telefono,p.tercero_id from admisiones a join pacientes p on p.id=a.paciente_id where a.id=?',(aid,)).fetchone()
  if not a:c.close();flash('Cuenta no encontrada.');return redirect('/ventas/caja-central')
  items=c.execute('select * from cargos_paciente where admision_id=? and coalesce(facturado,0)=0 order by id',(aid,)).fetchall();total=sum(float(x['total_pyg'] or 0) for x in items);rem=c.execute("select * from remisiones_internas where admision_id=? and estado='PENDIENTE' order by id desc limit 1",(aid,)).fetchone()
+ if c.execute("select 1 from remisiones_internas where admision_id=? and estado='ANULADA' limit 1",(aid,)).fetchone():
+  c.close();flash('Esta remisión fue anulada.');return redirect('/ventas/caja-central')
  if not rem:
   numero='REM-'+str(aid);c.execute('insert or ignore into remisiones_internas(numero,fecha,paciente_id,admision_id,creado_por,creado_en) values(?,?,?,?,?,?)',(numero,a['fecha'],a['paciente_id'],aid,session.get('user'),now()));c.commit();rem=c.execute('select * from remisiones_internas where numero=?',(numero,)).fetchone()
  ap=caja_abierta(c);punto_caja=None
@@ -4583,6 +4585,7 @@ def caja_central_facturar(aid):
  c=db()
  try:
   a=c.execute('select a.*,p.tercero_id,p.nombre paciente from admisiones a join pacientes p on p.id=a.paciente_id where a.id=?',(aid,)).fetchone()
+  if c.execute("select 1 from remisiones_internas where admision_id=? and estado='ANULADA' limit 1",(aid,)).fetchone():raise ValueError('La remisión está anulada y no puede facturarse.')
   if not a or not a['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
   facturado_a=request.form.get('facturado_a_tercero_id');receptor_id=int(facturado_a) if facturado_a else int(a['tercero_id'])
   if not c.execute('select id from terceros where id=?',(receptor_id,)).fetchone():raise ValueError('Seleccione un receptor válido para la factura.')
@@ -4621,6 +4624,7 @@ def caja_central_consultorio_facturar(pid):
  c=db()
  try:
   x=c.execute("select k.*,p.nombre paciente,p.tercero_id from caja_pendientes_consultorio k join pacientes p on p.id=k.paciente_id where k.id=? and k.estado='PENDIENTE'",(pid,)).fetchone()
+  if x and c.execute("select 1 from consultas where id=? and estado in ('ANULADA','CANCELADA')",(x['consulta_id'],)).fetchone():raise ValueError('La consulta está anulada.')
   if not x:raise ValueError('La prestación ya fue procesada o no existe.')
   if not x['tercero_id']:raise ValueError('El paciente debe estar vinculado a un cliente/tercero para facturar.')
   facturado_a=request.form.get('facturado_a_tercero_id');receptor_id=int(facturado_a) if facturado_a else int(x['tercero_id'])
@@ -10044,3 +10048,56 @@ ROUTE_MODULE.update({'operacion_clinica_integral':'ADMISION','administracion_int
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
+
+# V7: anulación trazable de pendientes sin eliminar documentación fiscal.
+def init_v7_anulaciones():
+ c=db()
+ try:
+  c.execute("CREATE TABLE IF NOT EXISTS anulaciones_caja_v7(id INTEGER PRIMARY KEY,origen TEXT NOT NULL,referencia_id INTEGER NOT NULL,motivo TEXT NOT NULL,usuario TEXT NOT NULL,fecha TEXT NOT NULL)")
+  c.commit()
+ finally:c.close()
+init_v7_anulaciones()
+
+@app.post('/ventas/caja-central/remision/<int:aid>/anular')
+def v7_anular_remision(aid):
+ if not user_has('CAJA','EDITAR') and not user_has('CAJA','ANULAR'):return ('Acceso no autorizado',403)
+ motivo=(request.form.get('motivo') or '').strip()
+ if len(motivo)<8:flash('Indique un motivo de al menos 8 caracteres.');return redirect('/ventas/caja-central')
+ c=db()
+ try:
+  c.execute('BEGIN IMMEDIATE')
+  a=c.execute('select id,paciente_id,fecha from admisiones where id=?',(aid,)).fetchone()
+  if not a:raise ValueError('Admisión inexistente.')
+  if c.execute("select 1 from remisiones_internas where admision_id=? and estado in ('FACTURADA','ANULADA')",(aid,)).fetchone():raise ValueError('Remisión facturada o anulada: requiere otro procedimiento.')
+  if c.execute('select 1 from cargos_paciente where admision_id=? and (coalesce(facturado,0)<>0 or factura_venta_id is not null)',(aid,)).fetchone():raise ValueError('Existen cargos procesados. No se permite anulación simple.')
+  rem=c.execute("select id from remisiones_internas where admision_id=? and estado='PENDIENTE'",(aid,)).fetchone()
+  if rem:c.execute("update remisiones_internas set estado='ANULADA',observacion=? where admision_id=? and estado='PENDIENTE'",(motivo,aid))
+  else:c.execute("insert into remisiones_internas(numero,fecha,paciente_id,admision_id,estado,observacion,creado_por,creado_en) values(?,?,?,?,'ANULADA',?,?,?)",('REM-'+str(aid),a['fecha'],a['paciente_id'],aid,motivo,session.get('user'),now()))
+  c.execute('insert into anulaciones_caja_v7(origen,referencia_id,motivo,usuario,fecha) values(?,?,?,?,?)',('REMISION',aid,motivo,session.get('user'),now()))
+  c.commit();flash('Remisión anulada; ya no aparecerá en Caja Central.')
+ except Exception as e:c.rollback();flash('No se pudo anular: '+str(e))
+ finally:c.close()
+ return redirect('/ventas/caja-central')
+
+@app.post('/ventas/caja-central/consultorio/<int:pid>/anular')
+def v7_anular_consulta_pendiente(pid):
+ if not user_has('CAJA','EDITAR') and not user_has('CAJA','ANULAR'):return ('Acceso no autorizado',403)
+ motivo=(request.form.get('motivo') or '').strip()
+ if len(motivo)<8:flash('Indique un motivo de al menos 8 caracteres.');return redirect('/ventas/caja-central')
+ c=db()
+ try:
+  c.execute('BEGIN IMMEDIATE')
+  x=c.execute('select * from caja_pendientes_consultorio where id=?',(pid,)).fetchone()
+  if not x or x['estado']!='PENDIENTE' or x['venta_id']:raise ValueError('Consulta inexistente, ya facturada o anulada.')
+  co=c.execute('select id,estado from consultas where id=?',(x['consulta_id'],)).fetchone()
+  if not co:raise ValueError('No se encontró la consulta vinculada.')
+  if c.execute('select 1 from ventas where origen_consulta_id=?',(co['id'],)).fetchone() if 'origen_consulta_id' in [r[1] for r in c.execute('pragma table_info(ventas)')] else False:raise ValueError('Consulta vinculada a una venta.')
+  c.execute("update caja_pendientes_consultorio set estado='ANULADA',procesado_en=? where id=?",(now(),pid))
+  c.execute("update consultas set estado='ANULADA' where id=?",(co['id'],))
+  c.execute('insert into anulaciones_caja_v7(origen,referencia_id,motivo,usuario,fecha) values(?,?,?,?,?)',('CONSULTA',pid,motivo,session.get('user'),now()))
+  c.commit();flash('Consulta anulada; retirada de Caja Central.')
+ except Exception as e:c.rollback();flash('No se pudo anular: '+str(e))
+ finally:c.close()
+ return redirect('/ventas/caja-central')
+
+ROUTE_MODULE.update({'v7_anular_remision':'CAJA','v7_anular_consulta_pendiente':'CAJA'})
