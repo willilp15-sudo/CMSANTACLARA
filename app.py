@@ -1644,6 +1644,43 @@ def cuenta_paciente(aid):
   if a['aseguradora_id'] and tipo=='SERVICIO':_registrar_visacion(c,a['aseguradora_id'],a['paciente_id'],'CARGO_SERVICIO',cargo_id,request.form.get('medico_id') or a['medico_id'])
   c.commit();return redirect(f'/cuenta-paciente/{aid}')
  cargos=c.execute('select * from cargos_paciente where admision_id=? order by id',(aid,)).fetchall();prods=c.execute('select * from productos').fetchall();serv=c.execute('select * from servicios').fetchall();mons=c.execute('select * from monedas').fetchall();meds=c.execute('select * from medicos where activo=1 order by nombre').fetchall();terceros=c.execute("select id,nombre,ruc from terceros order by nombre").fetchall();visaciones=c.execute("select v.*,m.nombre medico from seguro_visaciones v left join medicos m on m.id=v.medico_id where (v.origen_tipo=? and v.origen_id=?) or (v.origen_tipo='CARGO_SERVICIO' and v.origen_id in (select id from cargos_paciente where admision_id=?)) order by v.id desc",(a['tipo'],aid,aid)).fetchall();total=sum(x['total_pyg'] for x in cargos if not x['facturado']);c.close();return render_template('hospital_account.html',a=a,cargos=cargos,prods=prods,serv=serv,mons=mons,meds=meds,terceros=terceros,visaciones=visaciones,total=total)
+
+# V6: seguimiento de alimentacion durante internacion; independiente de cargos y facturacion.
+@app.route('/internacion/<int:aid>/alimentacion', methods=['GET','POST'])
+def registrar_alimentacion(aid):
+ c=db()
+ a=c.execute("select a.id,a.tipo,a.estado,p.nombre paciente from admisiones a join pacientes p on p.id=a.paciente_id where a.id=?",(aid,)).fetchone()
+ if not a:
+  c.close();flash('Ingreso no encontrado.');return redirect('/admisiones')
+ if a['tipo'] not in ('INTERNACION','QUIROFANO','URGENCIA'):
+  c.close();return ('El seguimiento alimentario requiere un ingreso hospitalario.',400)
+ c.execute("""CREATE TABLE IF NOT EXISTS alimentacion_internacion (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ admision_id INTEGER NOT NULL REFERENCES admisiones(id),
+ fecha TEXT NOT NULL,
+ comida TEXT NOT NULL CHECK(comida IN ('DESAYUNO','ALMUERZO','CENA')),
+ consumo TEXT NOT NULL CHECK(consumo IN ('COMPLETO','PARCIAL','NO_CONSUMIO','AYUNO_INDICADO','NO_OFRECIDO')),
+ porcentaje INTEGER,
+ observacion TEXT NOT NULL DEFAULT '',
+ usuario TEXT NOT NULL,
+ registrado_en TEXT NOT NULL
+ )""")
+ c.execute('CREATE INDEX IF NOT EXISTS idx_alimentacion_ingreso_fecha ON alimentacion_internacion(admision_id,fecha)')
+ if request.method=='POST':
+  from datetime import date
+  fecha=(request.form.get('fecha') or '').strip();comida=(request.form.get('comida') or '').strip();consumo=(request.form.get('consumo') or '').strip()
+  porcentaje_raw=(request.form.get('porcentaje') or '').strip();observacion=(request.form.get('observacion') or '').strip()[:1000]
+  try: porcentaje=int(porcentaje_raw) if porcentaje_raw else None;date.fromisoformat(fecha)
+  except (ValueError,TypeError):c.close();flash('Fecha o porcentaje inválido.');return redirect(f'/internacion/{aid}/alimentacion')
+  if a['estado']!='ABIERTA' or comida not in ('DESAYUNO','ALMUERZO','CENA') or consumo not in ('COMPLETO','PARCIAL','NO_CONSUMIO','AYUNO_INDICADO','NO_OFRECIDO') or (porcentaje is not None and not 0<=porcentaje<=100):
+   c.close();flash('Registro no permitido: revise el estado de ingreso y los valores.');return redirect(f'/internacion/{aid}/alimentacion')
+  if consumo in ('AYUNO_INDICADO','NO_OFRECIDO') and porcentaje is not None:
+   c.close();flash('No indique porcentaje cuando la comida no fue ofrecida o existe ayuno indicado.');return redirect(f'/internacion/{aid}/alimentacion')
+  c.execute('INSERT INTO alimentacion_internacion(admision_id,fecha,comida,consumo,porcentaje,observacion,usuario,registrado_en) VALUES (?,?,?,?,?,?,?,?)',(aid,fecha,comida,consumo,porcentaje,observacion,session['user'],now()))
+  c.commit();c.close();flash('Seguimiento alimentario registrado.');return redirect(f'/internacion/{aid}/alimentacion')
+ registros=c.execute('SELECT * FROM alimentacion_internacion WHERE admision_id=? ORDER BY fecha DESC,id DESC LIMIT 200',(aid,)).fetchall();c.commit();c.close()
+ return render_template('internacion_alimentacion.html',a=a,registros=registros)
+
 @app.post('/facturar-admision/<int:aid>')
 def facturar_admision(aid):
  c=db();_asegurar_campos_ingreso_paciente(c);a=c.execute('select a.*,p.tercero_id paciente_tercero,sg.tercero_id seguro_tercero from admisiones a join pacientes p on p.id=a.paciente_id left join aseguradoras sg on sg.id=a.aseguradora_id where a.id=?',(aid,)).fetchone();items=c.execute('select * from cargos_paciente where admision_id=? and facturado=0',(aid,)).fetchall()
@@ -2092,6 +2129,7 @@ def modular_guard():
   'editar_paciente':('PACIENTES','EDITAR'),'eliminar_paciente':('PACIENTES','ANULAR'),
   'paciente_eliminar':('PACIENTES','ANULAR'),'api_paciente_nuevo':('PACIENTES','CREAR'),'api_buscar_pacientes':('PACIENTES','VER'),'api_buscar_proveedores':('COMPRAS','VER'),
   'hospital_admisiones':('ADMISION','CREAR' if request.method=='POST' else 'VER'),
+  'registrar_alimentacion':('ENFERMERIA','CREAR' if request.method=='POST' else 'VER'),
   'cuenta_paciente':('ADMISION','VER'),'facturar_admision':('FACTURACION','FACTURAR'),
   'alta':('ADMISION','ALTA'),'trasladar_internacion':('ADMISION','TRASLADAR'),
   'hospital_enfermeria':('ENFERMERIA','VER'),'enfermeria_solicitar_farmacia':('ENFERMERIA','SOLICITAR'),
