@@ -10046,8 +10046,6 @@ def mapa_sistema_integral():
 
 ROUTE_MODULE.update({'operacion_clinica_integral':'ADMISION','administracion_integral':'CONFIG_SANATORIO'})
 
-if __name__=='__main__':
-    app.run(host='0.0.0.0',port=5000,debug=False)
 
 # V7: anulación trazable de pendientes sin eliminar documentación fiscal.
 def init_v7_anulaciones():
@@ -10092,6 +10090,7 @@ def v7_anular_consulta_pendiente(pid):
   co=c.execute('select id,estado from consultas where id=?',(x['consulta_id'],)).fetchone()
   if not co:raise ValueError('No se encontró la consulta vinculada.')
   if c.execute('select 1 from ventas where origen_consulta_id=?',(co['id'],)).fetchone() if 'origen_consulta_id' in [r[1] for r in c.execute('pragma table_info(ventas)')] else False:raise ValueError('Consulta vinculada a una venta.')
+  if c.execute("select 1 from caja_pendientes_consultorio where consulta_id=? and id<>? and estado not in ('ANULADA','CANCELADA') limit 1",(co['id'],pid)).fetchone():raise ValueError('La consulta tiene otros pendientes vinculados; revise antes de anularla.')
   c.execute("update caja_pendientes_consultorio set estado='ANULADA',procesado_en=? where id=?",(now(),pid))
   c.execute("update consultas set estado='ANULADA' where id=?",(co['id'],))
   c.execute('insert into anulaciones_caja_v7(origen,referencia_id,motivo,usuario,fecha) values(?,?,?,?,?)',('CONSULTA',pid,motivo,session.get('user'),now()))
@@ -10101,3 +10100,6 @@ def v7_anular_consulta_pendiente(pid):
  return redirect('/ventas/caja-central')
 
 ROUTE_MODULE.update({'v7_anular_remision':'CAJA','v7_anular_consulta_pendiente':'CAJA'})
+
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=5000,debug=False)
