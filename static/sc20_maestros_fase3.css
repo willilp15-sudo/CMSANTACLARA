@@ -1,0 +1,8 @@
+/* Santa Clara ERP 2.0 Fase 3: presentación no invasiva de maestros */
+.sc20-form-tools{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap;margin:0 0 1rem;padding:.75rem 1rem;background:var(--surface,#f4faf9);border:1px solid #dce9e8;border-radius:12px}
+.sc20-form-tools label{font-weight:650;color:#235b63;font-size:.9rem}
+.sc20-form-tools input{flex:1;min-width:190px;max-width:340px;padding:.55rem .7rem;border:1px solid #aacdca;border-radius:9px;background:#fff;color:#163b43}
+.sc20-form-tools button{border:1px solid #a9c9c8;border-radius:9px;background:white;padding:.55rem .8rem;color:#20505a;cursor:pointer}
+.sc20-form-tools .sc20-count{font-size:.85rem;color:#496b71}
+.sc20-hidden-row{display:none!important}
+@media(max-width:650px){.sc20-form-tools{align-items:stretch;flex-direction:column}.sc20-form-tools input{max-width:none;width:100%}}
