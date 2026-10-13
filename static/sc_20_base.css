@@ -1,0 +1,13 @@
+/* Santa Clara ERP 2.0 - Capa visual de compatibilidad. No modifica lógica ni rutas. */
+:root{--sc20-primary:#087d92;--sc20-deep:#14354b;--sc20-soft:#eaf6f8;--sc20-border:#dbe6eb;--sc20-radius:12px}
+body{font-family:Inter,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;line-height:1.5}
+main,.erp-content,.content,.page-content{max-width:100%;min-width:0}
+input:not([type=checkbox]):not([type=radio]),select,textarea{max-width:100%;border-radius:9px;border:1px solid var(--sc20-border);min-height:39px}
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #6ac3d0;outline-offset:2px}
+button,.btn,input[type=submit]{border-radius:9px;transition:filter .12s ease}
+button:hover,.btn:hover{filter:brightness(.96)}
+table{border-collapse:separate;border-spacing:0;width:100%}th,td{padding:9px 12px;border-bottom:1px solid var(--sc20-border);vertical-align:middle}thead th{background:var(--sc20-soft);color:var(--sc20-deep);font-weight:650}
+.card,.panel,.erp-card,fieldset{border-radius:var(--sc20-radius)}
+.erp-main-group summary{cursor:pointer}.erp-main-group[open] summary{color:var(--sc20-primary)}
+@media(max-width:800px){table{display:block;overflow-x:auto;white-space:nowrap}input,select,textarea{font-size:16px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition:none!important}}
