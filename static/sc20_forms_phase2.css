@@ -1,0 +1,15 @@
+/* Santa Clara 2.0 Fase 2 - formularios y accesibilidad */
+:root{--sc20-accent:#078e9c;--sc20-border:#dbe5ea;--sc20-focus:#087c94}
+main form, .content form, .erp-content form{accent-color:var(--sc20-accent)}
+form input:not([type=hidden]):not([type=checkbox]):not([type=radio]),form select,form textarea{max-width:100%;min-height:38px;border-radius:9px;border:1px solid var(--sc20-border);transition:border-color .15s,box-shadow .15s}
+form textarea{min-height:90px}form :is(input,select,textarea,button):focus-visible{outline:2px solid var(--sc20-focus);outline-offset:2px}
+form label{font-weight:600}form button,form input[type=submit]{min-height:38px}
+.sc20-form-tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;margin:8px 0 12px}
+.sc20-required-note{font-size:12px;color:#5a6c75;margin-right:auto}
+.sc20-form-status{font-size:13px;color:#47626c;min-height:1em}
+.sc20-form-status[role=alert]{color:#a52b32}
+.sc20-form-invalid{border-color:#c33!important;box-shadow:0 0 0 2px #c332321a!important}
+.sc20-table-scroll{max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.sc20-table-scroll table{min-width:620px}
+@media(max-width:700px){.sc20-form-tools{justify-content:flex-start}.sc20-table-scroll table{min-width:540px}}
+@media(prefers-reduced-motion:reduce){form input,form select,form textarea{transition:none}}
