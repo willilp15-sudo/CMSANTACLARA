@@ -387,7 +387,7 @@ def tc_fecha(c,fecha,moneda,tc_form):
 
 @app.before_request
 def auth():
- if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw','validar_documento_publico','documento_qr_svg') and 'user' not in session:return redirect('/login')
+ if request.endpoint not in ('login','static','agenda_web_publica','agenda_web_reservar','agenda_web_confirmacion','llamador_api_pendientes','llamador_api_confirmar','llamador_api_ping','asistencia_mobile_login','asistencia_mobile_logout','asistencia_mobile','asistencia_mobile_marcar','asistencia_manifest','asistencia_sw','validar_documento_publico','documento_qr_svg','portal_login','portal_logout','portal_manifest','portal_inicio','rrhh_portal_archivo') and 'user' not in session:return redirect('/login')
 @app.route('/login',methods=['GET','POST'])
 def login():
  if request.method=='POST':
@@ -10103,6 +10103,9 @@ def v7_anular_consulta_pendiente(pid):
  return redirect('/ventas/caja-central')
 
 ROUTE_MODULE.update({'v7_anular_remision':'CAJA','v7_anular_consulta_pendiente':'CAJA'})
+
+from rrhh_portal_integrado import instalar_portal_rrhh
+instalar_portal_rrhh(app,db,_rrhh_perm,password_hash,password_ok,DATA_DIR,now)
 
 if __name__=='__main__':
     app.run(host='0.0.0.0',port=5000,debug=False)
