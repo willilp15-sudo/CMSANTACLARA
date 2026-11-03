@@ -3,7 +3,7 @@ from pathlib import Path
 from flask import request,session,redirect,render_template_string,abort,send_file,Response
 from werkzeug.utils import secure_filename
 
-STYLE='<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#087c8b"><link rel="manifest" href="/portal/manifest.webmanifest"><style>body{font-family:system-ui;background:#f2f7f8;color:#153944;margin:0}header{background:#07556b;color:white;padding:18px 6%}main{max-width:980px;margin:25px auto;padding:0 18px}.card{background:white;border:1px solid #d8e7eb;border-radius:14px;padding:22px;margin:14px 0}input,select,button{padding:11px;margin:5px;border:1px solid #b8cbd0;border-radius:8px}button{background:#087c8b;color:white;cursor:pointer}a{color:#087c8b}table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #e1ecef;text-align:left}.muted{color:#607880}</style>'
+STYLE='<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Mi Portal Santa Clara"><meta name="mobile-web-app-capable" content="yes"><link rel="apple-touch-icon" href="/static/portal-icon-180.png"><link rel="icon" type="image/png" href="/static/portal-icon-192.png"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#087c8b"><link rel="manifest" href="/portal/manifest.webmanifest"><style>body{font-family:system-ui;background:#f2f7f8;color:#153944;margin:0}header{background:#07556b;color:white;padding:14px 6%;display:flex;align-items:center;gap:16px}header img{width:72px;height:60px;object-fit:contain;background:white;border-radius:10px;padding:4px}header b{font-size:clamp(15px,3vw,21px)}main{max-width:980px;margin:25px auto;padding:0 18px}.card{background:white;border:1px solid #d8e7eb;border-radius:14px;padding:22px;margin:14px 0}input,select,button{padding:11px;margin:5px;border:1px solid #b8cbd0;border-radius:8px}button{background:#087c8b;color:white;cursor:pointer}a{color:#087c8b}table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #e1ecef;text-align:left}.muted{color:#607880}</style>'
 
 def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
     base=Path(data_dir)/'rrhh'/'legajos_portal';base.mkdir(parents=True,exist_ok=True)
@@ -19,7 +19,7 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
     def verify():
         if not secrets.compare_digest(request.form.get('csrf',''),token()):abort(403)
     def page(title,body,**ctx):
-        return render_template_string('<!doctype html><html lang="es"><head><meta charset="utf-8"><title>'+title+'</title>'+STYLE+'</head><body><header><b>Centro Médico Santa Clara · '+title+'</b></header><main>'+body+'</main></body></html>',csrf=token(),**ctx)
+        return render_template_string('<!doctype html><html lang="es"><head><meta charset="utf-8"><title>'+title+'</title>'+STYLE+'</head><body><header><img src="/static/logo_santa_clara_cropped.png" alt="Logo Centro Médico Santa Clara"><b>Mi Portal Santa Clara · '+title+'</b></header><main>'+body+'</main></body></html>',csrf=token(),**ctx)
     def admin():
         if not perm('VER'):abort(403)
     def self_id():
@@ -66,7 +66,7 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
             verify();doc=request.form.get('documento','').strip();pw=request.form.get('clave','');c=db();r=c.execute('SELECT e.id,p.clave FROM empleados e JOIN rrhh_portal_cuentas p ON p.empleado_id=e.id WHERE e.documento=? AND e.estado=? AND p.activo=1',(doc,'ACTIVO')).fetchone();c.close()
             if r and check_pw(r['clave'],pw):session.clear();session['rrhh_portal_id']=r['id'];return redirect('/portal')
             err='Credenciales incorrectas'
-        return page('Acceso del funcionario','''<div class="card"><h2>Mi portal</h2><p>{{err}}</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><p><input name="documento" required placeholder="Número de cédula"></p><p><input name="clave" type="password" required placeholder="Contraseña"></p><button>Ingresar</button></form></div>''',err=err)
+        return page('Acceso del funcionario','''<div class="card"><div style="text-align:center"><img src="/static/logo_santa_clara_cropped.png" alt="Centro Médico Santa Clara" style="width:180px;max-width:70%;height:auto"><h2>Mi Portal Santa Clara</h2><p class="muted">Acceso exclusivo para funcionarios</p></div><p>{{err}}</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><p><input name="documento" required placeholder="Número de cédula"></p><p><input name="clave" type="password" required placeholder="Contraseña"></p><button>Ingresar</button></form></div>''',err=err)
     @app.get('/portal')
     def portal_inicio():
         eid=self_id();c=db();e=c.execute('SELECT nombre,cargo,departamento FROM empleados WHERE id=?',(eid,)).fetchone();docs=c.execute('SELECT id,tipo,nombre,creado_en FROM rrhh_portal_docs WHERE empleado_id=? AND visible=1 ORDER BY id DESC',(eid,)).fetchall();c.close()
@@ -85,4 +85,7 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
     @app.get('/portal/salir')
     def portal_logout():session.clear();return redirect('/portal/login')
     @app.get('/portal/manifest.webmanifest')
-    def portal_manifest():return Response('{"name":"Santa Clara · Mi Portal","short_name":"Santa Clara RRHH","start_url":"/portal/login","display":"standalone","background_color":"#f2f7f8","theme_color":"#087c8b"}',mimetype='application/manifest+json')
+    def portal_manifest():
+        manifest={"id":"/portal/","name":"Mi Portal Santa Clara","short_name":"Mi Portal Santa Clara","description":"Portal del Funcionario del Centro Médico Santa Clara","start_url":"/portal/login","scope":"/portal","display":"standalone","background_color":"#f2f7f8","theme_color":"#087c8b","icons":[{"src":"/static/portal-icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"/static/portal-icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}
+        import json
+        return Response(json.dumps(manifest,ensure_ascii=False),mimetype='application/manifest+json',headers={'Cache-Control':'no-cache'})
