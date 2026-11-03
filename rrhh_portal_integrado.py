@@ -13,6 +13,16 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
         c.execute('CREATE TABLE IF NOT EXISTS rrhh_portal_docs (id INTEGER PRIMARY KEY,empleado_id INTEGER NOT NULL,tipo TEXT NOT NULL,nombre TEXT NOT NULL,archivo TEXT NOT NULL,visible INTEGER NOT NULL DEFAULT 0,creado_en TEXT,creado_por TEXT)')
         c.commit();c.close()
     init()
+    def grupo_documento(tipo):
+        t=(tipo or '').upper().strip()
+        if any(k in t for k in ('RECIBO','SALAR','AGUINALDO','LIQUIDACION','LIQUIDACIÓN','ANTICIPO')):return 'recibos'
+        if any(k in t for k in ('CONTRATO','ADENDA','RENOVACION','RENOVACIÓN')):return 'contratos'
+        return 'documentos'
+    def agrupar(rows):
+        result={'recibos':[],'contratos':[],'documentos':[]}
+        for d in rows:result[grupo_documento(d['tipo'])].append(d)
+        return result
+    TABS='''<style>.doc-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.doc-tab{background:#edf5f6;border:1px solid #bcd9df;color:#07556b;padding:12px 16px;border-radius:10px;cursor:pointer;font-weight:600}.doc-tab[aria-selected="true"]{background:#087c8b;color:#fff}.doc-panel[hidden]{display:none}.doc-row{padding:14px 0;border-bottom:1px solid #e1ecef;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.doc-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.doc-actions form{display:inline}.doc-meta{font-size:13px;color:#607880}</style><div class="doc-tabs" role="tablist" aria-label="Categorías de documentos">{% for key,label in [('recibos','Recibos'),('contratos','Contratos'),('documentos','Documentos')] %}<button type="button" class="doc-tab" role="tab" id="tab-{{key}}" aria-controls="panel-{{key}}" aria-selected="{{'true' if loop.first else 'false'}}" onclick="mostrarGrupo('{{key}}')">{{label}} ({{grupos[key]|length}})</button>{% endfor %}</div>{% for key,label in [('recibos','Recibos'),('contratos','Contratos'),('documentos','Documentos')] %}<section class="doc-panel" id="panel-{{key}}" role="tabpanel" aria-labelledby="tab-{{key}}" {% if not loop.first %}hidden{% endif %}><h3>{{label}}</h3>{% for d in grupos[key] %}<div class="doc-row"><div><strong>{{d.nombre}}</strong><div class="doc-meta">{{d.tipo}} · {{d.creado_en or 'Sin fecha'}}</div></div><div class="doc-actions"><a href="/rrhh/portal/archivo/{{d.id}}?ver=1" target="_blank" rel="noopener">Ver</a><a href="/rrhh/portal/archivo/{{d.id}}">Descargar</a>{% if administracion %}<span class="doc-meta">{{'Visible' if d.visible else 'Privado'}}</span>{% if can_edit %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="publicar"><input type="hidden" name="doc_id" value="{{d.id}}"><input type="hidden" name="visible" value="{{'0' if d.visible else '1'}}"><button>{{'Ocultar' if d.visible else 'Publicar'}}</button></form>{% endif %}{% endif %}</div></div>{% else %}<p class="muted">No hay documentos en esta categoría.</p>{% endfor %}</section>{% endfor %}<script>function mostrarGrupo(g){document.querySelectorAll('.doc-tab').forEach(b=>b.setAttribute('aria-selected',String(b.id==='tab-'+g)));document.querySelectorAll('.doc-panel').forEach(p=>p.hidden=p.id!=='panel-'+g)}</script>'''
     def token():
         if not session.get('rrhh_csrf'):session['rrhh_csrf']=secrets.token_urlsafe(32)
         return session['rrhh_csrf']
@@ -58,7 +68,7 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
             elif action=='publicar':c.execute('UPDATE rrhh_portal_docs SET visible=? WHERE id=? AND empleado_id=?',(1 if request.form.get('visible')=='1' else 0,int(request.form.get('doc_id') or 0),eid))
             c.commit();c.close();return redirect(request.path)
         docs=c.execute('SELECT * FROM rrhh_portal_docs WHERE empleado_id=? ORDER BY id DESC',(eid,)).fetchall();acc=c.execute('SELECT activo FROM rrhh_portal_cuentas WHERE empleado_id=?',(eid,)).fetchone();c.close()
-        return page('Legajo digital','''<p><a href="/rrhh/portal">← Funcionarios</a></p><div class="card"><h2>{{e.nombre}}</h2><p>Documento: {{e.documento}} · Portal: {{'Activo' if acc and acc.activo else 'Inactivo'}}</p>{% if can_edit %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="acceso"><input name="clave" type="password" minlength="12" required placeholder="Nueva clave del funcionario"><button>Crear/restablecer acceso</button></form><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="desactivar"><button>Desactivar acceso</button></form>{% endif %}</div><div class="card"><h3>Documentos</h3>{% if can_edit %}<form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="archivo"><select name="tipo"><option>CONTRATO</option><option>RECIBO SALARIAL</option><option>ANTICIPO</option><option>IPS</option><option>VACACIONES</option><option>OTROS</option></select><input type="file" name="archivo" accept=".pdf,.png,.jpg,.jpeg" required><label><input type="checkbox" name="visible">Visible al funcionario</label><button>Cargar documento</button></form>{% endif %}<table><tr><th>Tipo y nombre</th><th>Acceso</th><th>Publicación</th></tr>{% for d in docs %}<tr><td>{{d.tipo}} · {{d.nombre}}</td><td><a href="/rrhh/portal/archivo/{{d.id}}">Descargar</a></td><td>{{'Visible' if d.visible else 'Privado'}}{% if can_edit %}<form method="post" style="display:inline"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="publicar"><input type="hidden" name="doc_id" value="{{d.id}}"><input type="hidden" name="visible" value="{{'0' if d.visible else '1'}}"><button>{{'Ocultar' if d.visible else 'Publicar'}}</button></form>{% endif %}</td></tr>{% endfor %}</table></div>''',e=e,acc=acc,docs=docs,can_edit=perm('ADMINISTRAR'))
+        return page('Legajo digital','''<p><a href="/rrhh/portal">← Funcionarios</a></p><div class="card"><h2>{{e.nombre}}</h2><p>Documento: {{e.documento}} · Portal: {{'Activo' if acc and acc.activo else 'Inactivo'}}</p>{% if can_edit %}<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="acceso"><input name="clave" type="password" minlength="12" required placeholder="Nueva clave del funcionario"><button>Crear/restablecer acceso</button></form><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="desactivar"><button>Desactivar acceso</button></form>{% endif %}</div><div class="card"><h3>Gestión de documentos</h3>{% if can_edit %}<form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="accion" value="archivo"><select name="tipo"><option>RECIBO SALARIAL</option><option>AGUINALDO</option><option>LIQUIDACION</option><option>ANTICIPO</option><option>CONTRATO</option><option>ADENDA</option><option>RENOVACION</option><option>IPS</option><option>VACACIONES</option><option>CERTIFICADO</option><option>OTROS</option></select><input type="file" name="archivo" accept=".pdf,.png,.jpg,.jpeg" required><label><input type="checkbox" name="visible">Visible al funcionario</label><button>Cargar documento</button></form>{% endif %}'''+TABS+'''</div>''',e=e,acc=acc,grupos=agrupar(docs),administracion=True,can_edit=perm('ADMINISTRAR'))
     @app.route('/portal/login',methods=['GET','POST'])
     def portal_login():
         err=''
@@ -67,11 +77,42 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
             if r and check_pw(r['clave'],pw):session.clear();session['rrhh_portal_id']=r['id'];return redirect('/portal')
             err='Credenciales incorrectas'
         return page('Acceso del funcionario','''<div class="card"><div style="text-align:center"><img src="/static/logo_santa_clara_cropped.png" alt="Centro Médico Santa Clara" style="width:180px;max-width:70%;height:auto"><h2>Mi Portal Santa Clara</h2><p class="muted">Acceso exclusivo para funcionarios</p></div><p>{{err}}</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><p><input name="documento" required placeholder="Número de cédula"></p><p><input name="clave" type="password" required placeholder="Contraseña"></p><button>Ingresar</button></form></div>''',err=err)
+    def antiguedad(fecha):
+        try:
+            d=datetime.date.fromisoformat(str(fecha)[:10]);h=datetime.date.today()
+            if d>h:return 'Fecha futura: revisar RRHH'
+            y=h.year-d.year-((h.month,h.day)<(d.month,d.day))
+            m=(h.year-d.year)*12+h.month-d.month-(h.day<d.day)
+            return f'{y} años y {m%12} meses'
+        except (ValueError,TypeError):return 'No disponible'
+    @app.route('/portal/calculadora',methods=['GET','POST'])
+    def portal_calculadora():
+        eid=self_id();c=db();e=c.execute('SELECT nombre,fecha_ingreso,salario_base FROM empleados WHERE id=?',(eid,)).fetchone();c.close()
+        if not e:abort(403)
+        today=datetime.date.today();fecha=e['fecha_ingreso'] or '';salario=e['salario_base'] or 0
+        resultado=None;error=''
+        if request.method=='POST':
+            verify()
+            try:
+                ini=datetime.date.fromisoformat(request.form['ingreso']);fin=datetime.date.fromisoformat(request.form['egreso'])
+                sueldo=float(request.form['salario']);causa=request.form.get('causa','renuncia')
+                if fin<ini or sueldo<=0 or sueldo>100000000000:raise ValueError('Revisá las fechas y el salario.')
+                meses=(fin.year-ini.year)*12+fin.month-ini.month-(fin.day<ini.day)
+                if meses<0:raise ValueError('Antigüedad inválida')
+                anios=meses//12;resto=meses%12
+                # Estimación básica: indemnización por despido injustificado, 15 jornales por año o fracción >=6 meses.
+                dias_ind=15*(anios+(1 if resto>=6 else 0)) if causa=='injustificado' else 0
+                # Preaviso: 30/45/60/90 días según antigüedad, únicamente si corresponde y no se otorgó.
+                dias_pre=(30 if meses<12 else 45 if meses<=60 else 60 if meses<=120 else 90) if causa=='injustificado' and request.form.get('sin_preaviso')=='si' else 0
+                dias_vac=0 if meses<12 else 12 if meses<=60 else 18 if meses<=120 else 30
+                resultado={'meses':meses,'dias_vac':dias_vac,'dias_ind':dias_ind,'dias_pre':dias_pre,'ind':round(sueldo/30*dias_ind),'pre':round(sueldo/30*dias_pre)}
+            except (ValueError,KeyError,OverflowError) as ex:error='Datos inválidos: '+str(ex)
+        return page('Calculadora laboral','''<p><a href="/portal">← Volver a mis documentos</a></p><div class="card"><h2>Calculadora laboral paraguaya</h2><p class="muted">Simulación informativa. No constituye liquidación oficial ni modifica la nómina.</p><form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><p><label>Fecha de ingreso <input type="date" name="ingreso" value="{{ingreso}}" required></label></p><p><label>Fecha de cálculo / egreso <input type="date" name="egreso" value="{{hoy}}" required></label></p><p><label>Salario mensual G. <input type="number" min="1" step="1" name="salario" value="{{salario}}" required></label></p><p><label>Situación <select name="causa"><option value="renuncia">Renuncia voluntaria</option><option value="injustificado">Despido sin causa justificada</option><option value="justificado">Despido con causa justificada</option></select></label></p><p><label><input type="checkbox" name="sin_preaviso" value="si"> No se otorgó el preaviso legal completo (solo despido sin causa)</label></p><button type="submit">Calcular</button></form>{% if error %}<p role="alert">{{error}}</p>{% endif %}{% if resultado %}<h3>Resultado orientativo</h3><p>Antigüedad: {{resultado.meses}} meses completos</p><p>Vacaciones anuales de referencia: {{resultado.dias_vac}} días (no equivale a saldo pendiente)</p><p>Indemnización estimada: G. {{'{:,.0f}'.format(resultado.ind).replace(',','.')}} ({{resultado.dias_ind}} jornales)</p><p>Preaviso estimado: G. {{'{:,.0f}'.format(resultado.pre).replace(',','.')}} ({{resultado.dias_pre}} días)</p><h3>Subtotal: G. {{'{:,.0f}'.format(resultado.ind+resultado.pre).replace(',','.')}}</h3><p class="muted">No incluye aguinaldo proporcional, vacaciones pendientes, salarios adeudados, remuneración variable, estabilidad especial ni otros ajustes. Revisar legislación y circunstancias con RRHH antes de liquidar.</p>{% endif %}</div>''',ingreso=fecha,hoy=today.isoformat(),salario=round(salario),resultado=resultado,error=error)
     @app.get('/portal')
     def portal_inicio():
-        eid=self_id();c=db();e=c.execute('SELECT nombre,cargo,departamento FROM empleados WHERE id=?',(eid,)).fetchone();docs=c.execute('SELECT id,tipo,nombre,creado_en FROM rrhh_portal_docs WHERE empleado_id=? AND visible=1 ORDER BY id DESC',(eid,)).fetchall();c.close()
+        eid=self_id();c=db();e=c.execute('SELECT nombre,cargo,departamento,fecha_ingreso,salario_base FROM empleados WHERE id=?',(eid,)).fetchone();docs=c.execute('SELECT id,tipo,nombre,creado_en FROM rrhh_portal_docs WHERE empleado_id=? AND visible=1 ORDER BY id DESC',(eid,)).fetchall();c.close()
         if not e:abort(403)
-        return page('Mi legajo digital','''<div class="card"><h2>Bienvenido/a, {{e.nombre}}</h2><p>{{e.cargo}} · {{e.departamento}}</p><a href="/portal/salir">Cerrar sesión</a></div><div class="card"><h3>Mis documentos y recibos</h3><table>{% for d in docs %}<tr><td>{{d.tipo}} · {{d.nombre}}</td><td><a href="/rrhh/portal/archivo/{{d.id}}">Descargar</a></td></tr>{% else %}<tr><td>No hay documentos publicados.</td></tr>{% endfor %}</table></div>''',e=e,docs=docs)
+        return page('Mi legajo digital','''<div class="card"><h2>Bienvenido/a, {{e.nombre}}</h2><p>{{e.cargo}} · {{e.departamento}}</p><p><b>Fecha de ingreso:</b> {{e.fecha_ingreso or 'No registrada'}} · <b>Antigüedad:</b> {{antiguedad}}</p><p><a href="/portal/calculadora">Abrir calculadora laboral</a></p><a href="/portal/salir">Cerrar sesión</a></div><div class="card"><h2>Mis documentos</h2><p class="muted">Seleccioná una categoría para consultar tus archivos.</p>'''+TABS+'</div>',e=e,grupos=agrupar(docs),administracion=False,can_edit=False,antiguedad=antiguedad(e['fecha_ingreso']))
     @app.get('/rrhh/portal/archivo/<int:did>')
     def rrhh_portal_archivo(did):
         c=db();r=c.execute('SELECT * FROM rrhh_portal_docs WHERE id=?',(did,)).fetchone();c.close()
@@ -81,7 +122,7 @@ def instalar_portal_rrhh(app,db,perm,hash_pw,check_pw,data_dir,now):
         else:abort(403)
         path=base/Path(r['archivo']).name
         if not path.is_file():abort(404)
-        return send_file(path,as_attachment=True,download_name=r['nombre'])
+        return send_file(path,as_attachment=request.args.get('ver')!='1',download_name=r['nombre'])
     @app.get('/portal/salir')
     def portal_logout():session.clear();return redirect('/portal/login')
     @app.get('/portal/manifest.webmanifest')
